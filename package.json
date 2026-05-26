@@ -1,0 +1,49 @@
+{
+  "name": "lit-chat",
+  "version": "1.0.0",
+  "description": "Electron wrapper for chat.literotica.com",
+  "homepage": "https://chat.literotica.com",
+  "author": {
+    "name": "joeuser12",
+    "email": "joeuser12@users.noreply.github.com"
+  },
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build:linux": "electron-builder --linux",
+    "build:win": "electron-builder --win",
+    "build:mac": "electron-builder --mac",
+    "build:all": "electron-builder --linux --win"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.literotica.chat",
+    "productName": "Lit Chat",
+    "files": [
+      "main.js",
+      "preload.js",
+      "logger.js",
+      "notes.js",
+      "watch.js",
+      "log-viewer.html",
+      "log-viewer-preload.js",
+      "rooms.html",
+      "rooms-preload.js",
+      "user.css"
+    ],
+    "linux": {
+      "target": ["AppImage"],
+      "category": "Network"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.social-networking"
+    }
+  }
+}

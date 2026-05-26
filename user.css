@@ -1,0 +1,185 @@
+/* Custom overrides — injected on every page load. Ctrl+R to preview changes. */
+
+/* ── Main chat container ──────────────────────────────────────────────── */
+#candy {
+  background-color: #101010 !important;
+  color: #ccc !important;
+}
+
+/* ── Message pane ─────────────────────────────────────────────────────── */
+#candy .message-pane-wrapper {
+  background-color: #101010 !important;
+}
+/* Each <li> row has its own background/border — this is the main white area */
+#candy .message-pane li {
+  background: #101010 !important;
+  border-bottom: 1px solid #1a1a1a !important;
+}
+#candy .message-pane li:hover {
+  background: #151515 !important;
+}
+#candy .message-pane li:hover small {
+  background-color: #151515 !important;
+}
+#candy .message-pane small {
+  color: #555 !important;
+}
+#candy .message-pane .label {
+  color: #4a89f3 !important;
+}
+#candy .message-pane div > a {
+  color: #4a89f3 !important;
+}
+#candy .message-pane .infomessage {
+  color: #555 !important;
+}
+
+/* ── Message input bar ────────────────────────────────────────────────── */
+#candy .message-form-wrapper {
+  background-color: #1b1b1b !important;
+  border-top: 1px solid #2f2f2f;
+}
+#candy .message-form .field {
+  background-color: #2f2f2f !important;
+  color: #ccc !important;
+  border: none !important;
+  outline: none !important;
+}
+#candy .message-form .field::placeholder {
+  color: #555 !important;
+}
+
+/* ── User roster ──────────────────────────────────────────────────────── */
+#candy .roster-pane {
+  background-color: #1b1b1b !important;
+  border-left: 1px solid #2f2f2f;
+}
+#candy .roster-pane .label {
+  color: #ccc !important;
+}
+/* li items in the roster are 16x16 icon slots — kill their inherited borders */
+#candy .roster-pane li {
+  border-bottom: none !important;
+}
+#candy .roster-pane .user {
+  border-bottom: 1px solid #252525 !important;
+}
+#candy .roster-pane .user:hover {
+  background-color: #2f2f2f !important;
+}
+
+/* ── Room bar (topic) ─────────────────────────────────────────────────── */
+#candy .roombar {
+  background-color: #1b1b1b !important;
+  border-bottom: 1px solid #2f2f2f !important;
+}
+
+/* ── Toolbar (user count etc.) ────────────────────────────────────────── */
+#candy #chat-toolbar .usercount span {
+  color: #aaa !important;
+}
+#candy #chat-toolbar {
+  color: #aaa !important;
+}
+
+/* ── Active room tab chip ─────────────────────────────────────────────── */
+#candy #activeRoom {
+  background-color: #1b1b1b !important;
+  color: #ccc !important;
+}
+
+/* ── Tab bar ──────────────────────────────────────────────────────────── */
+#candy #chat-tabs:not(.modal-tabs) a {
+  background: #1b1b1b !important;
+  color: #888 !important;
+}
+#candy #chat-tabs:not(.modal-tabs) a:hover {
+  color: #ccc !important;
+}
+#candy #chat-tabs:not(.modal-tabs) .active .label {
+  background-color: #101010 !important;
+  color: #ccc !important;
+}
+#candy #chat-tabs:not(.modal-tabs) .active .transition {
+  background: #101010 !important;
+}
+#candy #chat-tabs:not(.modal-tabs) a.close {
+  color: #555 !important;
+}
+#candy #chat-tabs:not(.modal-tabs) a.close:hover {
+  color: #ccc !important;
+}
+
+/* ── Room selector modal ──────────────────────────────────────────────── */
+#chat-modal-overlay {
+  background-color: rgba(0, 0, 0, 0.85) !important;
+}
+#chat-modal {
+  background: #101010 !important;
+  color: #ccc !important;
+  border: 1px solid #2f2f2f !important;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.8) !important;
+}
+#chat-modal h2,
+#chat-modal-body h2 {
+  color: #ccc !important;
+}
+#chat-modal .close {
+  color: #666 !important;
+}
+#chat-modal .close:hover {
+  color: #ccc !important;
+  background-color: #2f2f2f !important;
+}
+/* Room list items */
+.roomList {
+  background-color: #101010 !important;
+}
+.roomList a {
+  color: #ccc !important;
+}
+.roomList a:hover {
+  color: #4a89f3 !important;
+}
+ul.simplePaginationChatRoomList li {
+  border-bottom: 1px solid #1a1a1a;
+}
+ul.simplePaginationChatRoomList li:hover {
+  background-color: #1b1b1b !important;
+}
+ul.simplePaginationChatRoomList li .roomCounter {
+  background-color: #2f2f2f !important;
+  color: #aaa !important;
+}
+ul.simplePaginationChatRoomList li .roomName,
+ul.simplePaginationChatRoomList li a {
+  color: #ccc !important;
+}
+/* Modal tab list (open DMs / rooms) */
+#chat-modal .modal-tabs li:hover {
+  background-color: #1b1b1b !important;
+}
+#chat-modal .modal-tabs li .label {
+  color: #ccc !important;
+}
+#chat-modal .modal-tabs li .unread,
+#chat-modal .modal-tabs li .close {
+  background-color: #2f2f2f !important;
+  color: #ccc !important;
+}
+/* "Start a New Chat Room" block */
+#newRoomBlock {
+  background-color: #0d0d0d !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.8) !important;
+}
+#newRoomBlock h2 {
+  color: #ccc !important;
+}
+#roomPanelFooter #let_me_input {
+  background-color: #2f2f2f !important;
+  border-color: #3a3a3a !important;
+  color: #ccc !important;
+}
+#roomPanelFooter #let_me_input::placeholder {
+  color: #666 !important;
+}

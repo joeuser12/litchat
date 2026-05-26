@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chat Logs</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #0f0f17;
+      color: #e0e0e8;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    #search {
+      display: flex;
+      gap: 8px;
+      padding: 12px 16px;
+      background: #1a1a2a;
+      border-bottom: 1px solid #2a2a3a;
+      flex-shrink: 0;
+    }
+
+    #username {
+      flex: 1;
+      padding: 8px 12px;
+      background: #0f0f17;
+      border: 1px solid #3a3a4a;
+      border-radius: 8px;
+      color: #e0e0e8;
+      font-size: 14px;
+      outline: none;
+    }
+    #username:focus { border-color: #7c5cbf; }
+
+    #btn {
+      padding: 8px 20px;
+      background: #7c5cbf;
+      border: none;
+      border-radius: 8px;
+      color: white;
+      font-size: 14px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    #btn:hover { background: #9370db; }
+
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .placeholder {
+      color: #555;
+      text-align: center;
+      margin-top: 60px;
+      font-size: 14px;
+    }
+
+    /* Context groups (DM / per-room) */
+    .ctx-group { margin-bottom: 8px; border-radius: 10px; overflow: hidden; border: 1px solid #2a2a3a; }
+
+    .ctx-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      background: #1a1a2a;
+      cursor: pointer;
+      user-select: none;
+    }
+    .ctx-header:hover { background: #222236; }
+    .ctx-badge {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 7px;
+      border-radius: 5px;
+      letter-spacing: 0.03em;
+    }
+    .ctx-badge.dm   { background: #3a1f5a; color: #c09af0; }
+    .ctx-badge.room { background: #1a2f3a; color: #6ab0d4; }
+    .ctx-title { font-size: 13px; color: #ccc; flex: 1; }
+    .ctx-count { font-size: 11px; color: #555; }
+    .ctx-chevron { font-size: 11px; color: #555; transition: transform 0.2s; }
+    .ctx-group.collapsed .ctx-chevron { transform: rotate(-90deg); }
+
+    .ctx-messages {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding: 8px;
+      background: #0f0f17;
+      overflow: hidden;
+    }
+    .ctx-group.collapsed .ctx-messages { display: none; }
+
+    .msg {
+      max-width: 80%;
+      padding: 6px 10px;
+      border-radius: 10px;
+      font-size: 13px;
+      line-height: 1.5;
+      word-break: break-word;
+    }
+    .msg .meta { font-size: 11px; opacity: 0.4; margin-bottom: 2px; }
+    .sent     { align-self: flex-end;   background: #2a1f4a; border-bottom-right-radius: 3px; }
+    .received { align-self: flex-start; background: #1a2a3a; border-bottom-left-radius: 3px; }
+    .sent + .sent         { border-top-right-radius: 3px; }
+    .received + .received { border-top-left-radius: 3px; }
+
+    .date-sep {
+      align-self: center;
+      font-size: 11px;
+      color: #555;
+      padding: 3px 8px;
+      background: #1a1a2a;
+      border-radius: 8px;
+      margin: 4px 0;
+    }
+
+    #notes-panel {
+      display: none;
+      flex-shrink: 0;
+      padding: 10px 16px 12px;
+      background: #1a1a2a;
+      border-top: 1px solid #2a2a3a;
+    }
+    #notes-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 5px;
+    }
+    #notes-panel label {
+      font-size: 11px;
+      color: #888;
+    }
+    #watch-btn {
+      font-size: 11px;
+      padding: 2px 10px;
+      border-radius: 5px;
+      border: 1px solid #3a3a4a;
+      background: #0f0f17;
+      color: #888;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    #watch-btn.watching {
+      border-color: #7c5cbf;
+      color: #c09af0;
+      background: #1f1035;
+    }
+    #watch-btn:hover { border-color: #7c5cbf; color: #c09af0; }
+    #notes-row { display: flex; gap: 8px; align-items: flex-end; }
+    #note-text {
+      flex: 1;
+      padding: 7px 10px;
+      background: #0f0f17;
+      border: 1px solid #3a3a4a;
+      border-radius: 8px;
+      color: #e0e0e8;
+      font-size: 13px;
+      font-family: inherit;
+      resize: none;
+      min-height: 54px;
+      outline: none;
+    }
+    #note-text:focus { border-color: #7c5cbf; }
+    #save-note {
+      padding: 7px 16px;
+      background: #7c5cbf;
+      border: none;
+      border-radius: 8px;
+      color: white;
+      font-size: 13px;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.15s;
+    }
+    #save-note:hover { background: #9370db; }
+    #save-confirm {
+      font-size: 11px;
+      color: #7c5cbf;
+      margin-top: 4px;
+      min-height: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div id="search">
+    <input id="username" type="text" placeholder="Username…" list="suggestions" autocomplete="off" spellcheck="false">
+    <datalist id="suggestions"></datalist>
+    <button id="btn">View</button>
+  </div>
+  <div id="messages">
+    <p class="placeholder">Enter a username to view conversation history.</p>
+  </div>
+
+  <div id="notes-panel">
+    <div id="notes-header">
+      <label id="notes-label">Notes</label>
+      <button id="watch-btn">Watch for presence</button>
+    </div>
+    <div id="notes-row">
+      <textarea id="note-text" placeholder="Private notes about this user…" rows="2"></textarea>
+      <button id="save-note">Save</button>
+    </div>
+    <div id="save-confirm"></div>
+  </div>
+
+  <script>
+    const input   = document.getElementById('username');
+    const btn     = document.getElementById('btn');
+    const msgsEl  = document.getElementById('messages');
+    const datalist = document.getElementById('suggestions');
+
+    // Populate autocomplete
+    for (const u of window.logAPI.listUsers()) {
+      const opt = document.createElement('option');
+      opt.value = u;
+      datalist.appendChild(opt);
+    }
+
+    function esc(s) {
+      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    function fmtTime(iso) {
+      return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    }
+
+    function fmtDate(iso) {
+      return new Date(iso).toLocaleDateString([], { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+    }
+
+    function renderMessages(messages) {
+      const frags = [];
+      let lastDate = null;
+      for (const m of messages) {
+        const date = new Date(m.ts).toDateString();
+        if (date !== lastDate) {
+          frags.push(`<div class="date-sep">${esc(fmtDate(m.ts))}</div>`);
+          lastDate = date;
+        }
+        const side = m.direction === 'sent' ? 'sent' : 'received';
+        const peer = m.direction === 'sent' ? m.toUser : m.fromUser;
+        frags.push(`<div class="msg ${side}">
+          <div class="meta">${esc(peer ?? '')} · ${esc(fmtTime(m.ts))}</div>
+          <div>${esc(m.body)}</div>
+        </div>`);
+      }
+      return frags.join('');
+    }
+
+    function renderGroup({ label, badgeClass, messages, collapsed }) {
+      const colClass = collapsed ? ' collapsed' : '';
+      return `
+        <div class="ctx-group${colClass}">
+          <div class="ctx-header" onclick="this.closest('.ctx-group').classList.toggle('collapsed')">
+            <span class="ctx-badge ${badgeClass}">${esc(badgeClass === 'dm' ? 'DM' : 'ROOM')}</span>
+            <span class="ctx-title">${esc(label)}</span>
+            <span class="ctx-count">${messages.length} message${messages.length !== 1 ? 's' : ''}</span>
+            <span class="ctx-chevron">▼</span>
+          </div>
+          <div class="ctx-messages">${renderMessages(messages)}</div>
+        </div>`;
+    }
+
+    function render(messages) {
+      if (!messages.length) {
+        msgsEl.innerHTML = '<p class="placeholder">No messages found for this user.</p>';
+        return;
+      }
+
+      // Bucket messages by context key: 'dm' or the room name
+      const buckets = new Map();
+      for (const m of messages) {
+        const key = m.room ?? '__dm__';
+        if (!buckets.has(key)) buckets.set(key, []);
+        buckets.get(key).push(m);
+      }
+
+      const frags = [];
+      for (const [key, msgs] of buckets) {
+        if (key === '__dm__') {
+          frags.push(renderGroup({ label: 'Direct Messages', badgeClass: 'dm', messages: msgs, collapsed: false }));
+        } else {
+          frags.push(renderGroup({ label: key, badgeClass: 'room', messages: msgs, collapsed: false }));
+        }
+      }
+
+      msgsEl.innerHTML = frags.join('');
+    }
+
+    function load() {
+      const user = input.value.trim();
+      if (!user) return;
+      render(window.logAPI.queryUser(user));
+      loadNote(user);
+    }
+
+    // Notes panel
+    const notesPanel   = document.getElementById('notes-panel');
+    const notesLabel   = document.getElementById('notes-label');
+    const noteText     = document.getElementById('note-text');
+    const saveNoteBtn  = document.getElementById('save-note');
+    const saveConfirm  = document.getElementById('save-confirm');
+    let currentUser    = null;
+
+    const watchBtn = document.getElementById('watch-btn');
+
+    function updateWatchBtn(username) {
+      const watching = window.logAPI.isWatched(username);
+      watchBtn.textContent = watching ? 'Watching' : 'Watch for presence';
+      watchBtn.classList.toggle('watching', watching);
+    }
+
+    watchBtn.addEventListener('click', () => {
+      if (!currentUser) return;
+      const nowWatching = !window.logAPI.isWatched(currentUser);
+      window.logAPI.setWatched(currentUser, nowWatching);
+      updateWatchBtn(currentUser);
+    });
+
+    function loadNote(username) {
+      currentUser = username;
+      notesLabel.textContent = `Notes for ${username}`;
+      noteText.value = window.logAPI.readNote(username);
+      notesPanel.style.display = 'block';
+      saveConfirm.textContent = '';
+      updateWatchBtn(username);
+    }
+
+    saveNoteBtn.addEventListener('click', () => {
+      if (!currentUser) return;
+      window.logAPI.saveNote(currentUser, noteText.value);
+      saveConfirm.textContent = 'Saved.';
+      setTimeout(() => { saveConfirm.textContent = ''; }, 2000);
+    });
+
+    // Ctrl+Enter saves note without leaving the textarea
+    noteText.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) saveNoteBtn.click();
+    });
+
+    btn.addEventListener('click', load);
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') load(); });
+  </script>
+</body>
+</html>
