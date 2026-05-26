@@ -3,17 +3,26 @@
 /* ── Main chat container ──────────────────────────────────────────────── */
 #candy {
   background-color: #101010 !important;
-  color: #ccc !important;
+  color: #ddd !important;
 }
 
 /* ── Message pane ─────────────────────────────────────────────────────── */
 #candy .message-pane-wrapper {
   background-color: #101010 !important;
 }
+#candy .message-pane,
+#candy .message-pane li,
+#candy .message-pane li span,
+#candy .message-pane li div {
+  font-size: 15px !important;
+}
 /* Each <li> row has its own background/border — this is the main white area */
 #candy .message-pane li {
   background: #101010 !important;
   border-bottom: 1px solid #1a1a1a !important;
+  padding-top: 4px !important;
+  padding-bottom: 4px !important;
+  line-height: 1.55 !important;
 }
 #candy .message-pane li:hover {
   background: #151515 !important;
@@ -22,16 +31,16 @@
   background-color: #151515 !important;
 }
 #candy .message-pane small {
-  color: #555 !important;
+  color: #666 !important;
 }
 #candy .message-pane .label {
-  color: #4a89f3 !important;
+  color: #6aa3ff !important;
 }
 #candy .message-pane div > a {
-  color: #4a89f3 !important;
+  color: #6aa3ff !important;
 }
 #candy .message-pane .infomessage {
-  color: #555 !important;
+  color: #666 !important;
 }
 
 /* ── Message input bar ────────────────────────────────────────────────── */
@@ -182,4 +191,15 @@ ul.simplePaginationChatRoomList li a {
 }
 #roomPanelFooter #let_me_input::placeholder {
   color: #666 !important;
+}
+
+/* ── Custom header nav buttons (Rooms / Logs) ─────────────────────────── */
+#lit-nav-btns a {
+  color: #aaa !important;
+  border-color: #333 !important;
+  background: transparent !important;
+}
+#lit-nav-btns a:hover {
+  color: #fff !important;
+  border-color: #666 !important;
 }

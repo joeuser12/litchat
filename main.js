@@ -23,7 +23,7 @@ function saveSettings() {
 }
 
 const settings = loadSettings();
-let cssKey = null; // key returned by insertCSS; needed to remove it
+let cssKeys = []; // keys returned by insertCSS; needed to remove on dark mode toggle
 
 let watchList = loadWatchList();           // Set of lowercased nicks to watch
 let onlineWatched = new Set();             // currently-online watched nicks this session
@@ -114,22 +114,52 @@ function createWindow() {
 
   win.webContents.on('did-finish-load', async () => {
     if (readyPoll) { clearInterval(readyPoll); readyPoll = null; }
-    cssKey = null;
+    cssKeys = [];
     presenceNotifyReady = false;
     onlineWatched.clear();
 
-    // Seed user.css into userData on first run
     fs.mkdirSync(process.env.LIT_USERDATA, { recursive: true });
-    if (!fs.existsSync(USER_CSS) && fs.existsSync(BUNDLED_CSS)) {
-      fs.copyFileSync(BUNDLED_CSS, USER_CSS);
+
+    // Migrate old seeded user.css (unmodified copy of bundled theme) to a blank
+    // customisation starter so the bundled theme can be injected fresh each update.
+    const OLD_SEED_HEADER = '/* Custom overrides — injected on every page load. Ctrl+R to preview changes. */';
+    const CUSTOM_STARTER  =
+      '/* Lit Chat — personal CSS overrides\n' +
+      '   Add your rules here to customise the theme. Ctrl+R to preview changes. */\n';
+    if (!fs.existsSync(USER_CSS)) {
+      fs.writeFileSync(USER_CSS, CUSTOM_STARTER);
+    } else if (fs.readFileSync(USER_CSS, 'utf8').startsWith(OLD_SEED_HEADER)) {
+      fs.writeFileSync(USER_CSS, CUSTOM_STARTER); // wipe unmodified seed
     }
 
-    if (settings.darkMode && fs.existsSync(USER_CSS)) {
-      cssKey = await win.webContents.insertCSS(fs.readFileSync(USER_CSS, 'utf8'));
+    if (settings.darkMode) {
+      // Always inject the bundled theme first so app updates reach everyone
+      if (fs.existsSync(BUNDLED_CSS))
+        cssKeys.push(await win.webContents.insertCSS(fs.readFileSync(BUNDLED_CSS, 'utf8')));
+      // Then layer the user's personal overrides on top (if any real rules present)
+      if (fs.existsSync(USER_CSS))
+        cssKeys.push(await win.webContents.insertCSS(fs.readFileSync(USER_CSS, 'utf8')));
     }
     if (fs.existsSync(USER_JS)) {
       win.webContents.executeJavaScript(fs.readFileSync(USER_JS, 'utf8')).catch(() => {});
     }
+
+    // Always strip ads and simplify the site header
+    await win.webContents.insertCSS(
+      '#SuperHeader{display:none!important}' +
+      '.clearfix.C_fv>*:not(.C_fw){display:none!important}' +
+      '#BreadCrumbComponent{display:none!important}' +
+      '.s_cH{display:none!important}' +
+      '.a_a{display:none!important}' +
+      '.SAAWidget__container{display:none!important}' +
+      '.C_fw{display:flex!important;align-items:center!important;flex-direction:row!important}' +
+      '#HeaderComponent .container{padding-top:6px!important;padding-bottom:6px!important}' +
+      '.page.clearfix{margin-top:0!important;padding-top:0!important}' +
+      '#headerLogoWrap a{pointer-events:none!important;cursor:default!important}' +
+      '#candy #chat-statusmessage-control.lit-room-hide{opacity:0.35!important}' +
+      '.room-pane.lit-hide-status .infomessage{display:none!important}' +
+      '.room-pane.lit-hide-status .message-pane li:has(.infomessage){display:none!important;border:none!important}'
+    );
 
     // Poll for the chat UI to be ready (login complete + Candy initialised).
     // #roomPanel-tab only exists once the user is logged in and the room bar has rendered.
@@ -150,13 +180,19 @@ function createWindow() {
         for (const [jid] of autoJoins) joinRoom(jid);
         // Suppress presence notifications briefly while the initial roster flood passes
         setTimeout(() => { presenceNotifyReady = true; }, 5000);
+        injectNavButtons();
+        setupPerRoomStatus();
       }
     }, 500);
   });
 
-  // Open external links in the system browser, not a new Electron window
+  // Profile links open in a child window; everything else goes to the system browser
   win.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    if (/^https:\/\/www\.literotica\.com\/authors\//.test(url)) {
+      openProfileWindow(url);
+    } else {
+      shell.openExternal(url);
+    }
     return { action: 'deny' };
   });
 
@@ -217,6 +253,107 @@ async function savePageSource() {
 }
 
 
+function setupPerRoomStatus() {
+  win.webContents.executeJavaScript(`
+    (async function() {
+      var btn = document.getElementById('chat-statusmessage-control');
+      if (!btn || btn.dataset.litPatched) return;
+      btn.dataset.litPatched = '1';
+
+      function getActiveJid() {
+        var t = document.querySelector('#chat-tabs li.active[data-roomjid]');
+        return t ? t.dataset.roomjid : null;
+      }
+
+      function getPaneFor(jid) {
+        return document.querySelector('.room-pane[data-roomjid=' + JSON.stringify(jid) + ']');
+      }
+
+      async function applyPref(pane) {
+        var hidden = await window.litChat.getStatusHidden(pane.dataset.roomjid);
+        pane.classList.toggle('lit-hide-status', hidden);
+      }
+
+      // Apply saved prefs to all already-open room panes
+      var panes = document.querySelectorAll('.room-pane[data-roomjid]');
+      for (var i = 0; i < panes.length; i++) await applyPref(panes[i]);
+
+      // CandyChat controls rendering via an internal flag toggled by its click handler.
+      // The button starts unchecked (hide mode). Fire one real click BEFORE adding our
+      // intercept so CandyChat switches its internal state to "show".
+      if (!btn.classList.contains('checked')) {
+        btn.click();
+      }
+
+      // From here on, capture every click before CandyChat's bubble-phase handler
+      // so CandyChat stays permanently in "show all" mode. Per-room hiding is
+      // handled entirely by the .lit-hide-status CSS class on the room pane.
+      btn.addEventListener('click', async function(e) {
+        e.stopImmediatePropagation();
+        var jid = getActiveJid();
+        if (!jid) return;
+        var nowHidden = !(await window.litChat.getStatusHidden(jid));
+        await window.litChat.setStatusHidden(jid, nowHidden);
+        var pane = getPaneFor(jid);
+        if (pane) pane.classList.toggle('lit-hide-status', nowHidden);
+        // Dim the button icon when this room is hiding status messages
+        btn.classList.toggle('lit-room-hide', nowHidden);
+      }, { capture: true });
+
+      // Sync button dim state when switching rooms
+      var tabList = document.getElementById('chat-tabs');
+      if (tabList) {
+        new MutationObserver(async function() {
+          var jid = getActiveJid();
+          if (!jid) return;
+          var hidden = await window.litChat.getStatusHidden(jid);
+          btn.classList.toggle('lit-room-hide', hidden);
+        }).observe(tabList, { attributes: true, subtree: true, attributeFilter: ['class'] });
+      }
+
+      // Apply pref when a new room pane is added (joining a room mid-session)
+      var roomsEl = document.getElementById('chat-rooms');
+      if (roomsEl) {
+        new MutationObserver(function(muts) {
+          muts.forEach(function(m) {
+            m.addedNodes.forEach(function(n) {
+              if (n.nodeType === 1 && n.dataset && n.dataset.roomjid) applyPref(n);
+            });
+          });
+        }).observe(roomsEl, { childList: true });
+      }
+    })();
+  `).catch(() => {});
+}
+
+function injectNavButtons() {
+  win.webContents.executeJavaScript(`
+    (function() {
+      var fw = document.querySelector('.C_fw');
+      if (!fw || document.getElementById('lit-nav-btns')) return;
+      var wrap = document.createElement('div');
+      wrap.id = 'lit-nav-btns';
+      wrap.style.cssText = 'display:inline-flex;align-items:center;gap:8px;margin-left:16px;';
+      function mkBtn(label) {
+        var a = document.createElement('a');
+        a.textContent = label;
+        a.style.cssText = 'color:#aaa;cursor:pointer;font-size:13px;padding:4px 10px;' +
+                          'border:1px solid #333;border-radius:4px;text-decoration:none;';
+        a.addEventListener('mouseover', function() { a.style.color='#fff'; a.style.borderColor='#666'; });
+        a.addEventListener('mouseout',  function() { a.style.color='#aaa'; a.style.borderColor='#333'; });
+        return a;
+      }
+      var roomsBtn = mkBtn('Rooms');
+      var logsBtn  = mkBtn('Logs');
+      roomsBtn.addEventListener('click', function() { window.litChat && window.litChat.openRooms(); });
+      logsBtn.addEventListener('click',  function() { window.litChat && window.litChat.openLogs(); });
+      wrap.appendChild(roomsBtn);
+      wrap.appendChild(logsBtn);
+      fw.appendChild(wrap);
+    })();
+  `).catch(() => {});
+}
+
 function joinRoom(jid) {
   win.webContents.executeJavaScript(
     `(function(jid){
@@ -253,6 +390,28 @@ function joinRoom(jid) {
        }
      })(${JSON.stringify(jid)})`
   ).catch(() => {});
+}
+
+function openProfileWindow(url) {
+  const w = new BrowserWindow({
+    width: 900,
+    height: 700,
+    parent: win,
+    title: 'User Profile',
+    autoHideMenuBar: true,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      partition: 'persist:litchat', // same session = already logged in
+    },
+  });
+  w.setMenu(null);
+  w.loadURL(url);
+  // Any further links in the profile page go to the system browser
+  w.webContents.setWindowOpenHandler(({ url: u }) => {
+    shell.openExternal(u);
+    return { action: 'deny' };
+  });
 }
 
 function openRoomManager() {
@@ -305,7 +464,17 @@ ipcMain.handle('rooms:list', async () => {
   } catch { return []; }
 });
 
-ipcMain.on('rooms:join', (_e, jid) => { win.show(); win.focus(); joinRoom(jid); });
+ipcMain.on('rooms:join',  (_e, jid) => { win.show(); win.focus(); joinRoom(jid); });
+ipcMain.on('ui:openRooms', () => openRoomManager());
+ipcMain.on('ui:openLogs',  () => openLogViewer());
+
+ipcMain.handle('status:getHidden', (_e, jid) => !!(settings.hideStatusRooms?.[jid]));
+ipcMain.handle('status:setHidden', (_e, jid, hidden) => {
+  if (!settings.hideStatusRooms) settings.hideStatusRooms = {};
+  if (hidden) settings.hideStatusRooms[jid] = true;
+  else delete settings.hideStatusRooms[jid];
+  saveSettings();
+});
 
 ipcMain.handle('rooms:getFavourites', () => settings.favourites ?? {});
 
@@ -328,14 +497,14 @@ async function toggleDarkMode() {
   settings.darkMode = !settings.darkMode;
   saveSettings();
   if (settings.darkMode) {
-    if (fs.existsSync(USER_CSS)) {
-      cssKey = await win.webContents.insertCSS(fs.readFileSync(USER_CSS, 'utf8'));
-    }
+    cssKeys = [];
+    if (fs.existsSync(BUNDLED_CSS))
+      cssKeys.push(await win.webContents.insertCSS(fs.readFileSync(BUNDLED_CSS, 'utf8')));
+    if (fs.existsSync(USER_CSS))
+      cssKeys.push(await win.webContents.insertCSS(fs.readFileSync(USER_CSS, 'utf8')));
   } else {
-    if (cssKey) {
-      await win.webContents.removeInsertedCSS(cssKey).catch(() => {});
-      cssKey = null;
-    }
+    for (const k of cssKeys) await win.webContents.removeInsertedCSS(k).catch(() => {});
+    cssKeys = [];
   }
   createAppMenu(); // rebuild to update checkmark
 }

@@ -67,6 +67,21 @@ contextBridge.exposeInMainWorld('logAPI', {
       .map(m => ({ ...m, fromUser: nickOf(m.from), toUser: nickOf(m.to), room: roomOf(m) }));
   },
 
+  recentDMs(limit = 15) {
+    const msgs = readAllMessages().filter(m => m.type === 'chat');
+    const groups = new Map();
+    for (const m of msgs) {
+      const peer = peerName(m);
+      if (!peer) continue;
+      if (!groups.has(peer)) groups.set(peer, []);
+      groups.get(peer).push({ ...m, fromUser: nickOf(m.from), toUser: nickOf(m.to), room: null });
+    }
+    return [...groups.entries()]
+      .map(([peer, messages]) => ({ peer, messages, lastTs: messages[messages.length - 1].ts }))
+      .sort((a, b) => (a.lastTs < b.lastTs ? 1 : a.lastTs > b.lastTs ? -1 : 0))
+      .slice(0, limit);
+  },
+
   readNote,
   saveNote,
 

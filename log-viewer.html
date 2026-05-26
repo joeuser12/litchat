@@ -352,6 +352,15 @@
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) saveNoteBtn.click();
     });
 
+    // Pre-fill with recent DMs on open
+    (function loadRecent() {
+      const recent = window.logAPI.recentDMs();
+      if (!recent.length) return;
+      msgsEl.innerHTML = recent.map(({ peer, messages }, i) =>
+        renderGroup({ label: peer, badgeClass: 'dm', messages, collapsed: i > 0 })
+      ).join('');
+    })();
+
     btn.addEventListener('click', load);
     input.addEventListener('keydown', e => { if (e.key === 'Enter') load(); });
   </script>

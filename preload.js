@@ -1,3 +1,7 @@
-// Preload runs in the renderer with access to Node APIs before the page loads.
-// Currently empty — login injection is handled from the main process via
-// executeJavaScript so credentials never touch the renderer context.
+const { contextBridge, ipcRenderer } = require('electron');
+contextBridge.exposeInMainWorld('litChat', {
+  openRooms:        () => ipcRenderer.send('ui:openRooms'),
+  openLogs:         () => ipcRenderer.send('ui:openLogs'),
+  getStatusHidden:  (jid) => ipcRenderer.invoke('status:getHidden', jid),
+  setStatusHidden:  (jid, hidden) => ipcRenderer.invoke('status:setHidden', jid, hidden),
+});
