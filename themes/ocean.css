@@ -1,0 +1,223 @@
+/* Ocean — deep navy blues */
+
+/* ── Page / site header background ───────────────────────────────────── */
+body, html {
+  background-color: #0a1628 !important;
+}
+#HeaderComponent {
+  background-color: #112240 !important;
+  border-bottom: 1px solid #1c3a5e !important;
+}
+
+/* ── Main chat container ──────────────────────────────────────────────── */
+#candy {
+  background-color: #0a1628 !important;
+  color: #d0e8ff !important;
+}
+
+/* ── Message pane ─────────────────────────────────────────────────────── */
+#candy .message-pane-wrapper {
+  background-color: #0a1628 !important;
+}
+#candy .message-pane,
+#candy .message-pane li,
+#candy .message-pane li span,
+#candy .message-pane li div {
+  font-size: 15px !important;
+}
+#candy .message-pane li {
+  background: #0a1628 !important;
+  border-bottom: 1px solid #102038 !important;
+  padding-top: 4px !important;
+  padding-bottom: 4px !important;
+  line-height: 1.55 !important;
+}
+#candy .message-pane li:hover {
+  background: #0e1e34 !important;
+}
+#candy .message-pane li:hover small {
+  background-color: #0e1e34 !important;
+}
+#candy .message-pane small {
+  color: #4a6a8a !important;
+}
+#candy .message-pane .label {
+  color: #4fc3f7 !important;
+}
+#candy .message-pane div > a {
+  color: #4fc3f7 !important;
+}
+#candy .message-pane .infomessage {
+  color: #4a6a8a !important;
+}
+
+/* ── Message input bar ────────────────────────────────────────────────── */
+#candy .message-form-wrapper {
+  background-color: #112240 !important;
+  border-top: 1px solid #1c3a5e;
+}
+#candy .message-form .field {
+  background-color: #1a3a5c !important;
+  color: #c0dcf5 !important;
+  border: none !important;
+  outline: none !important;
+}
+#candy .message-form .field::placeholder {
+  color: #3a5a7a !important;
+}
+
+/* ── User roster ──────────────────────────────────────────────────────── */
+#candy .roster-pane {
+  background-color: #112240 !important;
+  border-left: 1px solid #1c3a5e;
+}
+#candy .roster-pane .label {
+  color: #c0dcf5 !important;
+}
+#candy .roster-pane li {
+  border-bottom: none !important;
+}
+#candy .roster-pane .user {
+  border-bottom: 1px solid #162c4a !important;
+}
+#candy .roster-pane .user:hover {
+  background-color: #1a3a5c !important;
+}
+
+/* ── Room bar (topic) ─────────────────────────────────────────────────── */
+#candy .roombar {
+  background-color: #112240 !important;
+  border-bottom: 1px solid #1c3a5e !important;
+}
+
+/* ── Toolbar ──────────────────────────────────────────────────────────── */
+#candy #chat-toolbar .usercount span {
+  color: #6aaccc !important;
+}
+#candy #chat-toolbar {
+  color: #6aaccc !important;
+}
+
+/* ── Active room tab chip ─────────────────────────────────────────────── */
+#candy #activeRoom {
+  background-color: #112240 !important;
+  color: #c0dcf5 !important;
+}
+
+/* ── Tab bar ──────────────────────────────────────────────────────────── */
+#candy #chat-tabs:not(.modal-tabs) a {
+  background: #112240 !important;
+  color: #4a7090 !important;
+}
+#candy #chat-tabs:not(.modal-tabs) a:hover {
+  color: #d0e8ff !important;
+}
+#candy #chat-tabs:not(.modal-tabs) .active .label {
+  background-color: #0a1628 !important;
+  color: #d0e8ff !important;
+}
+#candy #chat-tabs:not(.modal-tabs) .active .transition {
+  background: #0a1628 !important;
+}
+#candy #chat-tabs:not(.modal-tabs) a.close {
+  color: #2a4a6a !important;
+}
+#candy #chat-tabs:not(.modal-tabs) a.close:hover {
+  color: #d0e8ff !important;
+}
+
+/* ── Room selector modal ──────────────────────────────────────────────── */
+#chat-modal-overlay {
+  background-color: rgba(0, 0, 0, 0.85) !important;
+}
+#chat-modal {
+  background: #0a1628 !important;
+  color: #c0dcf5 !important;
+  border: 1px solid #1c3a5e !important;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.8) !important;
+}
+#chat-modal h2,
+#chat-modal-body h2 {
+  color: #d0e8ff !important;
+}
+#chat-modal .close {
+  color: #4a6a8a !important;
+}
+#chat-modal .close:hover {
+  color: #d0e8ff !important;
+  background-color: #1a3a5c !important;
+}
+.roomList {
+  background-color: #0a1628 !important;
+}
+.roomList a {
+  color: #c0dcf5 !important;
+}
+.roomList a:hover {
+  color: #4fc3f7 !important;
+}
+ul.simplePaginationChatRoomList li {
+  border-bottom: 1px solid #102038;
+}
+ul.simplePaginationChatRoomList li:hover {
+  background-color: #112240 !important;
+}
+ul.simplePaginationChatRoomList li .roomCounter {
+  background-color: #1a3a5c !important;
+  color: #6aaccc !important;
+}
+ul.simplePaginationChatRoomList li .roomName,
+ul.simplePaginationChatRoomList li a {
+  color: #c0dcf5 !important;
+}
+#chat-modal .modal-tabs li:hover {
+  background-color: #112240 !important;
+}
+#chat-modal .modal-tabs li .label {
+  color: #c0dcf5 !important;
+}
+#chat-modal .modal-tabs li .unread,
+#chat-modal .modal-tabs li .close {
+  background-color: #1a3a5c !important;
+  color: #c0dcf5 !important;
+}
+#newRoomBlock {
+  background-color: #081422 !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.8) !important;
+}
+#newRoomBlock h2 {
+  color: #d0e8ff !important;
+}
+#roomPanelFooter #let_me_input {
+  background-color: #1a3a5c !important;
+  border-color: #2a4a6a !important;
+  color: #c0dcf5 !important;
+}
+#roomPanelFooter #let_me_input::placeholder {
+  color: #3a5a7a !important;
+}
+
+/* ── Logo ─────────────────────────────────────────────────────────────── */
+#headerLogoWrap,
+#headerLogoWrap a,
+#headerLogoWrap * {
+  background: transparent !important;
+  background-color: transparent !important;
+}
+
+/* ── Scrollbars ───────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: #0a1628; }
+::-webkit-scrollbar-thumb { background: #1a3a5c; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #2a5a7c; }
+
+/* ── Custom header nav buttons ────────────────────────────────────────── */
+#lit-nav-btns a {
+  color: #6aaccc !important;
+  border-color: #1c3a5e !important;
+  background: transparent !important;
+}
+#lit-nav-btns a:hover {
+  color: #d0e8ff !important;
+  border-color: #4fc3f7 !important;
+}

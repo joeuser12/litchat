@@ -50,6 +50,24 @@ function readAllMessages() {
     });
 }
 
+function msgSig(m) {
+  return m.ts + '|' + m.direction + '|' + (m.body || '').slice(0, 80);
+}
+
+function rewriteLogs(keep) {
+  if (!fs.existsSync(LOG_DIR)) return;
+  for (const file of fs.readdirSync(LOG_DIR).filter(f => f.endsWith('.jsonl'))) {
+    const filepath = path.join(LOG_DIR, file);
+    const lines = fs.readFileSync(filepath, 'utf8').split('\n').filter(l => l.trim());
+    const kept = lines.filter(line => {
+      try { return keep(JSON.parse(line)); } catch { return true; }
+    });
+    if (kept.length !== lines.length) {
+      fs.writeFileSync(filepath, kept.length ? kept.join('\n') + '\n' : '');
+    }
+  }
+}
+
 contextBridge.exposeInMainWorld('logAPI', {
   listUsers() {
     const users = new Set();
@@ -64,7 +82,7 @@ contextBridge.exposeInMainWorld('logAPI', {
     const target = username.toLowerCase();
     return readAllMessages()
       .filter(m => peerName(m) === target)
-      .map(m => ({ ...m, fromUser: nickOf(m.from), toUser: nickOf(m.to), room: roomOf(m) }));
+      .map(m => ({ ...m, sig: msgSig(m), fromUser: nickOf(m.from), toUser: nickOf(m.to), room: roomOf(m) }));
   },
 
   recentDMs(limit = 15) {
@@ -74,12 +92,26 @@ contextBridge.exposeInMainWorld('logAPI', {
       const peer = peerName(m);
       if (!peer) continue;
       if (!groups.has(peer)) groups.set(peer, []);
-      groups.get(peer).push({ ...m, fromUser: nickOf(m.from), toUser: nickOf(m.to), room: null });
+      groups.get(peer).push({ ...m, sig: msgSig(m), fromUser: nickOf(m.from), toUser: nickOf(m.to), room: null });
     }
     return [...groups.entries()]
       .map(([peer, messages]) => ({ peer, messages, lastTs: messages[messages.length - 1].ts }))
       .sort((a, b) => (a.lastTs < b.lastTs ? 1 : a.lastTs > b.lastTs ? -1 : 0))
       .slice(0, limit);
+  },
+
+  deleteMessages(sigs) {
+    const sigSet = new Set(sigs);
+    rewriteLogs(m => !sigSet.has(msgSig(m)));
+  },
+
+  deleteGroup(username, room) {
+    const target = username.toLowerCase();
+    rewriteLogs(m => {
+      if (peerName(m) !== target) return true;
+      if (room === null) return roomOf(m) !== null;   // keep non-DMs
+      return roomOf(m) !== room;                       // keep other rooms
+    });
   },
 
   readNote,

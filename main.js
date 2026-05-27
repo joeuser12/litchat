@@ -98,6 +98,12 @@ const THEMES = [
   { id: 'rose-pine',       label: 'Rosé Pine' },
   { id: 'solarized-dark',  label: 'Solarized Dark' },
   { id: 'solarized-light', label: 'Solarized Light' },
+  { id: 'ocean',           label: 'Ocean' },
+  { id: 'rose',            label: 'Rose' },
+  { id: 'forest',          label: 'Forest' },
+  { id: 'amethyst',        label: 'Amethyst' },
+  { id: 'amber',           label: 'Amber' },
+  { id: 'midnight',        label: 'Midnight' },
 ];
 
 function loadSettings() {
@@ -268,6 +274,7 @@ function createWindow() {
     }
 
     const theme = settings.theme || 'dark';
+    const LIGHT_THEMES = new Set(['light', 'solarized-light']);
     if (theme !== 'light') {
       // Always inject the bundled theme first so app updates reach everyone
       const themePath = getThemeFile(theme);
@@ -280,6 +287,15 @@ function createWindow() {
       // Remove the baked-in white background from the logo PNG via canvas pixel manipulation.
       // CSS mix-blend-mode cannot cross GPU compositing layer boundaries so JS is required.
       removeLogoBg();
+    }
+
+    // For dark-background themes, force the logo SVG paths white regardless of
+    // whether the Literotica site itself has dark_theme active (they're independent).
+    if (!LIGHT_THEMES.has(theme)) {
+      cssKeys.push(await win.webContents.insertCSS(
+        '#headerLogo path{fill:white!important}' +
+        '#headerLogo .logo__l,#headerLogo .logo__r{fill:#4a89f3!important}'
+      ));
     }
 
     if (fs.existsSync(USER_JS)) {
@@ -324,6 +340,7 @@ function createWindow() {
         setTimeout(() => { presenceNotifyReady = true; }, 5000);
         injectNavButtons();
         setupPerRoomStatus();
+        injectEmojiPicker();
       }
     }, 500);
   });
@@ -496,6 +513,149 @@ function removeLogoBg() {
       else img.addEventListener('load', process, { once: true });
     })();
   `).catch(() => {});
+}
+
+function injectEmojiPicker() {
+  const CATS = [
+    { icon: '😊', title: 'Faces', emoji: ['😀','😃','😄','😁','😆','😅','🤣','😂','🙂','🙃','😉','😊','😇','😍','🤩','😘','🥰','😋','😛','😜','🤪','😝','🤑','🤗','🤭','🤫','🤔','🤐','🤨','😐','😑','😶','😏','😒','🙄','😬','🤥','😌','😔','😪','🤤','😴','😷','🤒','🤕','🤢','🤮','🤧','🥵','🥶','🥴','😵','🤯','🤠','🥳','😎','🤓','🧐','😕','😟','🙁','☹️','😮','😯','😲','😳','🥺','😦','😧','😨','😰','😥','😢','😭','😱','😖','😣','😞','😓','😩','😫','🥱','😤','😡','😠','🤬','😈','👿','💀','☠️','💩','🤡','👻','👽','👾','🤖'] },
+    { icon: '👋', title: 'Gestures', emoji: ['👋','🤚','🖐️','✋','🖖','👌','🤌','🤏','✌️','🤞','🤟','🤘','🤙','👈','👉','👆','🖕','👇','☝️','👍','👎','✊','👊','🤛','🤜','👏','🙌','👐','🤲','🤝','🙏','✍️','💅','💪','🦾','👀','👁️','👄','💋'] },
+    { icon: '❤️', title: 'Hearts', emoji: ['❤️','🧡','💛','💚','💙','💜','🖤','🤍','🤎','💔','❣️','💕','💞','💓','💗','💖','💘','💝','💟','❤️‍🔥','❤️‍🩹','😍','🥰','😘','💑','👫','💌','💍','💒','🌹','🥀','🌷','💐','🎀','🎁'] },
+    { icon: '🐶', title: 'Animals', emoji: ['🐶','🐱','🐭','🐹','🐰','🦊','🐻','🐼','🐨','🐯','🦁','🐮','🐷','🐸','🐵','🙈','🙉','🙊','🐔','🐧','🐦','🦆','🦅','🦉','🦇','🐺','🐴','🦄','🐝','🦋','🐌','🐞','🐜','🐢','🐍','🦎','🐙','🦑','🦀','🐡','🐠','🐟','🐬','🐳','🦈','🦭','🦓','🐘','🦏','🐪','🦒','🦬','🐎','🐑','🐐','🦌','🐕','🐩','🐈','🦚','🦜','🕊️','🐇','🦝','🦦','🐁','🐿️','🦔','🐾'] },
+    { icon: '🌺', title: 'Nature', emoji: ['💐','🌸','💮','🌹','🥀','🌺','🌻','🌼','🌷','🌱','🌿','☘️','🍀','🍃','🍂','🍁','🌾','🌵','🎄','🌲','🌳','🌴','🌙','☀️','🌤️','⛅','🌦️','🌧️','🌩️','⛈️','🌪️','❄️','☃️','🌈','🌊','🌋','⛰️','🏔️','🏝️','🌅','🌄','⭐','🌟','✨','💫','🌕','🌑','🌠','🌌','🌀','🌬️','💧','💦','🔥'] },
+    { icon: '🍕', title: 'Food & Drink', emoji: ['🍎','🍊','🍋','🍇','🍓','🍒','🍑','🥭','🍍','🥝','🍅','🥦','🥬','🥒','🌽','🥕','🥐','🍞','🥖','🧀','🥚','🍳','🥞','🧇','🥓','🥩','🍗','🍖','🌭','🍔','🍟','🍕','🌮','🌯','🥙','🍱','🍣','🍤','🍜','🍝','🍛','🍚','🍙','🥮','🍡','🧁','🍰','🎂','🍮','🍭','🍬','🍫','🍿','🍩','🍪','🌰','🥜','🍵','☕','🫖','🍺','🍻','🥂','🍷','🥃','🍸','🍹','🧃','🥤','🧋','🍾'] },
+    { icon: '🎉', title: 'Fun & Activities', emoji: ['🎉','🎊','🎈','🎁','🎀','🎆','🎇','🎭','🎨','🎪','🎢','🎡','🎠','🎯','🎳','🎲','🎮','🎰','🃏','🀄','♟️','🎸','🎹','🎻','🥁','🎤','🎧','🎬','🎟️','🏆','🥇','🥈','🥉','🏅','⚽','🏀','🏈','⚾','🎾','🏸','🏊','🏄','🚴','🧘','🤸','💃','🕺','🎄','🎃','🎑','🎐','🧨','🪅','🪆','🪄'] },
+    { icon: '💫', title: 'Symbols', emoji: ['✅','❌','❓','❗','‼️','💯','🔥','⚡','💧','💨','💎','🔮','🧿','💡','🕯️','⚠️','🚫','⛔','🔞','💤','💢','💥','💦','💫','💬','💭','🗯️','✉️','📩','📱','💻','⌚','📷','🔑','🔒','🔔','📢','♥️','♠️','♦️','♣️','🔴','🟠','🟡','🟢','🔵','🟣','⚫','⚪','🏳️','🏴','🚩','🆗','🆙','🆒','🆕','🆓','🔅','🔆','📶'] },
+  ];
+
+  win.webContents.executeJavaScript(`(function() {
+    if (document.getElementById('lit-emoji-picker')) return;
+
+    var CATS = ${JSON.stringify(CATS)};
+
+    var s = document.createElement('style');
+    s.textContent =
+      '#lit-emoji-picker{position:fixed;width:308px;background:#1a1a2a;border:1px solid #3a3a4a;' +
+      'border-radius:10px;box-shadow:0 8px 32px rgba(0,0,0,0.6);z-index:99999;' +
+      'display:none;flex-direction:column;overflow:hidden;font-family:system-ui,sans-serif;}' +
+      '#lit-emoji-tabs{display:flex;background:#0f0f17;padding:4px;gap:2px;flex-shrink:0;}' +
+      '.lit-emoji-tab{flex:1;padding:5px 0;text-align:center;cursor:pointer;border-radius:5px;' +
+      'font-size:15px;opacity:0.5;transition:opacity 0.12s,background 0.12s;}' +
+      '.lit-emoji-tab:hover{opacity:0.85;}' +
+      '.lit-emoji-tab.active{opacity:1;background:#2a2a3a;}' +
+      '#lit-emoji-grid{display:flex;flex-wrap:wrap;padding:6px;gap:1px;' +
+      'max-height:240px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:#2a2a3a #0f0f17;}' +
+      '#lit-emoji-grid::-webkit-scrollbar{width:6px;}' +
+      '#lit-emoji-grid::-webkit-scrollbar-track{background:#0f0f17;}' +
+      '#lit-emoji-grid::-webkit-scrollbar-thumb{background:#2a2a3a;border-radius:3px;}' +
+      '.lit-emoji-item{font-size:20px;width:34px;height:34px;display:flex;align-items:center;' +
+      'justify-content:center;cursor:pointer;border-radius:4px;transition:background 0.1s;line-height:1;}' +
+      '.lit-emoji-item:hover{background:#2a2a3a;}' +
+      '#lit-emoji-trigger{cursor:pointer;width:auto!important;font-size:13px;line-height:16px;opacity:0.7;transition:opacity 0.15s;}' +
+      '#lit-emoji-trigger:hover{opacity:1;}';
+    document.head.appendChild(s);
+
+    var picker = document.createElement('div');
+    picker.id = 'lit-emoji-picker';
+    var tabs = document.createElement('div');
+    tabs.id = 'lit-emoji-tabs';
+    var grid = document.createElement('div');
+    grid.id = 'lit-emoji-grid';
+    picker.appendChild(tabs);
+    picker.appendChild(grid);
+    document.body.appendChild(picker);
+
+    function showCategory(idx) {
+      tabs.querySelectorAll('.lit-emoji-tab').forEach(function(t, i) {
+        t.classList.toggle('active', i === idx);
+      });
+      grid.innerHTML = '';
+      CATS[idx].emoji.forEach(function(e) {
+        var span = document.createElement('span');
+        span.className = 'lit-emoji-item';
+        span.textContent = e;
+        span.title = e;
+        span.addEventListener('click', function(ev) {
+          ev.stopPropagation();
+          insertEmoji(e);
+        });
+        grid.appendChild(span);
+      });
+      grid.scrollTop = 0;
+    }
+
+    CATS.forEach(function(cat, i) {
+      var tab = document.createElement('div');
+      tab.className = 'lit-emoji-tab';
+      tab.textContent = cat.icon;
+      tab.title = cat.title;
+      tab.addEventListener('click', function(e) { e.stopPropagation(); showCategory(i); });
+      tabs.appendChild(tab);
+    });
+
+    showCategory(0);
+
+    function getInput() {
+      var panes = document.querySelectorAll('.room-pane');
+      for (var i = 0; i < panes.length; i++) {
+        if (panes[i].offsetParent !== null) {
+          var inp = panes[i].querySelector('input[name="message"]');
+          if (inp) return inp;
+        }
+      }
+      return document.querySelector('input[name="message"]');
+    }
+
+    function insertEmoji(emoji) {
+      var input = getInput();
+      if (!input) return;
+      var start = input.selectionStart != null ? input.selectionStart : input.value.length;
+      var end   = input.selectionEnd   != null ? input.selectionEnd   : input.value.length;
+      input.value = input.value.slice(0, start) + emoji + input.value.slice(end);
+      var pos = start + emoji.length;
+      input.setSelectionRange(pos, pos);
+      input.focus();
+      input.dispatchEvent(new Event('input',  { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    function togglePicker(triggerEl) {
+      if (picker.style.display === 'flex') { picker.style.display = 'none'; return; }
+      var rect = triggerEl.getBoundingClientRect();
+      var pw = 308, ph = 296;
+      var top  = rect.top - ph - 6;
+      if (top < 8) top = rect.bottom + 6;
+      var left = rect.left + rect.width / 2 - pw / 2;
+      if (left < 8) left = 8;
+      if (left + pw > window.innerWidth - 8) left = window.innerWidth - pw - 8;
+      picker.style.top  = top  + 'px';
+      picker.style.left = left + 'px';
+      picker.style.display = 'flex';
+    }
+
+    function setupTrigger() {
+      if (document.getElementById('lit-emoji-trigger')) return;
+      var orig = document.getElementById('emoticons-icon');
+      if (!orig) return;
+      // Clone to strip the site's own event listeners; inherit all computed styles via same tag+class
+      var el = orig.cloneNode(false);
+      el.id = 'lit-emoji-trigger';
+      el.title = 'Emoji';
+      el.textContent = '🙂';
+      orig.parentNode.replaceChild(el, orig);
+      el.addEventListener('click', function(e) { e.stopPropagation(); togglePicker(el); });
+    }
+
+    document.addEventListener('click', function(e) {
+      if (!picker.contains(e.target) && e.target.id !== 'lit-emoji-trigger') {
+        picker.style.display = 'none';
+      }
+    }, true);
+
+    setupTrigger();
+    new MutationObserver(function() {
+      if (!document.getElementById('lit-emoji-trigger')) setupTrigger();
+    }).observe(document.body, { childList: true, subtree: true });
+  })();`).catch(() => {});
 }
 
 function injectNavButtons() {
@@ -677,6 +837,7 @@ async function setTheme(theme) {
   saveSettings();
   for (const k of cssKeys) await win.webContents.removeInsertedCSS(k).catch(() => {});
   cssKeys = [];
+  const LIGHT_THEMES = new Set(['light', 'solarized-light']);
   if (theme !== 'light') {
     const themePath = getThemeFile(theme);
     if (fs.existsSync(themePath))
@@ -692,6 +853,12 @@ async function setTheme(theme) {
         if (img && img.dataset.litOrigSrc) { img.src = img.dataset.litOrigSrc; img.style.filter = ''; }
       })();
     `).catch(() => {});
+  }
+  if (!LIGHT_THEMES.has(theme)) {
+    cssKeys.push(await win.webContents.insertCSS(
+      '#headerLogo path{fill:white!important}' +
+      '#headerLogo .logo__l,#headerLogo .logo__r{fill:#4a89f3!important}'
+    ));
   }
   // Re-inject nav buttons with updated theme colours
   await win.webContents.executeJavaScript(

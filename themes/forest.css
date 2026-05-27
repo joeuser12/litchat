@@ -1,0 +1,223 @@
+/* Forest — deep greens */
+
+/* ── Page / site header background ───────────────────────────────────── */
+body, html {
+  background-color: #0d1a0e !important;
+}
+#HeaderComponent {
+  background-color: #142414 !important;
+  border-bottom: 1px solid #1e361e !important;
+}
+
+/* ── Main chat container ──────────────────────────────────────────────── */
+#candy {
+  background-color: #0d1a0e !important;
+  color: #d4f0d4 !important;
+}
+
+/* ── Message pane ─────────────────────────────────────────────────────── */
+#candy .message-pane-wrapper {
+  background-color: #0d1a0e !important;
+}
+#candy .message-pane,
+#candy .message-pane li,
+#candy .message-pane li span,
+#candy .message-pane li div {
+  font-size: 15px !important;
+}
+#candy .message-pane li {
+  background: #0d1a0e !important;
+  border-bottom: 1px solid #122012 !important;
+  padding-top: 4px !important;
+  padding-bottom: 4px !important;
+  line-height: 1.55 !important;
+}
+#candy .message-pane li:hover {
+  background: #111e12 !important;
+}
+#candy .message-pane li:hover small {
+  background-color: #111e12 !important;
+}
+#candy .message-pane small {
+  color: #3a6040 !important;
+}
+#candy .message-pane .label {
+  color: #6bbf6b !important;
+}
+#candy .message-pane div > a {
+  color: #6bbf6b !important;
+}
+#candy .message-pane .infomessage {
+  color: #3a6040 !important;
+}
+
+/* ── Message input bar ────────────────────────────────────────────────── */
+#candy .message-form-wrapper {
+  background-color: #142414 !important;
+  border-top: 1px solid #1e361e;
+}
+#candy .message-form .field {
+  background-color: #1e341e !important;
+  color: #c4e8c4 !important;
+  border: none !important;
+  outline: none !important;
+}
+#candy .message-form .field::placeholder {
+  color: #2e5030 !important;
+}
+
+/* ── User roster ──────────────────────────────────────────────────────── */
+#candy .roster-pane {
+  background-color: #142414 !important;
+  border-left: 1px solid #1e361e;
+}
+#candy .roster-pane .label {
+  color: #c4e8c4 !important;
+}
+#candy .roster-pane li {
+  border-bottom: none !important;
+}
+#candy .roster-pane .user {
+  border-bottom: 1px solid #182c18 !important;
+}
+#candy .roster-pane .user:hover {
+  background-color: #1e341e !important;
+}
+
+/* ── Room bar (topic) ─────────────────────────────────────────────────── */
+#candy .roombar {
+  background-color: #142414 !important;
+  border-bottom: 1px solid #1e361e !important;
+}
+
+/* ── Toolbar ──────────────────────────────────────────────────────────── */
+#candy #chat-toolbar .usercount span {
+  color: #5aaa5a !important;
+}
+#candy #chat-toolbar {
+  color: #5aaa5a !important;
+}
+
+/* ── Active room tab chip ─────────────────────────────────────────────── */
+#candy #activeRoom {
+  background-color: #142414 !important;
+  color: #c4e8c4 !important;
+}
+
+/* ── Tab bar ──────────────────────────────────────────────────────────── */
+#candy #chat-tabs:not(.modal-tabs) a {
+  background: #142414 !important;
+  color: #3a6040 !important;
+}
+#candy #chat-tabs:not(.modal-tabs) a:hover {
+  color: #d4f0d4 !important;
+}
+#candy #chat-tabs:not(.modal-tabs) .active .label {
+  background-color: #0d1a0e !important;
+  color: #d4f0d4 !important;
+}
+#candy #chat-tabs:not(.modal-tabs) .active .transition {
+  background: #0d1a0e !important;
+}
+#candy #chat-tabs:not(.modal-tabs) a.close {
+  color: #1e3620 !important;
+}
+#candy #chat-tabs:not(.modal-tabs) a.close:hover {
+  color: #d4f0d4 !important;
+}
+
+/* ── Room selector modal ──────────────────────────────────────────────── */
+#chat-modal-overlay {
+  background-color: rgba(0, 0, 0, 0.85) !important;
+}
+#chat-modal {
+  background: #0d1a0e !important;
+  color: #c4e8c4 !important;
+  border: 1px solid #1e361e !important;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.8) !important;
+}
+#chat-modal h2,
+#chat-modal-body h2 {
+  color: #d4f0d4 !important;
+}
+#chat-modal .close {
+  color: #3a6040 !important;
+}
+#chat-modal .close:hover {
+  color: #d4f0d4 !important;
+  background-color: #1e341e !important;
+}
+.roomList {
+  background-color: #0d1a0e !important;
+}
+.roomList a {
+  color: #c4e8c4 !important;
+}
+.roomList a:hover {
+  color: #6bbf6b !important;
+}
+ul.simplePaginationChatRoomList li {
+  border-bottom: 1px solid #122012;
+}
+ul.simplePaginationChatRoomList li:hover {
+  background-color: #142414 !important;
+}
+ul.simplePaginationChatRoomList li .roomCounter {
+  background-color: #1e341e !important;
+  color: #5aaa5a !important;
+}
+ul.simplePaginationChatRoomList li .roomName,
+ul.simplePaginationChatRoomList li a {
+  color: #c4e8c4 !important;
+}
+#chat-modal .modal-tabs li:hover {
+  background-color: #142414 !important;
+}
+#chat-modal .modal-tabs li .label {
+  color: #c4e8c4 !important;
+}
+#chat-modal .modal-tabs li .unread,
+#chat-modal .modal-tabs li .close {
+  background-color: #1e341e !important;
+  color: #c4e8c4 !important;
+}
+#newRoomBlock {
+  background-color: #0a160b !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.8) !important;
+}
+#newRoomBlock h2 {
+  color: #d4f0d4 !important;
+}
+#roomPanelFooter #let_me_input {
+  background-color: #1e341e !important;
+  border-color: #2a4a2a !important;
+  color: #c4e8c4 !important;
+}
+#roomPanelFooter #let_me_input::placeholder {
+  color: #2e5030 !important;
+}
+
+/* ── Logo ─────────────────────────────────────────────────────────────── */
+#headerLogoWrap,
+#headerLogoWrap a,
+#headerLogoWrap * {
+  background: transparent !important;
+  background-color: transparent !important;
+}
+
+/* ── Scrollbars ───────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: #0d1a0e; }
+::-webkit-scrollbar-thumb { background: #1e341e; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #2a4a2a; }
+
+/* ── Custom header nav buttons ────────────────────────────────────────── */
+#lit-nav-btns a {
+  color: #5aaa5a !important;
+  border-color: #1e361e !important;
+  background: transparent !important;
+}
+#lit-nav-btns a:hover {
+  color: #d4f0d4 !important;
+  border-color: #6bbf6b !important;
+}

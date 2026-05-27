@@ -52,6 +52,7 @@
 
     #messages {
       flex: 1;
+      min-height: 0;
       overflow-y: auto;
       padding: 12px;
       display: flex;
@@ -92,6 +93,13 @@
     .ctx-count { font-size: 11px; color: #555; }
     .ctx-chevron { font-size: 11px; color: #555; transition: transform 0.2s; }
     .ctx-group.collapsed .ctx-chevron { transform: rotate(-90deg); }
+    .ctx-del {
+      font-size: 13px; color: #555; cursor: pointer; padding: 0 4px;
+      border-radius: 3px; line-height: 1; visibility: hidden;
+      transition: color 0.12s, background 0.12s;
+    }
+    .ctx-header:hover .ctx-del { visibility: visible; }
+    .ctx-del:hover { color: #e05; background: rgba(220,0,60,0.12); }
 
     .ctx-messages {
       display: flex;
@@ -111,7 +119,14 @@
       line-height: 1.5;
       word-break: break-word;
     }
-    .msg .meta { font-size: 11px; opacity: 0.4; margin-bottom: 2px; }
+    .msg .meta { font-size: 11px; opacity: 0.4; margin-bottom: 2px; display: flex; align-items: center; gap: 4px; }
+    .msg-del {
+      font-size: 12px; cursor: pointer; opacity: 0; padding: 0 3px;
+      border-radius: 3px; line-height: 1; margin-left: auto; flex-shrink: 0;
+      transition: opacity 0.12s, color 0.12s, background 0.12s;
+    }
+    .msg:hover .msg-del { opacity: 0.6; }
+    .msg-del:hover { opacity: 1 !important; color: #e05; background: rgba(220,0,60,0.15); }
     .sent     { align-self: flex-end;   background: #2a1f4a; border-bottom-right-radius: 3px; }
     .received { align-self: flex-start; background: #1a2a3a; border-bottom-left-radius: 3px; }
     .sent + .sent         { border-top-right-radius: 3px; }
@@ -257,21 +272,25 @@
         const side = m.direction === 'sent' ? 'sent' : 'received';
         const peer = m.direction === 'sent' ? m.toUser : m.fromUser;
         frags.push(`<div class="msg ${side}">
-          <div class="meta">${esc(peer ?? '')} · ${esc(fmtTime(m.ts))}</div>
+          <div class="meta"><span>${esc(peer ?? '')} · ${esc(fmtTime(m.ts))}</span><span class="msg-del" data-sig="${esc(m.sig)}" title="Delete message">×</span></div>
           <div>${esc(unescapeXml(m.body))}</div>
         </div>`);
       }
       return frags.join('');
     }
 
-    function renderGroup({ label, badgeClass, messages, collapsed }) {
+    function renderGroup({ label, badgeClass, messages, collapsed, username, room }) {
       const colClass = collapsed ? ' collapsed' : '';
+      const delData = username
+        ? `data-username="${esc(username)}" data-room="${esc(room ?? '')}"`
+        : '';
       return `
         <div class="ctx-group${colClass}">
-          <div class="ctx-header" onclick="this.closest('.ctx-group').classList.toggle('collapsed')">
+          <div class="ctx-header" onclick="if(!event.target.classList.contains('ctx-del'))this.closest('.ctx-group').classList.toggle('collapsed')">
             <span class="ctx-badge ${badgeClass}">${esc(badgeClass === 'dm' ? 'DM' : 'ROOM')}</span>
             <span class="ctx-title">${esc(label)}</span>
             <span class="ctx-count">${messages.length} message${messages.length !== 1 ? 's' : ''}</span>
+            ${username ? `<span class="ctx-del" ${delData} title="Delete all">×</span>` : ''}
             <span class="ctx-chevron">▼</span>
           </div>
           <div class="ctx-messages">${renderMessages(messages)}</div>
@@ -295,9 +314,9 @@
       const frags = [];
       for (const [key, msgs] of buckets) {
         if (key === '__dm__') {
-          frags.push(renderGroup({ label: 'Direct Messages', badgeClass: 'dm', messages: msgs, collapsed: false }));
+          frags.push(renderGroup({ label: 'Direct Messages', badgeClass: 'dm', messages: msgs, collapsed: false, username: currentUser, room: null }));
         } else {
-          frags.push(renderGroup({ label: key, badgeClass: 'room', messages: msgs, collapsed: false }));
+          frags.push(renderGroup({ label: key, badgeClass: 'room', messages: msgs, collapsed: false, username: currentUser, room: key }));
         }
       }
 
@@ -355,14 +374,43 @@
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) saveNoteBtn.click();
     });
 
+    function reload() {
+      const user = input.value.trim();
+      if (user) load();
+      else loadRecent();
+    }
+
+    // Event delegation for delete buttons
+    msgsEl.addEventListener('click', e => {
+      const msgDel = e.target.closest('.msg-del');
+      if (msgDel) {
+        e.stopPropagation();
+        window.logAPI.deleteMessages([msgDel.dataset.sig]);
+        reload();
+        return;
+      }
+      const grpDel = e.target.closest('.ctx-del');
+      if (grpDel) {
+        e.stopPropagation();
+        const username = grpDel.dataset.username;
+        const room = grpDel.dataset.room || null;
+        const label = room ? `messages in "${room}" with ${username}` : `DMs with ${username}`;
+        if (!confirm(`Delete all ${label}?`)) return;
+        window.logAPI.deleteGroup(username, room);
+        reload();
+      }
+    });
+
     // Pre-fill with recent DMs on open
-    (function loadRecent() {
+    function loadRecent() {
       const recent = window.logAPI.recentDMs();
-      if (!recent.length) return;
+      if (!recent.length) { msgsEl.innerHTML = '<p class="placeholder">No recent messages.</p>'; return; }
       msgsEl.innerHTML = recent.map(({ peer, messages }, i) =>
-        renderGroup({ label: peer, badgeClass: 'dm', messages, collapsed: i > 0 })
+        renderGroup({ label: peer, badgeClass: 'dm', messages, collapsed: i > 0, username: peer, room: null })
       ).join('');
-    })();
+    }
+
+    loadRecent();
 
     btn.addEventListener('click', load);
     input.addEventListener('keydown', e => { if (e.key === 'Enter') load(); });
