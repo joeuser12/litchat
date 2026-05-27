@@ -20,11 +20,11 @@ Built with [Electron](https://www.electronjs.org/) around the site's existing Ca
 
 ## Installation
 
-Download the latest release for your platform from the [Releases](../../releases) page.
+- **Linux** — [download LitChat-linux.AppImage](../../releases/latest/download/LitChat-linux.AppImage), make it executable, and run it
+- **Windows** — [download LitChat-windows.exe](../../releases/latest/download/LitChat-windows.exe) and run the installer
+- **macOS** — [download LitChat-mac.dmg](../../releases/latest/download/LitChat-mac.dmg), open it and drag to Applications
 
-- **Linux** — download the `.AppImage`, make it executable, and run it
-- **Windows** — run the `.exe` installer
-- **macOS** — open the `.dmg` and drag to Applications
+All releases: [Releases page](../../releases)
 
 ## Profiles
 

@@ -40,14 +40,17 @@
     ],
     "linux": {
       "target": ["AppImage"],
-      "category": "Network"
+      "category": "Network",
+      "artifactName": "LitChat-linux.AppImage"
     },
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "artifactName": "LitChat-windows.exe"
     },
     "mac": {
       "target": "dmg",
-      "category": "public.app-category.social-networking"
+      "category": "public.app-category.social-networking",
+      "artifactName": "LitChat-mac.dmg"
     }
   }
 }
