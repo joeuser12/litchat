@@ -190,6 +190,34 @@ let logWin  = null;
 let roomWin = null;
 let readyPoll = null;
 
+function savedWindowBounds() {
+  const ws = settings.windowState;
+  if (!ws?.width) return {};
+  const { screen } = require('electron');
+  const visible = screen.getAllDisplays().some(d =>
+    ws.x < d.bounds.x + d.bounds.width  && ws.x + ws.width  > d.bounds.x &&
+    ws.y < d.bounds.y + d.bounds.height && ws.y + ws.height > d.bounds.y
+  );
+  return visible ? { width: ws.width, height: ws.height, x: ws.x, y: ws.y } : {};
+}
+
+let winStateSaveTimer = null;
+function scheduleWindowStateSave() {
+  clearTimeout(winStateSaveTimer);
+  winStateSaveTimer = setTimeout(() => {
+    if (!win || win.isDestroyed()) return;
+    const maximized = win.isMaximized();
+    if (!maximized) {
+      const [x, y] = win.getPosition();
+      const [width, height] = win.getSize();
+      settings.windowState = { width, height, x, y, maximized: false };
+    } else {
+      settings.windowState = { ...(settings.windowState || {}), maximized: true };
+    }
+    saveSettings();
+  }, 500);
+}
+
 function createWindow() {
   const profileName  = profiles.list[ACTIVE_ID]?.name || 'Default';
   const multiProfile = Object.keys(profiles.list).length > 1;
@@ -197,16 +225,23 @@ function createWindow() {
   win = new BrowserWindow({
     width: 1280,
     height: 900,
+    ...savedWindowBounds(),
     title: multiProfile ? `Lit Chat — ${profileName}` : 'Lit Chat',
     icon: path.join(__dirname, 'build', 'icon.png'),
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
       preload: path.join(__dirname, 'preload.js'),
-      // Persist session across restarts so BOSH reconnects with existing cookies
       partition: PARTITION,
+      spellcheck: true,
     },
   });
+
+  if (settings.windowState?.maximized) win.maximize();
+
+  win.on('resize', scheduleWindowStateSave);
+  win.on('move',   scheduleWindowStateSave);
+  win.on('close',  scheduleWindowStateSave);
 
   win.loadURL(CHAT_URL);
 
@@ -215,6 +250,8 @@ function createWindow() {
     cssKeys = [];
     presenceNotifyReady = false;
     onlineWatched.clear();
+
+    if (settings.zoomLevel) win.webContents.setZoomLevel(settings.zoomLevel);
 
     fs.mkdirSync(PROFILE_DIR, { recursive: true });
 
@@ -421,6 +458,13 @@ function setupPerRoomStatus() {
       }
     })();
   `).catch(() => {});
+}
+
+function adjustZoom(delta) {
+  const level = delta === 0 ? 0 : win.webContents.getZoomLevel() + delta;
+  win.webContents.setZoomLevel(level);
+  settings.zoomLevel = win.webContents.getZoomLevel();
+  saveSettings();
 }
 
 function removeLogoBg() {
@@ -806,7 +850,13 @@ function createAppMenu() {
         { label: 'Theme',   submenu: themeItems },
         { label: 'Profile', submenu: profileItems },
         { type: 'separator' },
-        { label: 'Reload', accelerator: 'CmdOrCtrl+R', click: () => win.webContents.reload(), visible: false },
+        { label: 'Reload',    accelerator: 'CmdOrCtrl+R',      click: () => win.webContents.reload(), visible: false },
+        { label: 'ZoomIn',    accelerator: 'CmdOrCtrl+shift+=', click: () => adjustZoom(+0.5), visible: false },
+        { label: 'ZoomIn2',   accelerator: 'CmdOrCtrl+=',       click: () => adjustZoom(+0.5), visible: false },
+        { label: 'ZoomOut',   accelerator: 'CmdOrCtrl+shift+-', click: () => adjustZoom(-0.5), visible: false },
+        { label: 'ZoomOut2',  accelerator: 'CmdOrCtrl+-',       click: () => adjustZoom(-0.5), visible: false },
+        { label: 'ZoomReset', accelerator: 'CmdOrCtrl+shift+0', click: () => adjustZoom(0),    visible: false },
+        { label: 'ZoomReset2',accelerator: 'CmdOrCtrl+0',       click: () => adjustZoom(0),    visible: false },
         { label: 'Save Page Source', click: () => savePageSource() },
         { label: 'DevTools', click: () => win.webContents.openDevTools() },
         { type: 'separator' },
@@ -870,6 +920,25 @@ app.whenReady().then(() => {
   createAppMenu();
   createWindow();
   attachBOSHLogger();
+
+  if (app.isPackaged) {
+    const { autoUpdater } = require('electron-updater');
+    autoUpdater.autoDownload = true;
+    autoUpdater.on('update-downloaded', () => {
+      const { dialog } = require('electron');
+      dialog.showMessageBox(win, {
+        type: 'info',
+        buttons: ['Restart & Update', 'Later'],
+        defaultId: 0, cancelId: 1,
+        title: 'Update Ready',
+        message: 'A new version of Lit Chat has been downloaded.',
+        detail: 'Restart now to apply the update.',
+      }).then(({ response }) => {
+        if (response === 0) autoUpdater.quitAndInstall();
+      });
+    });
+    autoUpdater.checkForUpdates().catch(() => {});
+  }
 
   // Silence the site's broken favicon requests
   const { session } = require('electron');

@@ -1,6 +1,6 @@
 {
   "name": "lit-chat",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Electron wrapper for chat.literotica.com",
   "homepage": "https://chat.literotica.com",
   "author": {
@@ -22,7 +22,11 @@
   "build": {
     "appId": "com.literotica.chat",
     "productName": "Lit Chat",
-    "publish": null,
+    "publish": {
+      "provider": "github",
+      "owner": "joeuser12",
+      "repo": "litchat"
+    },
     "files": [
       "main.js",
       "preload.js",
@@ -39,7 +43,9 @@
       "build/icon.png"
     ],
     "linux": {
-      "target": ["AppImage"],
+      "target": [
+        "AppImage"
+      ],
       "category": "Network",
       "artifactName": "LitChat-linux.AppImage"
     },
@@ -52,5 +58,8 @@
       "category": "public.app-category.social-networking",
       "artifactName": "LitChat-mac.dmg"
     }
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.3"
   }
 }
