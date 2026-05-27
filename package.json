@@ -1,6 +1,6 @@
 {
   "name": "lit-chat",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Electron wrapper for chat.literotica.com",
   "homepage": "https://chat.literotica.com",
   "author": {
@@ -33,7 +33,10 @@
       "log-viewer-preload.js",
       "rooms.html",
       "rooms-preload.js",
-      "user.css"
+      "profile-dialog.html",
+      "profile-dialog-preload.js",
+      "themes/",
+      "build/icon.png"
     ],
     "linux": {
       "target": ["AppImage"],

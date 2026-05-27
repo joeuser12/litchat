@@ -1,0 +1,226 @@
+/* Nord — https://nordtheme.com
+   Polar Night: #2E3440 #3B4252 #434C5E #4C566A
+   Snow Storm:  #D8DEE9 #E5E9F0 #ECEFF4
+   Frost:       #8FBCBB #88C0D0 #81A1C1 #5E81AC          */
+
+/* ── Page / site header background ───────────────────────────────────── */
+body, html {
+  background-color: #2E3440 !important;
+}
+#HeaderComponent {
+  background-color: #3B4252 !important;
+  border-bottom: 1px solid #434C5E !important;
+}
+
+/* ── Main chat container ──────────────────────────────────────────────── */
+#candy {
+  background-color: #2E3440 !important;
+  color: #ECEFF4 !important;
+}
+
+/* ── Message pane ─────────────────────────────────────────────────────── */
+#candy .message-pane-wrapper {
+  background-color: #2E3440 !important;
+}
+#candy .message-pane,
+#candy .message-pane li,
+#candy .message-pane li span,
+#candy .message-pane li div {
+  font-size: 15px !important;
+}
+#candy .message-pane li {
+  background: #2E3440 !important;
+  border-bottom: 1px solid #353D4D !important;
+  padding-top: 4px !important;
+  padding-bottom: 4px !important;
+  line-height: 1.55 !important;
+}
+#candy .message-pane li:hover {
+  background: #323C4E !important;
+}
+#candy .message-pane li:hover small {
+  background-color: #323C4E !important;
+}
+#candy .message-pane small {
+  color: #7B8899 !important;
+}
+#candy .message-pane .label {
+  color: #88C0D0 !important;
+}
+#candy .message-pane div > a {
+  color: #81A1C1 !important;
+}
+#candy .message-pane .infomessage {
+  color: #7B8899 !important;
+}
+
+/* ── Message input bar ────────────────────────────────────────────────── */
+#candy .message-form-wrapper {
+  background-color: #3B4252 !important;
+  border-top: 1px solid #434C5E;
+}
+#candy .message-form .field {
+  background-color: #434C5E !important;
+  color: #D8DEE9 !important;
+  border: none !important;
+  outline: none !important;
+}
+#candy .message-form .field::placeholder {
+  color: #5C6A7E !important;
+}
+
+/* ── User roster ──────────────────────────────────────────────────────── */
+#candy .roster-pane {
+  background-color: #3B4252 !important;
+  border-left: 1px solid #434C5E;
+}
+#candy .roster-pane .label {
+  color: #D8DEE9 !important;
+}
+#candy .roster-pane li {
+  border-bottom: none !important;
+}
+#candy .roster-pane .user {
+  border-bottom: 1px solid #404B5C !important;
+}
+#candy .roster-pane .user:hover {
+  background-color: #434C5E !important;
+}
+
+/* ── Room bar (topic) ─────────────────────────────────────────────────── */
+#candy .roombar {
+  background-color: #3B4252 !important;
+  border-bottom: 1px solid #434C5E !important;
+}
+
+/* ── Toolbar ──────────────────────────────────────────────────────────── */
+#candy #chat-toolbar .usercount span {
+  color: #81A1C1 !important;
+}
+#candy #chat-toolbar {
+  color: #81A1C1 !important;
+}
+
+/* ── Active room tab chip ─────────────────────────────────────────────── */
+#candy #activeRoom {
+  background-color: #3B4252 !important;
+  color: #D8DEE9 !important;
+}
+
+/* ── Tab bar ──────────────────────────────────────────────────────────── */
+#candy #chat-tabs:not(.modal-tabs) a {
+  background: #3B4252 !important;
+  color: #7B8899 !important;
+}
+#candy #chat-tabs:not(.modal-tabs) a:hover {
+  color: #ECEFF4 !important;
+}
+#candy #chat-tabs:not(.modal-tabs) .active .label {
+  background-color: #2E3440 !important;
+  color: #ECEFF4 !important;
+}
+#candy #chat-tabs:not(.modal-tabs) .active .transition {
+  background: #2E3440 !important;
+}
+#candy #chat-tabs:not(.modal-tabs) a.close {
+  color: #4C566A !important;
+}
+#candy #chat-tabs:not(.modal-tabs) a.close:hover {
+  color: #ECEFF4 !important;
+}
+
+/* ── Room selector modal ──────────────────────────────────────────────── */
+#chat-modal-overlay {
+  background-color: rgba(0, 0, 0, 0.85) !important;
+}
+#chat-modal {
+  background: #2E3440 !important;
+  color: #D8DEE9 !important;
+  border: 1px solid #434C5E !important;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.8) !important;
+}
+#chat-modal h2,
+#chat-modal-body h2 {
+  color: #ECEFF4 !important;
+}
+#chat-modal .close {
+  color: #7B8899 !important;
+}
+#chat-modal .close:hover {
+  color: #ECEFF4 !important;
+  background-color: #434C5E !important;
+}
+.roomList {
+  background-color: #2E3440 !important;
+}
+.roomList a {
+  color: #D8DEE9 !important;
+}
+.roomList a:hover {
+  color: #88C0D0 !important;
+}
+ul.simplePaginationChatRoomList li {
+  border-bottom: 1px solid #353D4D;
+}
+ul.simplePaginationChatRoomList li:hover {
+  background-color: #3B4252 !important;
+}
+ul.simplePaginationChatRoomList li .roomCounter {
+  background-color: #434C5E !important;
+  color: #81A1C1 !important;
+}
+ul.simplePaginationChatRoomList li .roomName,
+ul.simplePaginationChatRoomList li a {
+  color: #D8DEE9 !important;
+}
+#chat-modal .modal-tabs li:hover {
+  background-color: #3B4252 !important;
+}
+#chat-modal .modal-tabs li .label {
+  color: #D8DEE9 !important;
+}
+#chat-modal .modal-tabs li .unread,
+#chat-modal .modal-tabs li .close {
+  background-color: #434C5E !important;
+  color: #D8DEE9 !important;
+}
+#newRoomBlock {
+  background-color: #29313F !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.8) !important;
+}
+#newRoomBlock h2 {
+  color: #ECEFF4 !important;
+}
+#roomPanelFooter #let_me_input {
+  background-color: #434C5E !important;
+  border-color: #4C566A !important;
+  color: #D8DEE9 !important;
+}
+#roomPanelFooter #let_me_input::placeholder {
+  color: #5C6A7E !important;
+}
+
+/* ── Logo ─────────────────────────────────────────────────────────────── */
+#headerLogoWrap,
+#headerLogoWrap a,
+#headerLogoWrap * {
+  background: transparent !important;
+  background-color: transparent !important;
+}
+
+/* ── Scrollbars ───────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: #2E3440; }
+::-webkit-scrollbar-thumb { background: #4C566A; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #5C6A7E; }
+
+/* ── Custom header nav buttons ────────────────────────────────────────── */
+#lit-nav-btns a {
+  color: #88C0D0 !important;
+  border-color: #434C5E !important;
+  background: transparent !important;
+}
+#lit-nav-btns a:hover {
+  color: #ECEFF4 !important;
+  border-color: #88C0D0 !important;
+}

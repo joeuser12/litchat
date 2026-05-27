@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>New Profile</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, sans-serif; padding: 20px; background: #1e1e1e; color: #ccc; }
+label { display: block; margin-bottom: 8px; font-size: 14px; }
+input {
+  width: 100%; padding: 8px 10px;
+  background: #2f2f2f; border: 1px solid #444; color: #ccc;
+  border-radius: 4px; font-size: 14px; outline: none;
+}
+input:focus { border-color: #5a8fc5; }
+.btns { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+button { padding: 6px 18px; border-radius: 4px; border: none; cursor: pointer; font-size: 13px; }
+.ok     { background: #4a89f3; color: #fff; }
+.ok:hover { background: #5a99ff; }
+.cancel { background: #333; color: #ccc; }
+.cancel:hover { background: #444; }
+</style>
+</head>
+<body>
+<label for="name">Profile name:</label>
+<input id="name" placeholder="e.g. Work" autofocus>
+<div class="btns">
+  <button class="cancel" id="cancel">Cancel</button>
+  <button class="ok" id="ok">Create</button>
+</div>
+<script>
+const nameEl = document.getElementById('name');
+
+document.getElementById('ok').addEventListener('click', submit);
+document.getElementById('cancel').addEventListener('click', () => window.profileDialog.cancel());
+nameEl.addEventListener('keydown', e => {
+  if (e.key === 'Enter') submit();
+  if (e.key === 'Escape') window.profileDialog.cancel();
+});
+
+function submit() {
+  const name = nameEl.value.trim();
+  if (!name) { nameEl.focus(); return; }
+  window.profileDialog.submit(name);
+  window.close();
+}
+</script>
+</body>
+</html>

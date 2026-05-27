@@ -1,0 +1,226 @@
+/* Tokyo Night (Night variant) — https://github.com/enkia/tokyo-night-vscode-theme
+   bg: #1A1B26  bg_dark: #16161E  panel: #1F2335
+   fg: #A9B1D6  blue: #7AA2F7  cyan: #7DCFFF
+   comment: #565F89  border: #292E42                        */
+
+/* ── Page / site header background ───────────────────────────────────── */
+body, html {
+  background-color: #1A1B26 !important;
+}
+#HeaderComponent {
+  background-color: #1F2335 !important;
+  border-bottom: 1px solid #292E42 !important;
+}
+
+/* ── Main chat container ──────────────────────────────────────────────── */
+#candy {
+  background-color: #1A1B26 !important;
+  color: #A9B1D6 !important;
+}
+
+/* ── Message pane ─────────────────────────────────────────────────────── */
+#candy .message-pane-wrapper {
+  background-color: #1A1B26 !important;
+}
+#candy .message-pane,
+#candy .message-pane li,
+#candy .message-pane li span,
+#candy .message-pane li div {
+  font-size: 15px !important;
+}
+#candy .message-pane li {
+  background: #1A1B26 !important;
+  border-bottom: 1px solid #1E1F2E !important;
+  padding-top: 4px !important;
+  padding-bottom: 4px !important;
+  line-height: 1.55 !important;
+}
+#candy .message-pane li:hover {
+  background: #1E2030 !important;
+}
+#candy .message-pane li:hover small {
+  background-color: #1E2030 !important;
+}
+#candy .message-pane small {
+  color: #565F89 !important;
+}
+#candy .message-pane .label {
+  color: #7AA2F7 !important;
+}
+#candy .message-pane div > a {
+  color: #7DCFFF !important;
+}
+#candy .message-pane .infomessage {
+  color: #565F89 !important;
+}
+
+/* ── Message input bar ────────────────────────────────────────────────── */
+#candy .message-form-wrapper {
+  background-color: #1F2335 !important;
+  border-top: 1px solid #292E42;
+}
+#candy .message-form .field {
+  background-color: #292E42 !important;
+  color: #A9B1D6 !important;
+  border: none !important;
+  outline: none !important;
+}
+#candy .message-form .field::placeholder {
+  color: #3B4261 !important;
+}
+
+/* ── User roster ──────────────────────────────────────────────────────── */
+#candy .roster-pane {
+  background-color: #1F2335 !important;
+  border-left: 1px solid #292E42;
+}
+#candy .roster-pane .label {
+  color: #A9B1D6 !important;
+}
+#candy .roster-pane li {
+  border-bottom: none !important;
+}
+#candy .roster-pane .user {
+  border-bottom: 1px solid #242840 !important;
+}
+#candy .roster-pane .user:hover {
+  background-color: #292E42 !important;
+}
+
+/* ── Room bar (topic) ─────────────────────────────────────────────────── */
+#candy .roombar {
+  background-color: #1F2335 !important;
+  border-bottom: 1px solid #292E42 !important;
+}
+
+/* ── Toolbar ──────────────────────────────────────────────────────────── */
+#candy #chat-toolbar .usercount span {
+  color: #737AA2 !important;
+}
+#candy #chat-toolbar {
+  color: #737AA2 !important;
+}
+
+/* ── Active room tab chip ─────────────────────────────────────────────── */
+#candy #activeRoom {
+  background-color: #1F2335 !important;
+  color: #A9B1D6 !important;
+}
+
+/* ── Tab bar ──────────────────────────────────────────────────────────── */
+#candy #chat-tabs:not(.modal-tabs) a {
+  background: #1F2335 !important;
+  color: #565F89 !important;
+}
+#candy #chat-tabs:not(.modal-tabs) a:hover {
+  color: #C0CAF5 !important;
+}
+#candy #chat-tabs:not(.modal-tabs) .active .label {
+  background-color: #1A1B26 !important;
+  color: #C0CAF5 !important;
+}
+#candy #chat-tabs:not(.modal-tabs) .active .transition {
+  background: #1A1B26 !important;
+}
+#candy #chat-tabs:not(.modal-tabs) a.close {
+  color: #3B4261 !important;
+}
+#candy #chat-tabs:not(.modal-tabs) a.close:hover {
+  color: #C0CAF5 !important;
+}
+
+/* ── Room selector modal ──────────────────────────────────────────────── */
+#chat-modal-overlay {
+  background-color: rgba(0, 0, 0, 0.85) !important;
+}
+#chat-modal {
+  background: #1A1B26 !important;
+  color: #A9B1D6 !important;
+  border: 1px solid #292E42 !important;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.8) !important;
+}
+#chat-modal h2,
+#chat-modal-body h2 {
+  color: #C0CAF5 !important;
+}
+#chat-modal .close {
+  color: #565F89 !important;
+}
+#chat-modal .close:hover {
+  color: #C0CAF5 !important;
+  background-color: #292E42 !important;
+}
+.roomList {
+  background-color: #1A1B26 !important;
+}
+.roomList a {
+  color: #A9B1D6 !important;
+}
+.roomList a:hover {
+  color: #7AA2F7 !important;
+}
+ul.simplePaginationChatRoomList li {
+  border-bottom: 1px solid #1E1F2E;
+}
+ul.simplePaginationChatRoomList li:hover {
+  background-color: #1F2335 !important;
+}
+ul.simplePaginationChatRoomList li .roomCounter {
+  background-color: #292E42 !important;
+  color: #737AA2 !important;
+}
+ul.simplePaginationChatRoomList li .roomName,
+ul.simplePaginationChatRoomList li a {
+  color: #A9B1D6 !important;
+}
+#chat-modal .modal-tabs li:hover {
+  background-color: #1F2335 !important;
+}
+#chat-modal .modal-tabs li .label {
+  color: #A9B1D6 !important;
+}
+#chat-modal .modal-tabs li .unread,
+#chat-modal .modal-tabs li .close {
+  background-color: #292E42 !important;
+  color: #A9B1D6 !important;
+}
+#newRoomBlock {
+  background-color: #16161E !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.8) !important;
+}
+#newRoomBlock h2 {
+  color: #C0CAF5 !important;
+}
+#roomPanelFooter #let_me_input {
+  background-color: #292E42 !important;
+  border-color: #3B4261 !important;
+  color: #A9B1D6 !important;
+}
+#roomPanelFooter #let_me_input::placeholder {
+  color: #3B4261 !important;
+}
+
+/* ── Logo ─────────────────────────────────────────────────────────────── */
+#headerLogoWrap,
+#headerLogoWrap a,
+#headerLogoWrap * {
+  background: transparent !important;
+  background-color: transparent !important;
+}
+
+/* ── Scrollbars ───────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: #16161E; }
+::-webkit-scrollbar-thumb { background: #292E42; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #3B4261; }
+
+/* ── Custom header nav buttons ────────────────────────────────────────── */
+#lit-nav-btns a {
+  color: #7AA2F7 !important;
+  border-color: #292E42 !important;
+  background: transparent !important;
+}
+#lit-nav-btns a:hover {
+  color: #C0CAF5 !important;
+  border-color: #7AA2F7 !important;
+}

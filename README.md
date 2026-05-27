@@ -6,11 +6,11 @@ Built with [Electron](https://www.electronjs.org/) around the site's existing Ca
 
 ## Features
 
-- Persistent login session (no need to log in on every launch)
+- Persistent login session per profile — no need to log in on every launch
 - BOSH keepalive runs unthrottled even when the window is minimised
 - Desktop notifications for incoming DMs
 - Presence notifications for watched users
-- Dark mode with larger, more readable text
+- Multiple built-in themes: Dark, Dark Warm, Dark Teal, Nord, Dracula, Gruvbox, Catppuccin Mocha, Tokyo Night, Rosé Pine, Solarized Dark, Solarized Light, and Light
 - Chat log viewer — opens to recent DMs; search conversation history by username
 - Per-user notes
 - Room manager — browse, favourite, and auto-join rooms on startup
@@ -18,6 +18,7 @@ Built with [Electron](https://www.electronjs.org/) around the site's existing Ca
 - User profile pages open in an in-app window instead of the system browser
 - Per-room status message toggle — hide join/leave noise in busy rooms without affecting quieter ones
 - Ads and site navigation stripped from the chat layout
+- Multiple profiles — separate cookie sessions and per-profile theme selection
 
 ## Installation
 
@@ -27,21 +28,39 @@ Download the latest release for your platform from the [Releases](../../releases
 - **Windows** — run the `.exe` installer
 - **macOS** — open the `.dmg` and drag to Applications
 
+## Profiles
+
+Profiles give each account its own independent cookie session, theme, and settings.
+
+Manage profiles from the **Profile** menu. Switching profiles restarts the app. To run two profiles simultaneously, launch a second instance with `--profile <id>`:
+
+```
+# Packaged app
+LitChat --profile alice
+
+# Development
+npm start -- --profile alice
+```
+
+Profile IDs are the slugified version of the name you gave when creating the profile (e.g. "My Alt" → `my-alt`). They are shown in the window title when more than one profile exists.
+
 ## User data
 
-Logs, settings, and your `user.css` customisations are stored in:
+Logs, settings, and customisations are stored under a per-profile subdirectory:
 
 | Platform | Location |
 |----------|----------|
-| Linux    | `~/.config/Lit Chat/` |
-| Windows  | `%APPDATA%\Lit Chat\` |
-| macOS    | `~/Library/Application Support/Lit Chat/` |
+| Linux    | `~/.config/Lit Chat/profiles/<id>/` |
+| Windows  | `%APPDATA%\Lit Chat\profiles\<id>\` |
+| macOS    | `~/Library/Application Support/Lit Chat/profiles/<id>/` |
+
+The first profile is always named `default`.
 
 ## Customisation
 
-The built-in dark theme is applied automatically and stays up to date with each release.
+Select a theme from the **Theme** menu. Your choice is saved per profile.
 
-To add your own overrides, edit `user.css` in your user data folder. It is applied on top of the built-in theme on every page load — use Ctrl+R to preview changes without restarting.
+To add your own CSS overrides on top of the active theme, edit `user.css` in your profile's data folder. Changes take effect on Ctrl+R without restarting.
 
 You can also place a `user.js` file in the same folder — it will be injected into the page on every load.
 
@@ -49,7 +68,7 @@ You can also place a `user.js` file in the same folder — it will be injected i
 
 ```
 npm install
-npm start          # run in development
+npm start              # run in development
 npm run build:linux
 npm run build:win
 npm run build:mac

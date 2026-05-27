@@ -2,28 +2,122 @@ const { app, BrowserWindow, Menu, shell, Notification, ipcMain } = require('elec
 const path = require('path');
 const fs = require('fs');
 
+// ── Profile system ─────────────────────────────────────────────────────────
+// Must run before any other requires so logger/watch/notes inherit LIT_USERDATA.
+
+const BASE_USERDATA = app.getPath('userData');
+const PROFILES_FILE = path.join(BASE_USERDATA, 'profiles.json');
+
+function loadProfiles() {
+  try { return JSON.parse(fs.readFileSync(PROFILES_FILE, 'utf8')); }
+  catch { return null; }
+}
+
+function saveProfiles(p) {
+  fs.writeFileSync(PROFILES_FILE, JSON.stringify(p, null, 2));
+}
+
+function slugify(name) {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') ||
+         `p${Date.now()}`;
+}
+
+// First-run migration: move the old flat layout into profiles/default/
+function migrateToProfiles() {
+  const defaultDir = path.join(BASE_USERDATA, 'profiles', 'default');
+  fs.mkdirSync(defaultDir, { recursive: true });
+  for (const name of ['settings.json', 'user.css', 'user.js', 'logs', 'page-source']) {
+    const src = path.join(BASE_USERDATA, name);
+    const dst = path.join(defaultDir, name);
+    if (fs.existsSync(src) && !fs.existsSync(dst)) {
+      try { fs.renameSync(src, dst); } catch {}
+    }
+  }
+  const p = { active: 'default', list: { default: { name: 'Default' } } };
+  saveProfiles(p);
+  return p;
+}
+
+let profiles = loadProfiles();
+if (!profiles) profiles = migrateToProfiles();
+
+// Guard against a stale active profile
+if (!profiles.list[profiles.active]) {
+  profiles.active = Object.keys(profiles.list)[0] || 'default';
+  if (!profiles.list[profiles.active]) profiles.list[profiles.active] = { name: 'Default' };
+  saveProfiles(profiles);
+}
+
+// --profile <id> selects a profile for simultaneous multi-instance use.
+// Packaged app:  LitChat --profile alice              (works directly)
+// npm dev:       npm start -- --profile alice         (-- stops npm consuming the flag)
+//                LIT_PROFILE_SELECT=alice npm start   (env var alternative)
+const CLI_PROFILE = app.commandLine.getSwitchValue('profile') ||
+                    (() => { const i = process.argv.indexOf('--profile'); return i !== -1 ? process.argv[i + 1] : ''; })() ||
+                    process.env.LIT_PROFILE_SELECT || '';
+const ACTIVE_ID   = CLI_PROFILE && profiles.list[CLI_PROFILE] ? CLI_PROFILE : profiles.active;
+const PROFILE_DIR = path.join(BASE_USERDATA, 'profiles', ACTIVE_ID);
+fs.mkdirSync(PROFILE_DIR, { recursive: true });
+
 // Set before any other requires so preload scripts inherit it
-process.env.LIT_USERDATA = app.getPath('userData');
+process.env.LIT_USERDATA = PROFILE_DIR;
+process.env.LIT_PROFILE  = ACTIVE_ID;
+
+// ── End profile system ─────────────────────────────────────────────────────
 
 const { extractMessages, writeMessages } = require('./logger');
 const { loadWatchList, saveWatchList } = require('./watch');
 
-const USER_CSS      = path.join(process.env.LIT_USERDATA, 'user.css');
-const USER_JS       = path.join(process.env.LIT_USERDATA, 'user.js');
-const SOURCE_DIR    = path.join(process.env.LIT_USERDATA, 'page-source');
-const SETTINGS_FILE = path.join(process.env.LIT_USERDATA, 'settings.json');
-const BUNDLED_CSS   = path.join(__dirname, 'user.css'); // read-only default shipped with the app
+const USER_CSS      = path.join(PROFILE_DIR, 'user.css');
+const USER_JS       = path.join(PROFILE_DIR, 'user.js');
+const SOURCE_DIR    = path.join(PROFILE_DIR, 'page-source');
+const SETTINGS_FILE = path.join(PROFILE_DIR, 'settings.json');
+const THEMES_DIR    = path.join(__dirname, 'themes');
+
+function getThemeFile(theme) {
+  return path.join(THEMES_DIR, `${theme || 'dark'}.css`);
+}
+
+function getPartition(id) {
+  // Keep the original partition for 'default' so existing cookies are preserved
+  return id === 'default' ? 'persist:litchat' : `persist:litchat-${id}`;
+}
+
+const PARTITION = getPartition(ACTIVE_ID);
+
+const THEMES = [
+  { id: 'dark',            label: 'Dark' },
+  { id: 'dark-warm',       label: 'Dark — Warm' },
+  { id: 'dark-teal',       label: 'Dark — Teal' },
+  { id: 'light',           label: 'Light' },
+  { id: 'nord',            label: 'Nord' },
+  { id: 'dracula',         label: 'Dracula' },
+  { id: 'gruvbox',         label: 'Gruvbox' },
+  { id: 'catppuccin',      label: 'Catppuccin Mocha' },
+  { id: 'tokyo-night',     label: 'Tokyo Night' },
+  { id: 'rose-pine',       label: 'Rosé Pine' },
+  { id: 'solarized-dark',  label: 'Solarized Dark' },
+  { id: 'solarized-light', label: 'Solarized Light' },
+];
 
 function loadSettings() {
-  try { return JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')); }
-  catch { return { darkMode: true }; }
+  try {
+    const s = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
+    // Migrate darkMode boolean → theme string
+    if (s.darkMode !== undefined && !s.theme) {
+      s.theme = s.darkMode ? 'dark' : 'light';
+      delete s.darkMode;
+    }
+    return s;
+  }
+  catch { return { theme: 'dark' }; }
 }
 function saveSettings() {
   fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
 }
 
 const settings = loadSettings();
-let cssKeys = []; // keys returned by insertCSS; needed to remove on dark mode toggle
+let cssKeys = []; // keys returned by insertCSS; needed to remove on theme change
 
 let watchList = loadWatchList();           // Set of lowercased nicks to watch
 let onlineWatched = new Set();             // currently-online watched nicks this session
@@ -97,16 +191,20 @@ let roomWin = null;
 let readyPoll = null;
 
 function createWindow() {
+  const profileName  = profiles.list[ACTIVE_ID]?.name || 'Default';
+  const multiProfile = Object.keys(profiles.list).length > 1;
+
   win = new BrowserWindow({
     width: 1280,
     height: 900,
-    title: 'Lit Chat',
+    title: multiProfile ? `Lit Chat — ${profileName}` : 'Lit Chat',
+    icon: path.join(__dirname, 'build', 'icon.png'),
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
       preload: path.join(__dirname, 'preload.js'),
       // Persist session across restarts so BOSH reconnects with existing cookies
-      partition: 'persist:litchat',
+      partition: PARTITION,
     },
   });
 
@@ -118,7 +216,7 @@ function createWindow() {
     presenceNotifyReady = false;
     onlineWatched.clear();
 
-    fs.mkdirSync(process.env.LIT_USERDATA, { recursive: true });
+    fs.mkdirSync(PROFILE_DIR, { recursive: true });
 
     // Migrate old seeded user.css (unmodified copy of bundled theme) to a blank
     // customisation starter so the bundled theme can be injected fresh each update.
@@ -132,14 +230,21 @@ function createWindow() {
       fs.writeFileSync(USER_CSS, CUSTOM_STARTER); // wipe unmodified seed
     }
 
-    if (settings.darkMode) {
+    const theme = settings.theme || 'dark';
+    if (theme !== 'light') {
       // Always inject the bundled theme first so app updates reach everyone
-      if (fs.existsSync(BUNDLED_CSS))
-        cssKeys.push(await win.webContents.insertCSS(fs.readFileSync(BUNDLED_CSS, 'utf8')));
-      // Then layer the user's personal overrides on top (if any real rules present)
+      const themePath = getThemeFile(theme);
+      if (fs.existsSync(themePath))
+        cssKeys.push(await win.webContents.insertCSS(fs.readFileSync(themePath, 'utf8')));
+      // Then layer the user's personal overrides on top
       if (fs.existsSync(USER_CSS))
         cssKeys.push(await win.webContents.insertCSS(fs.readFileSync(USER_CSS, 'utf8')));
+
+      // Remove the baked-in white background from the logo PNG via canvas pixel manipulation.
+      // CSS mix-blend-mode cannot cross GPU compositing layer boundaries so JS is required.
+      removeLogoBg();
     }
+
     if (fs.existsSync(USER_JS)) {
       win.webContents.executeJavaScript(fs.readFileSync(USER_JS, 'utf8')).catch(() => {});
     }
@@ -195,7 +300,6 @@ function createWindow() {
     }
     return { action: 'deny' };
   });
-
 }
 
 function openLogViewer() {
@@ -207,6 +311,7 @@ function openLogViewer() {
     width: 700,
     height: 600,
     title: 'Chat Logs',
+    parent: win,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -242,14 +347,6 @@ async function savePageSource() {
     }
   }
   fs.writeFileSync(path.join(SOURCE_DIR, 'styles.css'), cssChunks.join('\n\n'));
-
-  // Starter user.css if it doesn't exist yet
-  if (!fs.existsSync(USER_CSS)) {
-    fs.writeFileSync(USER_CSS,
-      '/* Custom overrides for chat.literotica.com\n' +
-      '   Injected on every page load. Edit and reload (Ctrl+R) to preview. */\n'
-    );
-  }
 }
 
 
@@ -326,7 +423,39 @@ function setupPerRoomStatus() {
   `).catch(() => {});
 }
 
+function removeLogoBg() {
+  win.webContents.executeJavaScript(`
+    (function() {
+      var img = document.querySelector('#headerLogoWrap img');
+      if (!img) return;
+      function process() {
+        try {
+          if (!img.dataset.litOrigSrc) img.dataset.litOrigSrc = img.src;
+          var c = document.createElement('canvas');
+          c.width = img.naturalWidth; c.height = img.naturalHeight;
+          if (!c.width || !c.height) { setTimeout(process, 200); return; }
+          var ctx = c.getContext('2d');
+          ctx.drawImage(img, 0, 0);
+          var id = ctx.getImageData(0, 0, c.width, c.height);
+          var d = id.data;
+          for (var i = 0; i < d.length; i += 4) {
+            if (d[i] > 200 && d[i+1] > 200 && d[i+2] > 200) d[i+3] = 0;
+          }
+          ctx.putImageData(id, 0, 0);
+          img.src = c.toDataURL('image/png');
+          img.style.filter = '';
+        } catch(e) {
+          img.style.filter = 'invert(1)';
+        }
+      }
+      if (img.complete && img.naturalWidth) process();
+      else img.addEventListener('load', process, { once: true });
+    })();
+  `).catch(() => {});
+}
+
 function injectNavButtons() {
+  const isDark = (settings.theme || 'dark') !== 'light';
   win.webContents.executeJavaScript(`
     (function() {
       var fw = document.querySelector('.C_fw');
@@ -334,13 +463,18 @@ function injectNavButtons() {
       var wrap = document.createElement('div');
       wrap.id = 'lit-nav-btns';
       wrap.style.cssText = 'display:inline-flex;align-items:center;gap:8px;margin-left:16px;';
+      var isDark = ${JSON.stringify(isDark)};
+      var baseColor  = isDark ? '#aaa'  : '#555';
+      var hoverColor = isDark ? '#fff'  : '#000';
+      var baseBorder = isDark ? '#333'  : '#ccc';
+      var hoverBorder = isDark ? '#666' : '#999';
       function mkBtn(label) {
         var a = document.createElement('a');
         a.textContent = label;
-        a.style.cssText = 'color:#aaa;cursor:pointer;font-size:13px;padding:4px 10px;' +
-                          'border:1px solid #333;border-radius:4px;text-decoration:none;';
-        a.addEventListener('mouseover', function() { a.style.color='#fff'; a.style.borderColor='#666'; });
-        a.addEventListener('mouseout',  function() { a.style.color='#aaa'; a.style.borderColor='#333'; });
+        a.style.cssText = 'color:' + baseColor + ';cursor:pointer;font-size:13px;padding:4px 10px;' +
+                          'border:1px solid ' + baseBorder + ';border-radius:4px;text-decoration:none;';
+        a.addEventListener('mouseover', function() { a.style.color=hoverColor; a.style.borderColor=hoverBorder; });
+        a.addEventListener('mouseout',  function() { a.style.color=baseColor;  a.style.borderColor=baseBorder; });
         return a;
       }
       var roomsBtn = mkBtn('Rooms');
@@ -402,7 +536,7 @@ function openProfileWindow(url) {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
-      partition: 'persist:litchat', // same session = already logged in
+      partition: PARTITION, // same session = already logged in
     },
   });
   w.setMenu(null);
@@ -420,6 +554,7 @@ function openRoomManager() {
     width: 480,
     height: 640,
     title: 'Rooms',
+    parent: win,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -493,20 +628,97 @@ ipcMain.handle('rooms:setAutoJoin', (_e, jid, val) => {
   createAppMenu();
 });
 
-async function toggleDarkMode() {
-  settings.darkMode = !settings.darkMode;
+async function setTheme(theme) {
+  settings.theme = theme;
   saveSettings();
-  if (settings.darkMode) {
-    cssKeys = [];
-    if (fs.existsSync(BUNDLED_CSS))
-      cssKeys.push(await win.webContents.insertCSS(fs.readFileSync(BUNDLED_CSS, 'utf8')));
+  for (const k of cssKeys) await win.webContents.removeInsertedCSS(k).catch(() => {});
+  cssKeys = [];
+  if (theme !== 'light') {
+    const themePath = getThemeFile(theme);
+    if (fs.existsSync(themePath))
+      cssKeys.push(await win.webContents.insertCSS(fs.readFileSync(themePath, 'utf8')));
     if (fs.existsSync(USER_CSS))
       cssKeys.push(await win.webContents.insertCSS(fs.readFileSync(USER_CSS, 'utf8')));
+    removeLogoBg();
   } else {
-    for (const k of cssKeys) await win.webContents.removeInsertedCSS(k).catch(() => {});
-    cssKeys = [];
+    // Restore original logo src if we previously replaced it
+    win.webContents.executeJavaScript(`
+      (function() {
+        var img = document.querySelector('#headerLogoWrap img');
+        if (img && img.dataset.litOrigSrc) { img.src = img.dataset.litOrigSrc; img.style.filter = ''; }
+      })();
+    `).catch(() => {});
   }
-  createAppMenu(); // rebuild to update checkmark
+  // Re-inject nav buttons with updated theme colours
+  await win.webContents.executeJavaScript(
+    `var e=document.getElementById('lit-nav-btns');if(e)e.remove();`
+  ).catch(() => {});
+  injectNavButtons();
+  createAppMenu();
+}
+
+function switchProfile(id) {
+  const { dialog } = require('electron');
+  const name = profiles.list[id]?.name || id;
+  dialog.showMessageBox(win, {
+    type: 'question',
+    buttons: ['Switch', 'Cancel'],
+    defaultId: 0,
+    cancelId: 1,
+    title: 'Switch Profile',
+    message: `Switch to "${name}"?`,
+    detail: 'The app will restart to load the new profile.',
+  }).then(({ response }) => {
+    if (response !== 0) return;
+    if (CLI_PROFILE) {
+      // Relaunch replacing the --profile arg so this window switches profiles
+      const baseArgs = process.argv.slice(1).filter((a, i, arr) =>
+        a !== '--profile' && arr[i - 1] !== '--profile'
+      );
+      app.relaunch({ args: [...baseArgs, '--profile', id] });
+    } else {
+      profiles.active = id;
+      saveProfiles(profiles);
+      app.relaunch();
+    }
+    app.exit();
+  });
+}
+
+function createProfile() {
+  const dialogWin = new BrowserWindow({
+    width: 360,
+    height: 145,
+    parent: win,
+    modal: true,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    title: 'New Profile',
+    autoHideMenuBar: true,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      preload: path.join(__dirname, 'profile-dialog-preload.js'),
+    },
+  });
+  dialogWin.setMenu(null);
+  dialogWin.loadFile('profile-dialog.html');
+
+  const onName = (_e, name) => {
+    if (!name || !name.trim()) return;
+    name = name.trim();
+    let id = slugify(name);
+    let n = 2;
+    while (profiles.list[id]) id = `${slugify(name)}-${n++}`;
+    profiles.list[id] = { name };
+    saveProfiles(profiles);
+    fs.mkdirSync(path.join(BASE_USERDATA, 'profiles', id), { recursive: true });
+    createAppMenu();
+  };
+
+  ipcMain.once('profile:new-name', onName);
+  dialogWin.on('closed', () => ipcMain.removeListener('profile:new-name', onName));
 }
 
 function sendNotification({ title, body }) {
@@ -565,6 +777,25 @@ function createAppMenu() {
       ]
     : [{ label: 'Manage Rooms…', click: () => openRoomManager() }];
 
+  const currentTheme = settings.theme || 'dark';
+  const themeItems = THEMES.map(({ id, label }) => ({
+    label,
+    type: 'radio',
+    checked: currentTheme === id,
+    click: () => setTheme(id),
+  }));
+
+  const profileItems = [
+    ...Object.entries(profiles.list).map(([id, { name }]) => ({
+      label: name,
+      type: 'radio',
+      checked: id === ACTIVE_ID,
+      click: () => { if (id !== ACTIVE_ID) switchProfile(id); },
+    })),
+    { type: 'separator' },
+    { label: 'New Profile…', click: () => createProfile() },
+  ];
+
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     {
       label: 'Lit Chat',
@@ -572,8 +803,10 @@ function createAppMenu() {
         { label: 'View Logs',  click: () => openLogViewer() },
         { label: 'Rooms', submenu: roomItems },
         { type: 'separator' },
-        { label: 'Dark Mode', type: 'checkbox', checked: settings.darkMode, click: () => toggleDarkMode() },
+        { label: 'Theme',   submenu: themeItems },
+        { label: 'Profile', submenu: profileItems },
         { type: 'separator' },
+        { label: 'Reload', accelerator: 'CmdOrCtrl+R', click: () => win.webContents.reload(), visible: false },
         { label: 'Save Page Source', click: () => savePageSource() },
         { label: 'DevTools', click: () => win.webContents.openDevTools() },
         { type: 'separator' },
@@ -640,7 +873,7 @@ app.whenReady().then(() => {
 
   // Silence the site's broken favicon requests
   const { session } = require('electron');
-  session.fromPartition('persist:litchat').webRequest.onBeforeRequest(
+  session.fromPartition(PARTITION).webRequest.onBeforeRequest(
     { urls: ['*://*/favicon.png', '*://*/favicon.ico'] },
     (details, callback) => {
       if (details.url.includes('favicon')) callback({ cancel: true });
@@ -650,4 +883,3 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => app.quit());
-
