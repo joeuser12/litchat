@@ -8,6 +8,15 @@ function logFile() {
   return path.join(LOG_DIR, `chat-${date}.jsonl`);
 }
 
+function unescapeXml(s) {
+  return s
+    .replace(/&lt;/g,   '<')
+    .replace(/&gt;/g,   '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g,  '&'); // must be last
+}
+
 // Minimal XMPP <message> extractor — handles standard chat and groupchat stanzas.
 // Not a full XML parser; ignores stanzas without a <body> (e.g. read receipts, typing).
 function extractMessages(xml, direction) {
@@ -28,7 +37,7 @@ function extractMessages(xml, direction) {
         type,   // 'chat' = DM, 'groupchat' = room
         from,
         to,
-        body: bodyM[1],
+        body: unescapeXml(bodyM[1]),
       });
     }
   }

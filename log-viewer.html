@@ -233,6 +233,9 @@
     function esc(s) {
       return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     }
+    function unescapeXml(s) {
+      return s.replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&apos;/g,"'").replace(/&amp;/g,'&');
+    }
 
     function fmtTime(iso) {
       return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -255,7 +258,7 @@
         const peer = m.direction === 'sent' ? m.toUser : m.fromUser;
         frags.push(`<div class="msg ${side}">
           <div class="meta">${esc(peer ?? '')} · ${esc(fmtTime(m.ts))}</div>
-          <div>${esc(m.body)}</div>
+          <div>${esc(unescapeXml(m.body))}</div>
         </div>`);
       }
       return frags.join('');
