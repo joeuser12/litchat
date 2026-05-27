@@ -12,13 +12,13 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            build: npm run build:linux
+            build: npm run build:linux -- --publish never
             artifact: dist/LitChat-linux.AppImage
           - os: windows-latest
-            build: npm run build:win
+            build: npm run build:win -- --publish never
             artifact: dist/LitChat-windows.exe
           - os: macos-latest
-            build: npm run build:mac
+            build: npm run build:mac -- --publish never
             artifact: dist/LitChat-mac.dmg
 
     runs-on: ${{ matrix.os }}
