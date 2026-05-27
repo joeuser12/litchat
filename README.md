@@ -6,18 +6,16 @@ Built with [Electron](https://www.electronjs.org/) around the site's existing Ca
 
 ## Features
 
-- Persistent login session per profile — no need to log in on every launch
-- BOSH keepalive runs unthrottled even when the window is minimised
+- Persistent login session: no need to log in on every launch
+- BOSH keepalive runs unthrottled which means you shouldn't get booted
 - Desktop notifications for incoming DMs
 - Presence notifications for watched users
 - Multiple built-in themes: Dark, Dark Warm, Dark Teal, Nord, Dracula, Gruvbox, Catppuccin Mocha, Tokyo Night, Rosé Pine, Solarized Dark, Solarized Light, and Light
 - Chat log viewer — opens to recent DMs; search conversation history by username
 - Per-user notes
 - Room manager — browse, favourite, and auto-join rooms on startup
-- Rooms and Logs shortcuts in the header bar
-- User profile pages open in an in-app window instead of the system browser
+- User profile pages open in an in-app window
 - Per-room status message toggle — hide join/leave noise in busy rooms without affecting quieter ones
-- Ads and site navigation stripped from the chat layout
 - Multiple profiles — separate cookie sessions and per-profile theme selection
 
 ## Installation
@@ -36,10 +34,10 @@ Manage profiles from the **Profile** menu. Switching profiles restarts the app. 
 
 ```
 # Packaged app
-LitChat --profile alice
+LitChat --profile bob
 
 # Development
-npm start -- --profile alice
+npm start -- --profile bob
 ```
 
 Profile IDs are the slugified version of the name you gave when creating the profile (e.g. "My Alt" → `my-alt`). They are shown in the window title when more than one profile exists.
