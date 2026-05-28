@@ -631,9 +631,10 @@ function injectDMHistory() {
 
       function buildHistory(messages, myNick) {
         var items = messages.map(function(m) {
+          function nickOf(jid) { var s=jid.indexOf('/'); return s!==-1?jid.slice(s+1):jid.split('@')[0]; }
           var sender = m.direction === 'sent'
             ? (myNick || 'me')
-            : (m.from || '').split('@')[0];
+            : nickOf(m.from || '');
           var body = escHtml(unescXml(m.body || ''));
           // linkify
           body = body.replace(/(https?:\\/\\/[^\\s<>"']+)/g,
@@ -662,22 +663,34 @@ function injectDMHistory() {
         pane._litHistoryDone = true;
 
         var jid = pane.dataset.roomjid || '';
-        var at = jid.indexOf('@');
-        var domain = at !== -1 ? jid.slice(at + 1) : '';
-        // Skip conference rooms — only handle DMs
-        if (!domain || domain.startsWith('conference.') || domain.startsWith('rooms.')) return;
-        var username = at !== -1 ? jid.slice(0, at) : jid;
+        // DMs from group chat rooms use the format room@server/Nick
+        // Plain DMs use user@server — both are DMs (not a conference room tab)
+        var slash = jid.indexOf('/');
+        var username = slash !== -1 ? jid.slice(slash + 1) : jid.split('@')[0];
+        // A conference room tab has NO resource (no '/'), AND no '@' local-part nick
+        // Skip if it looks like a bare room JID (has @conference. but no resource)
+        if (slash === -1 && jid.indexOf('@conference.') !== -1) return;
         if (!username) return;
 
         var messages = await window.litChat.dmHistory(username).catch(function() { return []; });
         if (!messages.length) return;
 
         // My own nick — the sender of 'sent' messages
+        function nickOf(jid) {
+          var s = jid.indexOf('/');
+          if (s !== -1) return jid.slice(s + 1);
+          return jid.split('@')[0];
+        }
         var myNick = null;
         var sentMsg = messages.find(function(m) { return m.direction === 'sent'; });
-        if (sentMsg && sentMsg.from) myNick = (sentMsg.from || '').split('@')[0];
+        if (sentMsg && sentMsg.from) myNick = nickOf(sentMsg.from);
 
         var msgPane = pane.querySelector('ul.message-pane, ul[class*="message"]');
+        // Candy may not have finished building the pane — retry briefly
+        if (!msgPane) {
+          await new Promise(function(r) { setTimeout(r, 300); });
+          msgPane = pane.querySelector('ul.message-pane, ul[class*="message"]');
+        }
         if (!msgPane) return;
 
         var html = buildHistory(messages, myNick);
@@ -1831,6 +1844,13 @@ ipcMain.handle('logs:dmHistory', (_e, username) => {
   const logDir = path.join(PROFILE_DIR, 'logs');
   if (!fs.existsSync(logDir)) return [];
   const target = username.toLowerCase();
+  // Extract the peer nick from a JID: room@server/Nick → "nick", user@server → "user"
+  const nickOf = jid => {
+    const slash = jid.indexOf('/');
+    if (slash !== -1) return jid.slice(slash + 1).toLowerCase();
+    const at = jid.indexOf('@');
+    return (at !== -1 ? jid.slice(0, at) : jid).toLowerCase();
+  };
   const msgs = [];
   for (const file of fs.readdirSync(logDir).filter(f => f.endsWith('.jsonl')).sort()) {
     const lines = fs.readFileSync(path.join(logDir, file), 'utf8').split('\n');
@@ -1838,8 +1858,7 @@ ipcMain.handle('logs:dmHistory', (_e, username) => {
       try {
         const m = JSON.parse(line);
         if (m.type !== 'chat') continue;
-        const jid = m.direction === 'sent' ? (m.to || '') : (m.from || '');
-        const peer = jid.split('@')[0].toLowerCase();
+        const peer = nickOf(m.direction === 'sent' ? (m.to || '') : (m.from || ''));
         if (peer === target) msgs.push(m);
       } catch { /* skip malformed lines */ }
     }
