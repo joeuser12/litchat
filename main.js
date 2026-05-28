@@ -1291,6 +1291,15 @@ function injectEmojiPicker() {
       }
     }, true);
 
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape' && picker.style.display === 'flex') {
+        picker.style.display = 'none';
+        searchInput.value = '';
+        showCategory(currentCat);
+        e.stopPropagation();
+      }
+    }, true);
+
     setupTrigger();
     new MutationObserver(function() {
       if (!document.getElementById('lit-emoji-trigger')) setupTrigger();
