@@ -154,15 +154,21 @@ function notifyDMs(messages) {
       title: `DM from ${nick}`,
       body: m.body.length > 120 ? m.body.slice(0, 120) + '…' : m.body,
     });
-    if (settings.prefs?.away && m.from && !awayRepliedTo.has(m.from)) {
-      awayRepliedTo.add(m.from);
-      sendAwayReply(m.from);
+    if (settings.prefs?.away && m.from && m.body) {
+      const awayMsg = settings.prefs.awayMessage || "I'm currently away.";
+      if (awayMsg.startsWith('llama-server:')) {
+        // Multi-turn AI mode — respond to every message
+        sendLlamaReply(m.from, m.body).catch(() => {});
+      } else if (!awayRepliedTo.has(m.from)) {
+        // Static reply — one per sender
+        awayRepliedTo.add(m.from);
+        sendAwayReply(m.from, awayMsg);
+      }
     }
   }
 }
 
-function sendAwayReply(toJid) {
-  const msg = settings.prefs?.awayMessage || "I'm currently away.";
+function sendAwayReply(toJid, msg) {
   win.webContents.executeJavaScript(`
     (function() {
       try {
@@ -172,6 +178,81 @@ function sendAwayReply(toJid) {
       } catch(e) { console.warn('Away reply failed:', e); }
     })();
   `).catch(() => {});
+}
+
+function loadSystemPrompt() {
+  const file = path.join(PROFILE_DIR, 'system-prompt.json');
+  try {
+    const raw = fs.readFileSync(file, 'utf8').trim();
+    try {
+      const parsed = JSON.parse(raw);
+      if (typeof parsed === 'string') return parsed;
+      if (typeof parsed.system  === 'string') return parsed.system;
+      if (typeof parsed.content === 'string') return parsed.content;
+    } catch {}
+    return raw; // plain-text fallback
+  } catch { return null; }
+}
+
+function parseLlamaEndpoint(awayMsg) {
+  // "llama-server:/path/to/sock"  → { socketPath }
+  // "llama-server:host:port"      → { host, port }
+  const spec = awayMsg.slice('llama-server:'.length).trim();
+  if (spec.startsWith('/')) return { socketPath: spec };
+  const lastColon = spec.lastIndexOf(':');
+  if (lastColon !== -1) {
+    return { host: spec.slice(0, lastColon), port: parseInt(spec.slice(lastColon + 1), 10) || 8080 };
+  }
+  return { host: spec, port: 8080 };
+}
+
+async function callLlamaServer(endpoint, messages) {
+  const http = require('http');
+  const body = JSON.stringify({ messages, stream: false });
+  const opts = {
+    path: '/v1/chat/completions',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+    ...(endpoint.socketPath
+      ? { socketPath: endpoint.socketPath }
+      : { hostname: endpoint.host, port: endpoint.port }),
+  };
+  return new Promise((resolve, reject) => {
+    const req = http.request(opts, res => {
+      let data = '';
+      res.on('data', chunk => { data += chunk; });
+      res.on('end', () => {
+        try {
+          const reply = JSON.parse(data).choices?.[0]?.message?.content?.trim();
+          resolve(reply || '');
+        } catch (e) { reject(e); }
+      });
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+async function sendLlamaReply(toJid, userText) {
+  const awayMsg  = settings.prefs?.awayMessage || '';
+  const endpoint = parseLlamaEndpoint(awayMsg);
+  const systemPrompt = loadSystemPrompt();
+
+  if (!awayConversations.has(toJid)) awayConversations.set(toJid, []);
+  const history = awayConversations.get(toJid);
+  history.push({ role: 'user', content: userText });
+
+  const messages = [
+    ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
+    ...history,
+  ];
+
+  const reply = await callLlamaServer(endpoint, messages);
+  if (!reply) return;
+
+  history.push({ role: 'assistant', content: reply });
+  sendAwayReply(toJid, reply);
 }
 
 // Extracts presence stanzas from a BOSH XML body.
@@ -1815,7 +1896,7 @@ function createAppMenu() {
         if (!settings.prefs) settings.prefs = {};
         settings.prefs.away = menuItem.checked;
         saveSettings();
-        if (!menuItem.checked) awayRepliedTo.clear();
+        if (!menuItem.checked) { awayRepliedTo.clear(); awayConversations.clear(); }
       },
     },
     {
