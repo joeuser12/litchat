@@ -441,7 +441,7 @@ function createWindow() {
         if (!ready) return;
         const autoJoins = Object.entries(settings.favourites || {})
           .filter(([, v]) => v.autoJoin);
-        for (const [jid] of autoJoins) joinRoom(jid);
+        (async () => { for (const [jid] of autoJoins) await joinRoom(jid); })();
         // Suppress presence notifications briefly while the initial roster flood passes
         setTimeout(() => { presenceNotifyReady = true; }, 5000);
         injectNavButtons();
@@ -1560,26 +1560,29 @@ function injectNavButtons() {
 }
 
 function joinRoom(jid) {
-  win.webContents.executeJavaScript(
-    `(function(jid){
-       // 1. Already in the roombar — click its tab to switch to it
+  return win.webContents.executeJavaScript(
+    `new Promise(function(resolve) {
+       var jid = ${JSON.stringify(jid)};
+
+       // 1. Already in the roombar — nothing to do
        var tab = document.querySelector('li[data-roomjid=' + JSON.stringify(jid) + '] a.label');
-       if (tab) { tab.click(); return; }
+       if (tab) { tab.click(); resolve(); return; }
 
        // 2. Open the room panel, click the matching entry, then dismiss the modal
+       function dismiss() {
+         var m = document.getElementById('chat-modal');
+         var o = document.getElementById('chat-modal-overlay');
+         if (m) m.style.display = 'none';
+         if (o) o.style.display = 'none';
+       }
+
        var tryClick = function() {
          var links = document.querySelectorAll('ul.simplePaginationChatRoomList li a');
          for (var i = 0; i < links.length; i++) {
            var href = (links[i].getAttribute('href') || '').replace(/^#/, '');
            if (href === jid) {
              links[i].click();
-             // Dismiss only after the click has been processed
-             setTimeout(function() {
-               var m = document.getElementById('chat-modal');
-               var o = document.getElementById('chat-modal-overlay');
-               if (m) m.style.display = 'none';
-               if (o) o.style.display = 'none';
-             }, 600);
+             setTimeout(function() { dismiss(); resolve(); }, 600);
              return true;
            }
          }
@@ -1590,10 +1593,10 @@ function joinRoom(jid) {
          document.querySelector('#roomPanel-tab a.label')?.click();
          var tries = 0;
          var poll = setInterval(function() {
-           if (tryClick() || ++tries > 30) clearInterval(poll);
+           if (tryClick() || ++tries > 30) { clearInterval(poll); dismiss(); resolve(); }
          }, 100);
        }
-     })(${JSON.stringify(jid)})`
+     })`
   ).catch(() => {});
 }
 
