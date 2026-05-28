@@ -466,6 +466,7 @@ function createWindow() {
         injectNavButtons();
         setupPerRoomStatus();
         injectEmojiPicker();
+        injectDMHistory();
       }
     }, 500);
   });
@@ -602,6 +603,97 @@ function setupPerRoomStatus() {
           muts.forEach(function(m) {
             m.addedNodes.forEach(function(n) {
               if (n.nodeType === 1 && n.dataset && n.dataset.roomjid) applyPref(n);
+            });
+          });
+        }).observe(roomsEl, { childList: true });
+      }
+    })();
+  `).catch(() => {});
+}
+
+function injectDMHistory() {
+  win.webContents.executeJavaScript(`
+    (function() {
+      if (window._litDMHistoryActive) return;
+      window._litDMHistoryActive = true;
+
+      function escHtml(s) {
+        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      }
+      function unescXml(s) {
+        return s.replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&apos;/g,"'").replace(/&amp;/g,'&');
+      }
+      function fmtTs(iso) {
+        var d = new Date(iso);
+        return d.toLocaleDateString([], {month:'short',day:'numeric'}) + ' ' +
+               d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+      }
+
+      function buildHistory(messages, myNick) {
+        var items = messages.map(function(m) {
+          var sender = m.direction === 'sent'
+            ? (myNick || 'me')
+            : (m.from || '').split('@')[0];
+          var body = escHtml(unescXml(m.body || ''));
+          // linkify
+          body = body.replace(/(https?:\\/\\/[^\\s<>"']+)/g,
+            '<a href="$1" target="_blank" style="color:#818cf8;text-decoration:underline">$1</a>');
+          return '<li style="padding:3px 8px;border-bottom:1px solid rgba(255,255,255,0.04);list-style:none">' +
+            '<small style="color:#4a4870;margin-right:6px">' + escHtml(fmtTs(m.ts)) + '</small>' +
+            '<span style="color:#818cf8;font-weight:600;margin-right:6px">' + escHtml(sender) + '</span>' +
+            '<span style="color:#cccaee">' + body + '</span>' +
+            '</li>';
+        });
+        return '<li style="list-style:none;padding:0;margin:0" class="lit-dm-history">' +
+          '<details>' +
+          '<summary style="cursor:pointer;padding:6px 8px;color:#4a4870;font-size:11px;' +
+            'background:rgba(0,0,0,0.25);letter-spacing:0.05em;user-select:none">' +
+            '▸ ' + messages.length + ' previous message' + (messages.length !== 1 ? 's' : '') +
+          '</summary>' +
+          '<ul style="margin:0;padding:0;background:rgba(0,0,0,0.15)">' +
+            items.join('') +
+          '</ul>' +
+          '</details>' +
+          '</li>';
+      }
+
+      async function populatePane(pane) {
+        if (pane._litHistoryDone) return;
+        pane._litHistoryDone = true;
+
+        var jid = pane.dataset.roomjid || '';
+        var at = jid.indexOf('@');
+        var domain = at !== -1 ? jid.slice(at + 1) : '';
+        // Skip conference rooms — only handle DMs
+        if (!domain || domain.startsWith('conference.') || domain.startsWith('rooms.')) return;
+        var username = at !== -1 ? jid.slice(0, at) : jid;
+        if (!username) return;
+
+        var messages = await window.litChat.dmHistory(username).catch(function() { return []; });
+        if (!messages.length) return;
+
+        // My own nick — the sender of 'sent' messages
+        var myNick = null;
+        var sentMsg = messages.find(function(m) { return m.direction === 'sent'; });
+        if (sentMsg && sentMsg.from) myNick = (sentMsg.from || '').split('@')[0];
+
+        var msgPane = pane.querySelector('ul.message-pane, ul[class*="message"]');
+        if (!msgPane) return;
+
+        var html = buildHistory(messages, myNick);
+        msgPane.insertAdjacentHTML('afterbegin', html);
+      }
+
+      // Populate any already-open DM panes (e.g. DMs from a previous session reopened)
+      document.querySelectorAll('.room-pane[data-roomjid]').forEach(populatePane);
+
+      // Watch for new DM panes
+      var roomsEl = document.getElementById('chat-rooms');
+      if (roomsEl) {
+        new MutationObserver(function(muts) {
+          muts.forEach(function(mut) {
+            mut.addedNodes.forEach(function(n) {
+              if (n.nodeType === 1 && n.dataset && n.dataset.roomjid) populatePane(n);
             });
           });
         }).observe(roomsEl, { childList: true });
@@ -1733,6 +1825,26 @@ ipcMain.handle('status:setHidden', (_e, jid, hidden) => {
   if (hidden) settings.hideStatusRooms[jid] = true;
   else delete settings.hideStatusRooms[jid];
   saveSettings();
+});
+
+ipcMain.handle('logs:dmHistory', (_e, username) => {
+  const logDir = path.join(PROFILE_DIR, 'logs');
+  if (!fs.existsSync(logDir)) return [];
+  const target = username.toLowerCase();
+  const msgs = [];
+  for (const file of fs.readdirSync(logDir).filter(f => f.endsWith('.jsonl')).sort()) {
+    const lines = fs.readFileSync(path.join(logDir, file), 'utf8').split('\n');
+    for (const line of lines) {
+      try {
+        const m = JSON.parse(line);
+        if (m.type !== 'chat') continue;
+        const jid = m.direction === 'sent' ? (m.to || '') : (m.from || '');
+        const peer = jid.split('@')[0].toLowerCase();
+        if (peer === target) msgs.push(m);
+      } catch { /* skip malformed lines */ }
+    }
+  }
+  return msgs.slice(-30);
 });
 
 ipcMain.handle('rooms:getFavourites', () => settings.favourites ?? {});
