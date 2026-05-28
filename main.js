@@ -451,14 +451,18 @@ function createWindow() {
     }, 500);
   });
 
-  // Profile links open in a child window; everything else goes to the system browser
+  // All links open in a child window; the main chat window never navigates away
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https:\/\/www\.literotica\.com\/authors\//.test(url)) {
-      openProfileWindow(url);
-    } else {
-      shell.openExternal(url);
-    }
+    openLinkWindow(url);
     return { action: 'deny' };
+  });
+  win.webContents.on('will-navigate', (e, url) => {
+    try {
+      if (new URL(url).hostname !== 'chat.literotica.com') {
+        e.preventDefault();
+        openLinkWindow(url);
+      }
+    } catch { e.preventDefault(); }
   });
 }
 
@@ -1613,12 +1617,14 @@ function joinRoom(jid) {
   ).catch(() => {});
 }
 
-function openProfileWindow(url) {
+function openLinkWindow(url) {
+  let title;
+  try { title = new URL(url).hostname; } catch { title = 'Link'; }
   const w = new BrowserWindow({
     width: 900,
     height: 700,
     parent: win,
-    title: 'User Profile',
+    title,
     autoHideMenuBar: true,
     webPreferences: {
       nodeIntegration: false,
@@ -1628,10 +1634,17 @@ function openProfileWindow(url) {
   });
   w.setMenu(null);
   w.loadURL(url);
-  // Any further links in the profile page go to the system browser
+  // Links inside the child window also open in new child windows
   w.webContents.setWindowOpenHandler(({ url: u }) => {
-    shell.openExternal(u);
+    openLinkWindow(u);
     return { action: 'deny' };
+  });
+  w.webContents.on('will-navigate', (_e, navUrl) => {
+    // Allow navigation within the child window (browsing around the site)
+    // Update the title as the user navigates
+    w.webContents.once('did-finish-load', () => {
+      try { w.setTitle(new URL(w.webContents.getURL()).hostname); } catch { /* ignore */ }
+    });
   });
 }
 
