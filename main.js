@@ -158,7 +158,7 @@ function notifyDMs(messages) {
       const awayMsg = settings.prefs.awayMessage || "I'm currently away.";
       if (awayMsg.startsWith('llama-server:')) {
         // Multi-turn AI mode — respond to every message
-        sendLlamaReply(m.from, m.body).catch(() => {});
+        sendLlamaReply(m.from, m.body).catch(e => console.error('[away/llama] error:', e.message));
       } else if (!awayRepliedTo.has(m.from)) {
         // Static reply — one per sender
         awayRepliedTo.add(m.from);
@@ -172,12 +172,16 @@ function sendAwayReply(toJid, msg) {
   win.webContents.executeJavaScript(`
     (function() {
       try {
+        if (typeof Candy === 'undefined') throw new Error('Candy not defined');
         var conn = Candy.Core.getConnection();
+        if (!conn) throw new Error('No connection');
         var stanza = $msg({to: ${JSON.stringify(toJid)}, type: 'chat'}).c('body').t(${JSON.stringify(msg)});
         conn.send(stanza.tree ? stanza.tree() : stanza);
-      } catch(e) { console.warn('Away reply failed:', e); }
+        return 'ok';
+      } catch(e) { return 'ERR: ' + e.message; }
     })();
-  `).catch(() => {});
+  `).then(r => { if (r !== 'ok') console.error('[away] sendAwayReply:', r); })
+    .catch(e => console.error('[away] executeJavaScript failed:', e.message));
 }
 
 function loadSystemPrompt() {
@@ -248,7 +252,9 @@ async function sendLlamaReply(toJid, userText) {
     ...history,
   ];
 
+  console.log('[away/llama] calling endpoint', endpoint, 'for', toJid);
   const reply = await callLlamaServer(endpoint, messages);
+  console.log('[away/llama] got reply:', reply?.slice(0, 80));
   if (!reply) return;
 
   history.push({ role: 'assistant', content: reply });
