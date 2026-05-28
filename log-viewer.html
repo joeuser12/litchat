@@ -167,6 +167,9 @@
       padding: 0 1px;
     }
 
+    .msg-link { color: #818cf8; text-decoration: underline; cursor: pointer; }
+    .msg-link:hover { color: #a5b4fc; }
+
     #notes-panel {
       display: none;
       flex-shrink: 0;
@@ -321,6 +324,24 @@
       ).join('');
     }
 
+    const URL_RE = /https?:\/\/[^\s<>"')\]]+/g;
+
+    function linkifyAndHighlight(text, query) {
+      const parts = [];
+      let last = 0;
+      let m;
+      URL_RE.lastIndex = 0;
+      while ((m = URL_RE.exec(text)) !== null) {
+        if (m.index > last) parts.push(highlight(text.slice(last, m.index), query));
+        // Strip trailing punctuation that is likely not part of the URL
+        let url = m[0].replace(/[.,;:!?)]+$/, '');
+        parts.push(`<a href="${esc(url)}" target="_blank" class="msg-link">${highlight(url, query)}</a>`);
+        last = m.index + m[0].length;
+      }
+      if (last < text.length) parts.push(highlight(text.slice(last), query));
+      return parts.join('');
+    }
+
     function fmtTime(iso) {
       return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     }
@@ -340,7 +361,7 @@
         }
         const side = m.direction === 'sent' ? 'sent' : 'received';
         const peer = m.direction === 'sent' ? m.toUser : m.fromUser;
-        const body = highlight(unescapeXml(m.body || ''), query);
+        const body = linkifyAndHighlight(unescapeXml(m.body || ''), query);
         frags.push(`<div class="msg ${side}">
           <div class="meta"><span>${esc(peer ?? '')} · ${esc(fmtTime(m.ts))}</span><span class="msg-del" data-sig="${esc(m.sig)}" title="Delete message">×</span></div>
           <div>${body}</div>

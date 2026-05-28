@@ -503,6 +503,10 @@ function openLogViewer() {
     },
   });
   logWin.loadFile('log-viewer.html');
+  logWin.webContents.setWindowOpenHandler(({ url }) => {
+    openLinkWindow(url);
+    return { action: 'deny' };
+  });
   logWin.on('closed', () => { logWin = null; });
 }
 
