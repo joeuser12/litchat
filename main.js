@@ -516,15 +516,197 @@ function removeLogoBg() {
 }
 
 function injectEmojiPicker() {
+  // Each emoji: [glyph, search keywords]
   const CATS = [
-    { icon: '😊', title: 'Faces', emoji: ['😀','😃','😄','😁','😆','😅','🤣','😂','🙂','🙃','😉','😊','😇','😍','🤩','😘','🥰','😋','😛','😜','🤪','😝','🤑','🤗','🤭','🤫','🤔','🤐','🤨','😐','😑','😶','😏','😒','🙄','😬','🤥','😌','😔','😪','🤤','😴','😷','🤒','🤕','🤢','🤮','🤧','🥵','🥶','🥴','😵','🤯','🤠','🥳','😎','🤓','🧐','😕','😟','🙁','☹️','😮','😯','😲','😳','🥺','😦','😧','😨','😰','😥','😢','😭','😱','😖','😣','😞','😓','😩','😫','🥱','😤','😡','😠','🤬','😈','👿','💀','☠️','💩','🤡','👻','👽','👾','🤖'] },
-    { icon: '👋', title: 'Gestures', emoji: ['👋','🤚','🖐️','✋','🖖','👌','🤌','🤏','✌️','🤞','🤟','🤘','🤙','👈','👉','👆','🖕','👇','☝️','👍','👎','✊','👊','🤛','🤜','👏','🙌','👐','🤲','🤝','🙏','✍️','💅','💪','🦾','👀','👁️','👄','💋'] },
-    { icon: '❤️', title: 'Hearts', emoji: ['❤️','🧡','💛','💚','💙','💜','🖤','🤍','🤎','💔','❣️','💕','💞','💓','💗','💖','💘','💝','💟','❤️‍🔥','❤️‍🩹','😍','🥰','😘','💑','👫','💌','💍','💒','🌹','🥀','🌷','💐','🎀','🎁'] },
-    { icon: '🐶', title: 'Animals', emoji: ['🐶','🐱','🐭','🐹','🐰','🦊','🐻','🐼','🐨','🐯','🦁','🐮','🐷','🐸','🐵','🙈','🙉','🙊','🐔','🐧','🐦','🦆','🦅','🦉','🦇','🐺','🐴','🦄','🐝','🦋','🐌','🐞','🐜','🐢','🐍','🦎','🐙','🦑','🦀','🐡','🐠','🐟','🐬','🐳','🦈','🦭','🦓','🐘','🦏','🐪','🦒','🦬','🐎','🐑','🐐','🦌','🐕','🐩','🐈','🦚','🦜','🕊️','🐇','🦝','🦦','🐁','🐿️','🦔','🐾'] },
-    { icon: '🌺', title: 'Nature', emoji: ['💐','🌸','💮','🌹','🥀','🌺','🌻','🌼','🌷','🌱','🌿','☘️','🍀','🍃','🍂','🍁','🌾','🌵','🎄','🌲','🌳','🌴','🌙','☀️','🌤️','⛅','🌦️','🌧️','🌩️','⛈️','🌪️','❄️','☃️','🌈','🌊','🌋','⛰️','🏔️','🏝️','🌅','🌄','⭐','🌟','✨','💫','🌕','🌑','🌠','🌌','🌀','🌬️','💧','💦','🔥'] },
-    { icon: '🍕', title: 'Food & Drink', emoji: ['🍎','🍊','🍋','🍇','🍓','🍒','🍑','🥭','🍍','🥝','🍅','🥦','🥬','🥒','🌽','🥕','🥐','🍞','🥖','🧀','🥚','🍳','🥞','🧇','🥓','🥩','🍗','🍖','🌭','🍔','🍟','🍕','🌮','🌯','🥙','🍱','🍣','🍤','🍜','🍝','🍛','🍚','🍙','🥮','🍡','🧁','🍰','🎂','🍮','🍭','🍬','🍫','🍿','🍩','🍪','🌰','🥜','🍵','☕','🫖','🍺','🍻','🥂','🍷','🥃','🍸','🍹','🧃','🥤','🧋','🍾'] },
-    { icon: '🎉', title: 'Fun & Activities', emoji: ['🎉','🎊','🎈','🎁','🎀','🎆','🎇','🎭','🎨','🎪','🎢','🎡','🎠','🎯','🎳','🎲','🎮','🎰','🃏','🀄','♟️','🎸','🎹','🎻','🥁','🎤','🎧','🎬','🎟️','🏆','🥇','🥈','🥉','🏅','⚽','🏀','🏈','⚾','🎾','🏸','🏊','🏄','🚴','🧘','🤸','💃','🕺','🎄','🎃','🎑','🎐','🧨','🪅','🪆','🪄'] },
-    { icon: '💫', title: 'Symbols', emoji: ['✅','❌','❓','❗','‼️','💯','🔥','⚡','💧','💨','💎','🔮','🧿','💡','🕯️','⚠️','🚫','⛔','🔞','💤','💢','💥','💦','💫','💬','💭','🗯️','✉️','📩','📱','💻','⌚','📷','🔑','🔒','🔔','📢','♥️','♠️','♦️','♣️','🔴','🟠','🟡','🟢','🔵','🟣','⚫','⚪','🏳️','🏴','🚩','🆗','🆙','🆒','🆕','🆓','🔅','🔆','📶'] },
+    { icon: '😊', title: 'Faces', emoji: [
+      ['😀','grin happy smile face'],['😃','happy smile open mouth'],['😄','grin squint happy'],
+      ['😁','grin teeth happy'],['😆','laugh squint happy'],['😅','sweat smile nervous'],
+      ['🤣','rofl rolling floor laughing'],['😂','joy tears laughing cry'],
+      ['🙂','smile slight'],['🙃','upside down smile'],['😉','wink'],['😊','smile blush'],
+      ['😇','angel halo innocent'],['😍','heart eyes love adore'],['🤩','star eyes wow amazing starstruck'],
+      ['😘','kiss blow love'],['🥰','love hearts smiling'],['😋','yummy delicious tongue'],
+      ['😛','tongue out'],['😜','winking tongue'],['🤪','crazy zany silly'],['😝','tongue squint'],
+      ['🤑','money mouth rich'],['🤗','hug hugging arms'],['🤭','hand mouth giggle oops'],
+      ['🤫','shush quiet secret finger lips'],['🤔','thinking hmm ponder'],
+      ['🤐','zipper mouth silent zip'],['🤨','raised eyebrow suspicious'],
+      ['😐','neutral blank'],['😑','expressionless'],['😶','no mouth silent'],
+      ['😏','smirk sly'],['😒','unamused unhappy'],['🙄','eye roll annoyed'],
+      ['😬','grimace nervous'],['🤥','lying pinocchio'],['😌','relieved content'],
+      ['😔','pensive sad'],['😪','sleepy tired'],['🤤','drool hungry'],['😴','sleep zzz tired'],
+      ['😷','mask sick face'],['🤒','sick fever ill'],['🤕','injured bandage hurt'],
+      ['🤢','nausea sick gross'],['🤮','vomit puke sick'],['🤧','sneeze sick cold'],
+      ['🥵','hot sweating overheated'],['🥶','cold freezing ice'],['🥴','woozy drunk dizzy'],
+      ['😵','dizzy swirl faint'],['🤯','exploding head mind blown'],['🤠','cowboy hat western'],
+      ['🥳','party celebration festive'],['😎','cool sunglasses'],['🤓','nerd glasses smart'],
+      ['🧐','monocle fancy detective'],['😕','confused unsure'],['😟','worried anxious'],
+      ['🙁','slight frown sad'],['☹️','frown sad unhappy'],['😮','open mouth surprised'],
+      ['😯','hushed surprised'],['😲','astonished shocked'],['😳','flushed embarrassed red'],
+      ['🥺','pleading begging puppy eyes'],['😦','frowning open mouth'],['😧','anguished pain'],
+      ['😨','fearful scared afraid'],['😰','anxious sweat cold fear'],['😥','sad relieved'],
+      ['😢','cry tear sad'],['😭','sob crying loudly'],['😱','scream fear horror'],
+      ['😖','confounded frustrated'],['😣','persevere struggle pain'],['😞','disappointed sad'],
+      ['😓','sweat downcast'],['😩','weary tired exhausted'],['😫','tired drained'],
+      ['🥱','yawn tired bored'],['😤','steam nose triumph frustrated'],
+      ['😡','angry pouting rage mad'],['😠','angry mad'],['🤬','swear cursing angry'],
+      ['😈','devil evil smiling demon horns mischief imp satan'],
+      ['👿','devil angry imp evil horns demon goblin satan'],
+      ['💀','skull death dead'],['☠️','skull crossbones death poison danger'],
+      ['💩','poop shit'],['🤡','clown'],['👻','ghost boo spooky'],
+      ['👽','alien ufo extraterrestrial'],['👾','alien monster game space invader'],['🤖','robot'],
+    ]},
+    { icon: '👋', title: 'Gestures', emoji: [
+      ['👋','wave hello goodbye'],['🤚','raised back hand stop'],
+      ['🖐️','hand five fingers spread'],['✋','raised hand stop high five'],
+      ['🖖','vulcan spock live long prosper'],['👌','ok okay perfect'],
+      ['🤌','pinched fingers italian chef kiss'],['🤏','pinching hand small'],
+      ['✌️','peace victory two fingers'],['🤞','crossed fingers luck hope'],
+      ['🤟','love you hand rock'],['🤘','horns rock metal sign'],
+      ['🤙','call me shaka hang loose'],['👈','point left'],['👉','point right'],
+      ['👆','point up'],['🖕','middle finger rude'],['👇','point down'],
+      ['☝️','index point up one'],['👍','thumbs up good yes like approve'],
+      ['👎','thumbs down bad no dislike'],['✊','fist bump raise power'],
+      ['👊','oncoming fist punch'],['🤛','left fist bump'],['🤜','right fist bump'],
+      ['👏','clap applause bravo'],['🙌','raising hands celebrate hooray'],
+      ['👐','open hands'],['🤲','palms up together'],['🤝','handshake deal'],
+      ['🙏','pray thank you please namaste'],['✍️','write pen sign'],
+      ['💅','nail polish fancy manicure'],['💪','flex muscle strong arm'],['🦾','mechanical arm prosthetic'],
+      ['👀','eyes look watching see'],['👁️','eye see'],['👄','lips mouth'],['💋','kiss lips'],
+      ['🫦','biting lip'],['🫶','heart hands love'],['🫰','finger snap'],
+    ]},
+    { icon: '❤️', title: 'Hearts', emoji: [
+      ['❤️','red heart love'],['🧡','orange heart'],['💛','yellow heart'],
+      ['💚','green heart'],['💙','blue heart'],['💜','purple heart'],
+      ['🖤','black heart dark evil'],['🤍','white heart pure'],['🤎','brown heart'],
+      ['💔','broken heart sad'],['❣️','heart exclamation'],['💕','two hearts'],
+      ['💞','revolving hearts'],['💓','beating heart'],['💗','growing heart'],
+      ['💖','sparkling heart'],['💘','heart arrow cupid love'],
+      ['💝','heart ribbon gift'],['💟','heart decoration'],
+      ['❤️‍🔥','heart fire passion desire'],['❤️‍🩹','mending heart heal repair'],
+      ['😍','heart eyes love adore'],['🥰','love hearts smiling'],['😘','kiss blow love'],
+      ['💑','couple love'],['👫','couple man woman'],['💌','love letter mail'],
+      ['💍','ring engagement wedding'],['💒','wedding chapel'],['🌹','rose flower love'],
+      ['🥀','wilted rose flower dead dying'],['🌷','tulip flower'],['💐','bouquet flowers'],
+      ['🎀','ribbon bow pink'],['🎁','gift present'],
+    ]},
+    { icon: '🐶', title: 'Animals', emoji: [
+      ['🐶','dog puppy'],['🐱','cat kitten'],['🐭','mouse'],['🐹','hamster'],
+      ['🐰','rabbit bunny'],['🦊','fox'],['🐻','bear'],['🐼','panda'],
+      ['🐨','koala'],['🐯','tiger'],['🦁','lion'],['🐮','cow moo'],
+      ['🐷','pig oink'],['🐸','frog'],['🐵','monkey'],['🙈','see no evil monkey'],
+      ['🙉','hear no evil monkey'],['🙊','speak no evil monkey'],
+      ['🐔','chicken hen'],['🐧','penguin'],['🐦','bird'],['🦆','duck'],
+      ['🦅','eagle'],['🦉','owl'],['🦇','bat'],['🐺','wolf'],
+      ['🐴','horse'],['🦄','unicorn magic'],['🐝','bee honey'],['🦋','butterfly'],
+      ['🐌','snail slow'],['🐞','ladybug beetle'],['🐜','ant'],['🐢','turtle slow'],
+      ['🐍','snake'],['🦎','lizard'],['🐙','octopus'],['🦑','squid'],
+      ['🦀','crab'],['🐡','blowfish'],['🐠','tropical fish'],['🐟','fish'],
+      ['🐬','dolphin'],['🐳','whale'],['🦈','shark'],['🦭','seal'],
+      ['🦓','zebra'],['🐘','elephant'],['🦏','rhinoceros rhino'],['🐪','camel'],
+      ['🦒','giraffe'],['🦬','bison buffalo'],['🐎','horse racing'],
+      ['🐑','sheep ewe'],['🐐','goat'],['🦌','deer'],
+      ['🐕','dog'],['🐩','poodle dog'],['🐈','cat'],
+      ['🦚','peacock'],['🦜','parrot'],['🕊️','dove peace bird'],
+      ['🐇','rabbit bunny'],['🦝','raccoon'],['🦦','otter'],
+      ['🐁','mouse rat'],['🐿️','chipmunk squirrel'],['🦔','hedgehog'],['🐾','paw print animal'],
+      ['🦋','butterfly'],['🐛','caterpillar bug'],['🦗','cricket bug'],['🦟','mosquito bug'],
+    ]},
+    { icon: '🌺', title: 'Nature', emoji: [
+      ['💐','bouquet flowers'],['🌸','cherry blossom flower pink'],['💮','white flower'],
+      ['🌹','rose flower red'],['🥀','wilted rose flower dead dying'],['🌺','hibiscus flower'],
+      ['🌻','sunflower yellow'],['🌼','blossom flower yellow'],['🌷','tulip flower pink'],
+      ['🌱','seedling plant sprout grow'],['🌿','herb leaf plant green'],['☘️','shamrock clover ireland'],
+      ['🍀','four leaf clover luck'],['🍃','leaves wind'],['🍂','fallen leaf autumn'],
+      ['🍁','maple leaf autumn canada red'],['🌾','sheaf grain wheat'],['🌵','cactus desert'],
+      ['🎄','christmas tree holiday'],['🌲','evergreen tree pine'],['🌳','deciduous tree'],
+      ['🌴','palm tree tropical beach'],['🌙','crescent moon night'],['☀️','sun sunny warm'],
+      ['🌤️','partly cloudy sun'],['⛅','partly cloudy'],['🌦️','rain sun cloud'],
+      ['🌧️','rain cloud wet'],['🌩️','lightning storm'],['⛈️','thunderstorm'],
+      ['🌪️','tornado cyclone wind'],['❄️','snowflake cold winter ice'],
+      ['☃️','snowman winter snow'],['🌈','rainbow colorful'],['🌊','wave ocean sea water'],
+      ['🌋','volcano eruption fire'],['⛰️','mountain peak'],['🏔️','snow mountain peak'],
+      ['🏝️','island tropical beach'],['🌅','sunrise morning'],['🌄','mountain sunrise'],
+      ['⭐','star yellow'],['🌟','glowing star shine'],['✨','sparkle shine magic'],['💫','dizzy star spin'],
+      ['🌕','full moon'],['🌑','new moon dark night'],['🌠','shooting star wish'],
+      ['🌌','milky way galaxy space stars'],['🌀','cyclone spiral'],['🌬️','wind blow cold'],
+      ['💧','droplet water'],['💦','water splash'],['🔥','fire flame hot'],['⚡','lightning bolt energy'],
+    ]},
+    { icon: '🍕', title: 'Food & Drink', emoji: [
+      ['🍎','apple red fruit'],['🍊','orange tangerine fruit'],['🍋','lemon yellow sour'],
+      ['🍇','grapes fruit purple'],['🍓','strawberry fruit red'],['🍒','cherry fruit red'],
+      ['🍑','peach fruit'],['🥭','mango tropical fruit'],['🍍','pineapple fruit tropical'],
+      ['🥝','kiwi fruit green'],['🍅','tomato red'],['🥦','broccoli green'],['🥬','leafy green vegetable'],
+      ['🥒','cucumber green'],['🌽','corn maize yellow'],['🥕','carrot orange'],['🥐','croissant bread pastry'],
+      ['🍞','bread loaf'],['🥖','baguette bread french'],['🧀','cheese'],['🥚','egg'],
+      ['🍳','egg frying cooking breakfast'],['🥞','pancakes stack breakfast'],['🧇','waffle breakfast'],
+      ['🥓','bacon breakfast'],['🥩','meat steak beef'],['🍗','chicken drumstick'],
+      ['🍖','meat bone'],['🌭','hot dog sausage'],['🍔','hamburger burger'],
+      ['🍟','french fries chips'],['🍕','pizza'],['🌮','taco mexican'],['🌯','burrito wrap'],
+      ['🥙','falafel wrap pita'],['🍱','bento box japanese'],['🍣','sushi japanese'],
+      ['🍤','shrimp fried tempura'],['🍜','noodles ramen soup'],['🍝','spaghetti pasta italian'],
+      ['🍛','curry rice spicy'],['🍚','rice bowl'],['🍙','rice ball onigiri japanese'],
+      ['🥮','mooncake chinese'],['🍡','dango sweet japanese'],['🧁','cupcake sweet'],
+      ['🍰','cake slice birthday'],['🎂','birthday cake celebrate'],['🍮','pudding custard flan'],
+      ['🍭','lollipop candy sweet'],['🍬','candy sweet'],['🍫','chocolate bar sweet'],
+      ['🍿','popcorn movie snack'],['🍩','doughnut donut sweet'],['🍪','cookie sweet bake'],
+      ['🌰','chestnut nut'],['🥜','peanut nut'],['🍵','tea green cup hot'],
+      ['☕','coffee hot cup morning'],['🫖','teapot tea'],
+      ['🍺','beer mug drink'],['🍻','cheers beer clinking toast'],['🥂','champagne toast cheers celebrate'],
+      ['🍷','wine glass red drink'],['🥃','whiskey tumbler spirit drink'],['🍸','cocktail martini drink'],
+      ['🍹','tropical drink cocktail'],['🧃','juice box'],['🥤','cup straw drink soda'],
+      ['🧋','bubble tea boba drink'],['🍾','champagne bottle celebrate'],
+    ]},
+    { icon: '🎉', title: 'Fun & Activities', emoji: [
+      ['🎉','party celebrate confetti'],['🎊','confetti ball celebrate'],
+      ['🎈','balloon party'],['🎁','gift present wrap'],['🎀','ribbon bow'],
+      ['🎆','fireworks celebrate'],['🎇','sparkler firework'],
+      ['🎭','theater drama masks arts'],['🎨','art paint palette creative'],
+      ['🎪','circus tent performance'],['🎢','roller coaster theme park'],
+      ['🎡','ferris wheel fair'],['🎠','carousel merry go round'],
+      ['🎯','bullseye target dart aim'],['🎳','bowling pins'],['🎲','dice game chance'],
+      ['🎮','game controller video gaming'],['🎰','slot machine gamble luck'],
+      ['🃏','joker card game wild'],['🀄','mahjong game tiles'],['♟️','chess pawn strategy'],
+      ['🎸','guitar music rock'],['🎹','piano keyboard music'],['🎻','violin music strings'],
+      ['🥁','drum music percussion'],['🎺','trumpet music brass'],['🪗','accordion music'],
+      ['🎤','microphone sing karaoke'],['🎧','headphones music listen'],
+      ['🎬','clapper film movie action'],['🎟️','ticket event admission'],
+      ['🏆','trophy win champion'],['🥇','gold medal first place'],
+      ['🥈','silver medal second place'],['🥉','bronze medal third place'],['🏅','medal award'],
+      ['⚽','soccer football sport'],['🏀','basketball sport'],['🏈','football american sport'],
+      ['⚾','baseball sport'],['🎾','tennis sport'],['🏸','badminton sport'],
+      ['🏊','swimming swim sport'],['🏄','surf wave sport'],['🚴','cycling bike sport'],
+      ['🧘','yoga meditate calm'],['🤸','gymnastics cartwheel'],
+      ['💃','dance woman'],['🕺','dance man'],
+      ['🎃','halloween pumpkin jack lantern spooky'],['🎄','christmas tree holiday'],
+      ['🎑','moon viewing japanese'],['🎐','wind chime'],['🧨','firecracker chinese new year'],
+      ['🪅','piñata party'],['🪆','nesting doll matryoshka russian'],['🪄','magic wand trick'],
+    ]},
+    { icon: '💫', title: 'Symbols', emoji: [
+      ['✅','check mark done yes correct'],['❌','cross mark no wrong incorrect'],
+      ['❓','question mark unknown'],['❗','exclamation mark important'],['‼️','double exclamation urgent'],
+      ['💯','hundred percent perfect score'],['🔥','fire hot trending lit'],['⚡','lightning bolt fast energy'],
+      ['💧','water drop'],['💨','dash wind blow'],['💎','diamond gem jewel precious'],
+      ['🔮','crystal ball magic fortune'],['🧿','nazar evil eye amulet protection'],
+      ['💡','light bulb idea'],['🕯️','candle flame light romantic'],['⚠️','warning caution danger'],
+      ['🚫','no prohibited banned'],['⛔','stop no entry'],['🔞','no under 18 adult explicit'],
+      ['💤','sleep zzz tired'],['💢','anger symbol frustrated'],['💥','explosion boom impact'],
+      ['💦','water sweat splash'],['💫','dizzy star spin'],
+      ['💬','speech bubble chat message'],['💭','thought bubble thinking'],['🗯️','anger bubble shout'],
+      ['✉️','envelope mail letter send'],['📩','email incoming'],
+      ['📱','phone mobile cell'],['💻','laptop computer'],['⌚','watch clock time'],
+      ['📷','camera photo picture'],['🔑','key unlock access'],['🔒','lock secure private'],
+      ['🔔','bell notification alert'],['📢','loudspeaker announce'],
+      ['♥️','heart suit card'],['♠️','spade suit card'],
+      ['♦️','diamond suit card'],['♣️','club suit card'],
+      ['🔴','red circle'],['🟠','orange circle'],['🟡','yellow circle'],
+      ['🟢','green circle'],['🔵','blue circle'],['🟣','purple circle'],
+      ['⚫','black circle'],['⚪','white circle'],
+      ['🏳️','white flag surrender'],['🏴','black flag pirate'],['🚩','red flag warning'],
+      ['🆗','ok button'],['🆙','up button'],['🆒','cool button'],['🆕','new button fresh'],
+      ['🆓','free button gratis'],['🔅','dim brightness low'],['🔆','bright brightness high'],
+      ['📶','signal bars wifi'],['♾️','infinity forever'],['⚜️','fleur de lis gold'],
+      ['🔱','trident symbol poseidon'],['☯️','yin yang balance'],['☮️','peace symbol'],
+      ['✝️','cross christian'],['☪️','star crescent muslim'],['🕉️','om hindu'],
+    ]},
   ];
 
   win.webContents.executeJavaScript(`(function() {
@@ -537,58 +719,108 @@ function injectEmojiPicker() {
       '#lit-emoji-picker{position:fixed;width:308px;background:#1a1a2a;border:1px solid #3a3a4a;' +
       'border-radius:10px;box-shadow:0 8px 32px rgba(0,0,0,0.6);z-index:99999;' +
       'display:none;flex-direction:column;overflow:hidden;font-family:system-ui,sans-serif;}' +
+      '#lit-emoji-search-wrap{padding:6px 6px 4px;background:#0f0f17;flex-shrink:0;}' +
+      '#lit-emoji-search{width:100%;padding:5px 9px;background:#1a1a2a;border:1px solid #3a3a4a;' +
+      'border-radius:6px;color:#e0e0e8;font-size:13px;outline:none;box-sizing:border-box;}' +
+      '#lit-emoji-search:focus{border-color:#7c5cbf;}' +
+      '#lit-emoji-search::placeholder{color:#555;}' +
       '#lit-emoji-tabs{display:flex;background:#0f0f17;padding:4px;gap:2px;flex-shrink:0;}' +
       '.lit-emoji-tab{flex:1;padding:5px 0;text-align:center;cursor:pointer;border-radius:5px;' +
       'font-size:15px;opacity:0.5;transition:opacity 0.12s,background 0.12s;}' +
       '.lit-emoji-tab:hover{opacity:0.85;}' +
       '.lit-emoji-tab.active{opacity:1;background:#2a2a3a;}' +
       '#lit-emoji-grid{display:flex;flex-wrap:wrap;padding:6px;gap:1px;' +
-      'max-height:240px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:#2a2a3a #0f0f17;}' +
+      'max-height:220px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:#2a2a3a #0f0f17;}' +
       '#lit-emoji-grid::-webkit-scrollbar{width:6px;}' +
       '#lit-emoji-grid::-webkit-scrollbar-track{background:#0f0f17;}' +
       '#lit-emoji-grid::-webkit-scrollbar-thumb{background:#2a2a3a;border-radius:3px;}' +
       '.lit-emoji-item{font-size:20px;width:34px;height:34px;display:flex;align-items:center;' +
       'justify-content:center;cursor:pointer;border-radius:4px;transition:background 0.1s;line-height:1;}' +
       '.lit-emoji-item:hover{background:#2a2a3a;}' +
+      '.lit-emoji-none{color:#555;font-size:12px;padding:16px;width:100%;text-align:center;}' +
       '#lit-emoji-trigger{cursor:pointer;width:auto!important;font-size:13px;line-height:16px;opacity:0.7;transition:opacity 0.15s;}' +
       '#lit-emoji-trigger:hover{opacity:1;}';
     document.head.appendChild(s);
 
     var picker = document.createElement('div');
     picker.id = 'lit-emoji-picker';
+    var searchWrap = document.createElement('div');
+    searchWrap.id = 'lit-emoji-search-wrap';
+    var searchInput = document.createElement('input');
+    searchInput.id = 'lit-emoji-search';
+    searchInput.type = 'text';
+    searchInput.placeholder = 'Search emoji…';
+    searchInput.autocomplete = 'off';
+    searchWrap.appendChild(searchInput);
     var tabs = document.createElement('div');
     tabs.id = 'lit-emoji-tabs';
     var grid = document.createElement('div');
     grid.id = 'lit-emoji-grid';
+    picker.appendChild(searchWrap);
     picker.appendChild(tabs);
     picker.appendChild(grid);
     document.body.appendChild(picker);
 
-    function showCategory(idx) {
-      tabs.querySelectorAll('.lit-emoji-tab').forEach(function(t, i) {
-        t.classList.toggle('active', i === idx);
-      });
+    // Flat list for search: [{e, n}]
+    var ALL = [];
+    CATS.forEach(function(cat) {
+      cat.emoji.forEach(function(pair) { ALL.push({ e: pair[0], n: pair[1] }); });
+    });
+
+    function renderEmoji(pairs) {
       grid.innerHTML = '';
-      CATS[idx].emoji.forEach(function(e) {
+      if (!pairs.length) {
+        var none = document.createElement('div');
+        none.className = 'lit-emoji-none';
+        none.textContent = 'No results';
+        grid.appendChild(none);
+        return;
+      }
+      pairs.forEach(function(pair) {
+        var e = Array.isArray(pair) ? pair[0] : pair.e;
         var span = document.createElement('span');
         span.className = 'lit-emoji-item';
         span.textContent = e;
         span.title = e;
-        span.addEventListener('click', function(ev) {
-          ev.stopPropagation();
-          insertEmoji(e);
-        });
+        span.addEventListener('click', function(ev) { ev.stopPropagation(); insertEmoji(e); });
         grid.appendChild(span);
       });
       grid.scrollTop = 0;
     }
 
+    function showCategory(idx) {
+      tabs.querySelectorAll('.lit-emoji-tab').forEach(function(t, i) {
+        t.classList.toggle('active', i === idx);
+      });
+      renderEmoji(CATS[idx].emoji);
+    }
+
+    searchInput.addEventListener('input', function(e) {
+      e.stopPropagation();
+      var q = searchInput.value.trim().toLowerCase();
+      if (!q) { showCategory(currentCat); return; }
+      tabs.querySelectorAll('.lit-emoji-tab').forEach(function(t) { t.classList.remove('active'); });
+      var results = ALL.filter(function(item) {
+        return item.e === q || item.n.indexOf(q) !== -1;
+      });
+      renderEmoji(results);
+    });
+
+    searchInput.addEventListener('click', function(e) { e.stopPropagation(); });
+    searchInput.addEventListener('keydown', function(e) { e.stopPropagation(); });
+
+    var currentCat = 0;
     CATS.forEach(function(cat, i) {
       var tab = document.createElement('div');
       tab.className = 'lit-emoji-tab';
       tab.textContent = cat.icon;
       tab.title = cat.title;
-      tab.addEventListener('click', function(e) { e.stopPropagation(); showCategory(i); });
+      tab.addEventListener('click', function(e) {
+        e.stopPropagation();
+        searchInput.value = '';
+        currentCat = i;
+        showCategory(i);
+      });
       tabs.appendChild(tab);
     });
 
@@ -619,9 +851,14 @@ function injectEmojiPicker() {
     }
 
     function togglePicker(triggerEl) {
-      if (picker.style.display === 'flex') { picker.style.display = 'none'; return; }
+      if (picker.style.display === 'flex') {
+        picker.style.display = 'none';
+        searchInput.value = '';
+        showCategory(currentCat);
+        return;
+      }
       var rect = triggerEl.getBoundingClientRect();
-      var pw = 308, ph = 296;
+      var pw = 308, ph = 336;
       var top  = rect.top - ph - 6;
       if (top < 8) top = rect.bottom + 6;
       var left = rect.left + rect.width / 2 - pw / 2;
@@ -630,6 +867,7 @@ function injectEmojiPicker() {
       picker.style.top  = top  + 'px';
       picker.style.left = left + 'px';
       picker.style.display = 'flex';
+      setTimeout(function() { searchInput.focus(); }, 50);
     }
 
     function setupTrigger() {
@@ -648,6 +886,8 @@ function injectEmojiPicker() {
     document.addEventListener('click', function(e) {
       if (!picker.contains(e.target) && e.target.id !== 'lit-emoji-trigger') {
         picker.style.display = 'none';
+        searchInput.value = '';
+        showCategory(currentCat);
       }
     }, true);
 
