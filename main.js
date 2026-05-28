@@ -609,6 +609,7 @@ function injectEmojiPicker() {
       ['🐇','rabbit bunny'],['🦝','raccoon'],['🦦','otter'],
       ['🐁','mouse rat'],['🐿️','chipmunk squirrel'],['🦔','hedgehog'],['🐾','paw print animal'],
       ['🦋','butterfly'],['🐛','caterpillar bug'],['🦗','cricket bug'],['🦟','mosquito bug'],
+      ['🪿','goose bird'],['🦤','dodo bird extinct'],['🪶','feather bird light'],
     ]},
     { icon: '🌺', title: 'Nature', emoji: [
       ['💐','bouquet flowers'],['🌸','cherry blossom flower pink'],['💮','white flower'],
