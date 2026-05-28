@@ -129,6 +129,7 @@ let watchList = loadWatchList();           // Set of lowercased nicks to watch
 let onlineWatched = new Set();             // currently-online watched nicks this session
 let presenceNotifyReady = false;           // false during startup roster flood
 let awayRepliedTo = new Set();             // JIDs already sent an away-reply this away session
+let awayConversations = new Map();         // per-sender conversation history for llama mode
 
 // Must be set before app is ready to prevent BOSH keepalive starvation
 // when the window is minimized or hidden.
