@@ -1283,6 +1283,56 @@ function injectEmojiPicker() {
       input.focus();
       input.dispatchEvent(new Event('input',  { bubbles: true }));
       input.dispatchEvent(new Event('change', { bubbles: true }));
+      trackEmoji(emoji);
+      updateFavBar();
+    }
+
+    function trackEmoji(emoji) {
+      try {
+        var freq = JSON.parse(localStorage.getItem('lit_emoji_freq') || '{}');
+        freq[emoji] = (freq[emoji] || 0) + 1;
+        localStorage.setItem('lit_emoji_freq', JSON.stringify(freq));
+      } catch(e) {}
+    }
+
+    function topEmoji(n) {
+      try {
+        var freq = JSON.parse(localStorage.getItem('lit_emoji_freq') || '{}');
+        return Object.entries(freq)
+          .sort(function(a, b) { return b[1] - a[1]; })
+          .slice(0, n)
+          .map(function(entry) { return entry[0]; });
+      } catch(e) { return []; }
+    }
+
+    function updateFavBar(bar) {
+      bar = bar || document.getElementById('lit-emoji-favs');
+      if (!bar) return;
+      var top = topEmoji(10);
+      bar.innerHTML = '';
+      if (!top.length) return;
+      top.forEach(function(e) {
+        var sp = document.createElement('span');
+        sp.textContent = e;
+        sp.title = e;
+        sp.style.cssText = 'font-size:16px;cursor:pointer;line-height:24px;opacity:0.7;padding:0 2px;transition:opacity 0.1s;';
+        sp.addEventListener('mouseover', function() { sp.style.opacity = '1'; });
+        sp.addEventListener('mouseout',  function() { sp.style.opacity = '0.7'; });
+        sp.addEventListener('click', function(ev) { ev.stopPropagation(); insertEmoji(e); });
+        bar.appendChild(sp);
+      });
+    }
+
+    function setupFavBar() {
+      if (document.getElementById('lit-emoji-favs')) return;
+      var toolbar = document.getElementById('chat-toolbar');
+      if (!toolbar) return;
+      var isOn = localStorage.getItem('lit_emoji_favs_on') !== '0';
+      var bar = document.createElement('div');
+      bar.id = 'lit-emoji-favs';
+      bar.style.cssText = 'float:left;display:' + (isOn ? 'flex' : 'none') + ';align-items:center;height:24px;padding:0 4px;';
+      toolbar.insertBefore(bar, toolbar.firstChild);
+      if (isOn) updateFavBar(bar);
     }
 
     function togglePicker(triggerEl) {
@@ -1335,9 +1385,14 @@ function injectEmojiPicker() {
       }
     }, true);
 
+    window._litInsertEmoji = insertEmoji;
+    window._litUpdateFavBar = updateFavBar;
+
     setupTrigger();
+    setupFavBar();
     new MutationObserver(function() {
       if (!document.getElementById('lit-emoji-trigger')) setupTrigger();
+      if (!document.getElementById('lit-emoji-favs')) setupFavBar();
     }).observe(document.body, { childList: true, subtree: true });
   })();`).catch(() => {});
 }
@@ -1369,8 +1424,34 @@ function injectNavButtons() {
       var logsBtn  = mkBtn('Logs');
       roomsBtn.addEventListener('click', function() { window.litChat && window.litChat.openRooms(); });
       logsBtn.addEventListener('click',  function() { window.litChat && window.litChat.openLogs(); });
+
+      var favsBtn = document.createElement('a');
+      favsBtn.textContent = 'Favs';
+      favsBtn.style.cssText = 'cursor:pointer;font-size:13px;padding:4px 10px;' +
+                              'border:1px solid;border-radius:4px;text-decoration:none;';
+      function syncFavsBtn() {
+        var on = localStorage.getItem('lit_emoji_favs_on') !== '0';
+        favsBtn.style.color = on ? hoverColor : baseColor;
+        favsBtn.style.borderColor = on ? hoverBorder : baseBorder;
+      }
+      syncFavsBtn();
+      favsBtn.addEventListener('mouseover', function() { favsBtn.style.color=hoverColor; favsBtn.style.borderColor=hoverBorder; });
+      favsBtn.addEventListener('mouseout',  syncFavsBtn);
+      favsBtn.addEventListener('click', function() {
+        var currentlyOn = localStorage.getItem('lit_emoji_favs_on') !== '0';
+        var nowOn = !currentlyOn;
+        localStorage.setItem('lit_emoji_favs_on', nowOn ? '1' : '0');
+        var bar = document.getElementById('lit-emoji-favs');
+        if (bar) {
+          bar.style.display = nowOn ? 'flex' : 'none';
+          if (nowOn && window._litUpdateFavBar) window._litUpdateFavBar(bar);
+        }
+        syncFavsBtn();
+      });
+
       wrap.appendChild(roomsBtn);
       wrap.appendChild(logsBtn);
+      wrap.appendChild(favsBtn);
       fw.appendChild(wrap);
     })();
   `).catch(() => {});
