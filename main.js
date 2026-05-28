@@ -1549,8 +1549,8 @@ function injectNavButtons() {
       }
       var roomsBtn = mkBtn('Rooms');
       var logsBtn  = mkBtn('Logs');
-      roomsBtn.addEventListener('click', function() { window.litChat && window.litChat.openRooms(); });
-      logsBtn.addEventListener('click',  function() { window.litChat && window.litChat.openLogs(); });
+      roomsBtn.addEventListener('click', function(e) { e.stopPropagation(); e.preventDefault(); window.litChat && window.litChat.openRooms(); });
+      logsBtn.addEventListener('click',  function(e) { e.stopPropagation(); e.preventDefault(); window.litChat && window.litChat.openLogs(); });
 
       wrap.appendChild(roomsBtn);
       wrap.appendChild(logsBtn);
