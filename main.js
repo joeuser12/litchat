@@ -128,6 +128,7 @@ let cssKeys = []; // keys returned by insertCSS; needed to remove on theme chang
 let watchList = loadWatchList();           // Set of lowercased nicks to watch
 let onlineWatched = new Set();             // currently-online watched nicks this session
 let presenceNotifyReady = false;           // false during startup roster flood
+let awayRepliedTo = new Set();             // JIDs already sent an away-reply this away session
 
 // Must be set before app is ready to prevent BOSH keepalive starvation
 // when the window is minimized or hidden.
@@ -153,7 +154,24 @@ function notifyDMs(messages) {
       title: `DM from ${nick}`,
       body: m.body.length > 120 ? m.body.slice(0, 120) + '…' : m.body,
     });
+    if (settings.prefs?.away && m.from && !awayRepliedTo.has(m.from)) {
+      awayRepliedTo.add(m.from);
+      sendAwayReply(m.from);
+    }
   }
+}
+
+function sendAwayReply(toJid) {
+  const msg = settings.prefs?.awayMessage || "I'm currently away.";
+  win.webContents.executeJavaScript(`
+    (function() {
+      try {
+        var conn = Candy.Core.getConnection();
+        var stanza = $msg({to: ${JSON.stringify(toJid)}, type: 'chat'}).c('body').t(${JSON.stringify(msg)});
+        conn.send(stanza.tree ? stanza.tree() : stanza);
+      } catch(e) { console.warn('Away reply failed:', e); }
+    })();
+  `).catch(() => {});
 }
 
 // Extracts presence stanzas from a BOSH XML body.
@@ -1786,6 +1804,32 @@ function createAppMenu() {
             if (${on} && window._litUpdateFavBar) window._litUpdateFavBar(bar);
           }
         `).catch(() => {});
+      },
+    },
+    { type: 'separator' },
+    {
+      label: 'Away',
+      type: 'checkbox',
+      checked: settings.prefs?.away ?? false,
+      click: (menuItem) => {
+        if (!settings.prefs) settings.prefs = {};
+        settings.prefs.away = menuItem.checked;
+        saveSettings();
+        if (!menuItem.checked) awayRepliedTo.clear();
+      },
+    },
+    {
+      label: 'Set Away Message…',
+      click: async () => {
+        const current = settings.prefs?.awayMessage || "I'm currently away.";
+        const result = await win.webContents.executeJavaScript(
+          `prompt('Away message:', ${JSON.stringify(current)})`
+        ).catch(() => null);
+        if (result !== null && result !== undefined) {
+          if (!settings.prefs) settings.prefs = {};
+          settings.prefs.awayMessage = result;
+          saveSettings();
+        }
       },
     },
   ];
