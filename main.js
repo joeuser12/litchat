@@ -1177,10 +1177,11 @@ function injectEmojiPicker() {
       }
       pairs.forEach(function(pair) {
         var e = Array.isArray(pair) ? pair[0] : pair.e;
+        var n = Array.isArray(pair) ? pair[1] : pair.n;
         var span = document.createElement('span');
         span.className = 'lit-emoji-item';
         span.textContent = e;
-        span.title = e;
+        span.title = n || e;
         span.addEventListener('click', function(ev) { ev.stopPropagation(); insertEmoji(e); });
         grid.appendChild(span);
       });
