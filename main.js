@@ -1327,14 +1327,28 @@ function injectEmojiPicker() {
       if (document.getElementById('lit-emoji-favs')) return;
       var toolbar = document.getElementById('chat-toolbar');
       if (!toolbar) return;
-      // Use absolute positioning so we don't disturb the toolbar's float layout
-      if (getComputedStyle(toolbar).position === 'static') toolbar.style.position = 'relative';
       var isOn = localStorage.getItem('lit_emoji_favs_on') !== '0';
       var bar = document.createElement('div');
       bar.id = 'lit-emoji-favs';
-      bar.style.cssText = 'position:absolute;left:0;top:0;height:24px;display:' + (isOn ? 'flex' : 'none') +
-                          ';align-items:center;padding:0 4px;gap:1px;pointer-events:auto;z-index:10;';
-      toolbar.appendChild(bar);
+      // Use position:fixed so we can anchor to the left edge of the viewport
+      // at the same vertical position as the toolbar, without touching its layout.
+      bar.style.cssText = 'position:fixed;display:' + (isOn ? 'flex' : 'none') +
+                          ';align-items:center;gap:2px;padding:0 6px;z-index:10000;pointer-events:auto;';
+      document.body.appendChild(bar);
+
+      function positionBar() {
+        var rect = toolbar.getBoundingClientRect();
+        if (!rect.height) return;
+        bar.style.top    = rect.top + 'px';
+        bar.style.height = rect.height + 'px';
+        bar.style.left   = '6px';
+        // Clamp width so bar never reaches the toolbar itself
+        bar.style.maxWidth = Math.max(0, rect.left - 12) + 'px';
+      }
+      positionBar();
+      window.addEventListener('resize', positionBar);
+      new ResizeObserver(positionBar).observe(toolbar);
+
       if (isOn) updateFavBar(bar);
     }
 
