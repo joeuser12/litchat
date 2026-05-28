@@ -683,7 +683,11 @@ function injectDMHistory() {
         }
         var myNick = null;
         var sentMsg = messages.find(function(m) { return m.direction === 'sent'; });
-        if (sentMsg && sentMsg.from) myNick = nickOf(sentMsg.from);
+        if (sentMsg && sentMsg.from) {
+          // Own JID is user@server/CandyClient — nick is the local part before '@'
+          var at = sentMsg.from.indexOf('@');
+          myNick = at !== -1 ? sentMsg.from.slice(0, at) : sentMsg.from;
+        }
 
         var msgPane = pane.querySelector('ul.message-pane, ul[class*="message"]');
         // Candy may not have finished building the pane — retry briefly
