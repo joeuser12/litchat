@@ -646,7 +646,7 @@ function injectDMHistory() {
             '</li>';
         });
         return '<li style="list-style:none;padding:0;margin:0" class="lit-dm-history">' +
-          '<details>' +
+          '<details open>' +
           '<summary style="cursor:pointer;padding:6px 8px;color:#4a4870;font-size:11px;' +
             'background:rgba(0,0,0,0.25);letter-spacing:0.05em;user-select:none">' +
             '▸ ' + messages.length + ' previous message' + (messages.length !== 1 ? 's' : '') +
