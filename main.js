@@ -699,6 +699,9 @@ function injectDMHistory() {
 
         var html = buildHistory(messages, myNick);
         msgPane.insertAdjacentHTML('afterbegin', html);
+        // Scroll the containing pane to the bottom so live messages are visible
+        var scroller = msgPane.closest('.message-pane-wrapper') || msgPane.parentElement;
+        if (scroller) scroller.scrollTop = scroller.scrollHeight;
       }
 
       // Populate any already-open DM panes (e.g. DMs from a previous session reopened)
