@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, shell, Notification, ipcMain } = require('electron');
+const { app, BrowserWindow, Menu, Tray, nativeImage, shell, Notification, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -135,6 +135,9 @@ let awayConversations = new Map();         // per-sender conversation history fo
 let updateState = 'idle';   // 'idle' | 'checking' | 'downloading' | 'ready'
 let updateVersion = null;
 let _autoUpdater = null;
+
+let tray = null;
+let trayMinimizeHintShown = false;
 
 // Must be set before app is ready to prevent BOSH keepalive starvation
 // when the window is minimized or hidden.
@@ -359,6 +362,17 @@ function createWindow() {
   win.on('resize', scheduleWindowStateSave);
   win.on('move',   scheduleWindowStateSave);
   win.on('close',  scheduleWindowStateSave);
+
+  win.on('minimize', () => {
+    win.hide();
+    if (!trayMinimizeHintShown) {
+      trayMinimizeHintShown = true;
+      new Notification({
+        title: 'Lit Chat is still running',
+        body: 'Click the tray icon to bring it back.',
+      }).show();
+    }
+  });
 
   win.loadURL(CHAT_URL);
 
@@ -1581,6 +1595,7 @@ function injectNavButtons() {
   `).catch(() => {});
 }
 
+
 function joinRoom(jid) {
   return win.webContents.executeJavaScript(
     `new Promise(function(resolve) {
@@ -2002,7 +2017,7 @@ function createAppMenu() {
         { label: 'Preferences', submenu: prefsItems },
         { type: 'separator' },
         (() => {
-          if (!app.isPackaged) return { label: 'Check for Updates', enabled: false };
+          if (!app.isPackaged) return { label: 'Check for Updates (dev build)', enabled: false };
           if (updateState === 'ready')       return { label: `Install Update (${updateVersion})…`, click: () => _autoUpdater.quitAndInstall() };
           if (updateState === 'downloading') return { label: `Downloading ${updateVersion}…`, enabled: false };
           if (updateState === 'checking')    return { label: 'Checking for Updates…', enabled: false };
@@ -2032,6 +2047,21 @@ function createAppMenu() {
       ],
     },
   ]));
+}
+
+function setupTray() {
+  const iconPath = path.join(__dirname, 'build', 'icon.png');
+  const icon = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 });
+  tray = new Tray(icon);
+  tray.setToolTip('Lit Chat');
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: 'Show', click: () => { win.show(); win.focus(); } },
+    { type: 'separator' },
+    { label: 'Quit', click: () => app.quit() },
+  ]));
+  tray.on('click', () => {
+    if (win.isVisible()) { win.focus(); } else { win.show(); win.focus(); }
+  });
 }
 
 function setupAutoUpdater() {
@@ -2145,7 +2175,7 @@ app.whenReady().then(() => {
   createAppMenu();
   createWindow();
   attachBOSHLogger();
-
+  setupTray();
   setupAutoUpdater();
 
   // Silence the site's broken favicon requests

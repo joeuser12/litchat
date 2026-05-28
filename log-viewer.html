@@ -17,16 +17,39 @@
       overflow: hidden;
     }
 
-    #search {
-      display: flex;
-      gap: 8px;
-      padding: 12px 16px;
+    #toolbar {
       background: #1a1a2a;
       border-bottom: 1px solid #2a2a3a;
       flex-shrink: 0;
     }
 
-    #username {
+    #tabs {
+      display: flex;
+      gap: 0;
+      padding: 8px 16px 0;
+    }
+    .tab-btn {
+      padding: 6px 16px;
+      background: none;
+      border: 1px solid #2a2a3a;
+      border-bottom: none;
+      border-radius: 6px 6px 0 0;
+      color: #666;
+      font-size: 13px;
+      cursor: pointer;
+      transition: color 0.15s, background 0.15s;
+      margin-right: 4px;
+    }
+    .tab-btn:hover { color: #aaa; }
+    .tab-btn.active { background: #0f0f17; color: #e0e0e8; border-color: #2a2a3a; }
+
+    #search-row {
+      display: flex;
+      gap: 8px;
+      padding: 10px 16px 12px;
+    }
+
+    .search-input {
       flex: 1;
       padding: 8px 12px;
       background: #0f0f17;
@@ -36,9 +59,9 @@
       font-size: 14px;
       outline: none;
     }
-    #username:focus { border-color: #7c5cbf; }
+    .search-input:focus { border-color: #7c5cbf; }
 
-    #btn {
+    .search-btn {
       padding: 8px 20px;
       background: #7c5cbf;
       border: none;
@@ -48,7 +71,7 @@
       cursor: pointer;
       transition: background 0.15s;
     }
-    #btn:hover { background: #9370db; }
+    .search-btn:hover { background: #9370db; }
 
     #messages {
       overflow-y: auto;
@@ -137,6 +160,13 @@
       margin: 4px 0;
     }
 
+    mark {
+      background: #6a3f00;
+      color: #ffd080;
+      border-radius: 2px;
+      padding: 0 1px;
+    }
+
     #notes-panel {
       display: none;
       flex-shrink: 0;
@@ -206,11 +236,21 @@
   </style>
 </head>
 <body>
-  <div id="search">
-    <input id="username" type="text" placeholder="Username…" list="suggestions" autocomplete="off" spellcheck="false">
-    <datalist id="suggestions"></datalist>
-    <button id="btn">View</button>
+  <div id="toolbar">
+    <div id="tabs">
+      <button class="tab-btn active" data-tab="user">By User</button>
+      <button class="tab-btn" data-tab="search">Search</button>
+    </div>
+    <div id="search-row">
+      <input id="username" class="search-input" type="text" placeholder="Username…" list="suggestions" autocomplete="off" spellcheck="false">
+      <datalist id="suggestions"></datalist>
+      <button id="btn" class="search-btn">View</button>
+
+      <input id="searchtext" class="search-input" type="text" placeholder="Search messages…" autocomplete="off" spellcheck="false" style="display:none">
+      <button id="searchbtn" class="search-btn" style="display:none">Search</button>
+    </div>
   </div>
+
   <div id="messages">
     <p class="placeholder">Enter a username to view conversation history.</p>
   </div>
@@ -228,10 +268,14 @@
   </div>
 
   <script>
-    const input   = document.getElementById('username');
-    const btn     = document.getElementById('btn');
-    const msgsEl  = document.getElementById('messages');
+    const input    = document.getElementById('username');
+    const btn      = document.getElementById('btn');
+    const msgsEl   = document.getElementById('messages');
     const datalist = document.getElementById('suggestions');
+    const searchTextInput = document.getElementById('searchtext');
+    const searchBtn       = document.getElementById('searchbtn');
+
+    let activeTab = 'user';
 
     // Populate autocomplete
     for (const u of window.logAPI.listUsers()) {
@@ -240,11 +284,41 @@
       datalist.appendChild(opt);
     }
 
+    // Tab switching
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        activeTab = btn.dataset.tab;
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b === btn));
+        const isUser = activeTab === 'user';
+        input.style.display        = isUser ? '' : 'none';
+        document.getElementById('btn').style.display = isUser ? '' : 'none';
+        datalist.style.display     = isUser ? '' : 'none';
+        searchTextInput.style.display = isUser ? 'none' : '';
+        searchBtn.style.display       = isUser ? 'none' : '';
+        notesPanel.style.display   = 'none';
+        if (isUser) {
+          msgsEl.innerHTML = '<p class="placeholder">Enter a username to view conversation history.</p>';
+          loadRecent();
+        } else {
+          msgsEl.innerHTML = '<p class="placeholder">Enter text to search all messages.</p>';
+          setTimeout(() => searchTextInput.focus(), 50);
+        }
+      });
+    });
+
     function esc(s) {
       return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     }
     function unescapeXml(s) {
       return s.replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&apos;/g,"'").replace(/&amp;/g,'&');
+    }
+
+    function highlight(text, query) {
+      if (!query) return esc(text);
+      const re = new RegExp('(' + query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'gi');
+      return text.split(re).map((part, i) =>
+        i % 2 === 1 ? `<mark>${esc(part)}</mark>` : esc(part)
+      ).join('');
     }
 
     function fmtTime(iso) {
@@ -255,7 +329,7 @@
       return new Date(iso).toLocaleDateString([], { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
     }
 
-    function renderMessages(messages) {
+    function renderMessages(messages, query) {
       const frags = [];
       let lastDate = null;
       for (const m of messages) {
@@ -266,15 +340,16 @@
         }
         const side = m.direction === 'sent' ? 'sent' : 'received';
         const peer = m.direction === 'sent' ? m.toUser : m.fromUser;
+        const body = highlight(unescapeXml(m.body || ''), query);
         frags.push(`<div class="msg ${side}">
           <div class="meta"><span>${esc(peer ?? '')} · ${esc(fmtTime(m.ts))}</span><span class="msg-del" data-sig="${esc(m.sig)}" title="Delete message">×</span></div>
-          <div>${esc(unescapeXml(m.body))}</div>
+          <div>${body}</div>
         </div>`);
       }
       return frags.join('');
     }
 
-    function renderGroup({ label, badgeClass, messages, collapsed, username, room }) {
+    function renderGroup({ label, badgeClass, messages, collapsed, username, room, query }) {
       const colClass = collapsed ? ' collapsed' : '';
       const delData = username
         ? `data-username="${esc(username)}" data-room="${esc(room ?? '')}"`
@@ -288,7 +363,7 @@
             ${username ? `<span class="ctx-del" ${delData} title="Delete all">×</span>` : ''}
             <span class="ctx-chevron">▼</span>
           </div>
-          <div class="ctx-messages">${renderMessages(messages)}</div>
+          <div class="ctx-messages">${renderMessages(messages, query)}</div>
         </div>`;
     }
 
@@ -298,7 +373,6 @@
         return;
       }
 
-      // Bucket messages by context key: 'dm' or the room name
       const buckets = new Map();
       for (const m of messages) {
         const key = m.room ?? '__dm__';
@@ -318,11 +392,50 @@
       msgsEl.innerHTML = frags.join('');
     }
 
+    function renderSearch(messages, query) {
+      if (!messages.length) {
+        msgsEl.innerHTML = '<p class="placeholder">No messages found matching that text.</p>';
+        return;
+      }
+
+      // Group by peer+room for context
+      const buckets = new Map();
+      for (const m of messages) {
+        const peer = (m.direction === 'sent' ? m.toUser : m.fromUser) ?? '?';
+        const room = m.room;
+        const key  = room ? `${peer}\0${room}` : peer;
+        if (!buckets.has(key)) buckets.set(key, { peer, room, msgs: [] });
+        buckets.get(key).msgs.push(m);
+      }
+
+      const total = messages.length;
+      const groups = [...buckets.values()];
+      const frags = [`<div style="font-size:11px;color:#555;padding:4px 4px 8px">${total} result${total !== 1 ? 's' : ''} across ${groups.length} conversation${groups.length !== 1 ? 's' : ''}</div>`];
+
+      for (const { peer, room, msgs } of groups) {
+        const label = room ? `${room}  ·  ${peer}` : peer;
+        const badgeClass = room ? 'room' : 'dm';
+        frags.push(renderGroup({ label, badgeClass, messages: msgs, collapsed: groups.length > 3, username: null, room, query }));
+      }
+
+      msgsEl.innerHTML = frags.join('');
+    }
+
     function load() {
       const user = input.value.trim();
       if (!user) return;
       render(window.logAPI.queryUser(user));
       loadNote(user);
+    }
+
+    function runSearch() {
+      const q = searchTextInput.value.trim();
+      if (q.length < 2) {
+        msgsEl.innerHTML = '<p class="placeholder">Enter at least 2 characters to search.</p>';
+        return;
+      }
+      renderSearch(window.logAPI.searchMessages(q), q);
+      notesPanel.style.display = 'none';
     }
 
     // Notes panel
@@ -364,12 +477,15 @@
       setTimeout(() => { saveConfirm.textContent = ''; }, 2000);
     });
 
-    // Ctrl+Enter saves note without leaving the textarea
     noteText.addEventListener('keydown', e => {
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) saveNoteBtn.click();
     });
 
     function reload() {
+      if (activeTab === 'search') {
+        runSearch();
+        return;
+      }
       const user = input.value.trim();
       if (user) load();
       else loadRecent();
@@ -409,6 +525,9 @@
 
     btn.addEventListener('click', load);
     input.addEventListener('keydown', e => { if (e.key === 'Enter') load(); });
+
+    searchBtn.addEventListener('click', runSearch);
+    searchTextInput.addEventListener('keydown', e => { if (e.key === 'Enter') runSearch(); });
   </script>
 </body>
 </html>

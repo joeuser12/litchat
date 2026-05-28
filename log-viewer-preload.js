@@ -114,6 +114,20 @@ contextBridge.exposeInMainWorld('logAPI', {
     });
   },
 
+  searchMessages(query, limit = 300) {
+    if (!query || query.trim().length < 2) return [];
+    const q = query.toLowerCase();
+    const msgs = readAllMessages()
+      .filter(m => m.body && m.body.toLowerCase().includes(q));
+    return msgs.slice(-limit).map(m => ({
+      ...m,
+      sig: msgSig(m),
+      fromUser: nickOf(m.from),
+      toUser: nickOf(m.to),
+      room: roomOf(m),
+    }));
+  },
+
   readNote,
   saveNote,
 
