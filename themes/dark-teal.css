@@ -210,12 +210,12 @@ ul.simplePaginationChatRoomList li a {
 ::-webkit-scrollbar-thumb:hover { background: #2a4040; }
 
 /* ── Custom header nav buttons ────────────────────────────────────────── */
-#lit-nav-btns a {
+#lit-nav-btns span {
   color: #7aacac !important;
   border-color: #1e2e2e !important;
   background: transparent !important;
 }
-#lit-nav-btns a:hover {
+#lit-nav-btns span:hover {
   color: #d0dcdc !important;
   border-color: #4db6ac !important;
 }

@@ -1539,18 +1539,31 @@ function injectNavButtons() {
       var baseBorder = isDark ? '#333'  : '#ccc';
       var hoverBorder = isDark ? '#666' : '#999';
       function mkBtn(label) {
-        var a = document.createElement('a');
-        a.textContent = label;
-        a.style.cssText = 'color:' + baseColor + ';cursor:pointer;font-size:13px;padding:4px 10px;' +
-                          'border:1px solid ' + baseBorder + ';border-radius:4px;text-decoration:none;';
-        a.addEventListener('mouseover', function() { a.style.color=hoverColor; a.style.borderColor=hoverBorder; });
-        a.addEventListener('mouseout',  function() { a.style.color=baseColor;  a.style.borderColor=baseBorder; });
-        return a;
+        var s = document.createElement('span');
+        s.textContent = label;
+        s.setAttribute('role', 'button');
+        s.style.cssText = 'color:' + baseColor + ';cursor:pointer;font-size:13px;padding:4px 10px;' +
+                          'border:1px solid ' + baseBorder + ';border-radius:4px;display:inline-block;' +
+                          'user-select:none;';
+        s.addEventListener('mouseover', function() { s.style.color=hoverColor; s.style.borderColor=hoverBorder; });
+        s.addEventListener('mouseout',  function() { s.style.color=baseColor;  s.style.borderColor=baseBorder; });
+        return s;
       }
       var roomsBtn = mkBtn('Rooms');
       var logsBtn  = mkBtn('Logs');
-      roomsBtn.addEventListener('click', function(e) { e.stopPropagation(); e.preventDefault(); window.litChat && window.litChat.openRooms(); });
-      logsBtn.addEventListener('click',  function(e) { e.stopPropagation(); e.preventDefault(); window.litChat && window.litChat.openLogs(); });
+      // Use capture=true so we intercept before any ancestor capture-phase handler the site may have
+      function armBtn(el, action) {
+        ['mousedown', 'mouseup', 'click'].forEach(function(t) {
+          el.addEventListener(t, function(e) {
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            e.preventDefault();
+            if (t === 'click') action();
+          }, true);
+        });
+      }
+      armBtn(roomsBtn, function() { window.litChat && window.litChat.openRooms(); });
+      armBtn(logsBtn,  function() { window.litChat && window.litChat.openLogs(); });
 
       wrap.appendChild(roomsBtn);
       wrap.appendChild(logsBtn);
