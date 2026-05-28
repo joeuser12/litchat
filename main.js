@@ -1822,9 +1822,43 @@ function createAppMenu() {
       label: 'Set Away Message…',
       click: async () => {
         const current = settings.prefs?.awayMessage || "I'm currently away.";
-        const result = await win.webContents.executeJavaScript(
-          `prompt('Away message:', ${JSON.stringify(current)})`
-        ).catch(() => null);
+        const result = await win.webContents.executeJavaScript(`
+          new Promise(function(resolve) {
+            var overlay = document.createElement('div');
+            overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.72);z-index:999999;display:flex;align-items:center;justify-content:center;';
+            var box = document.createElement('div');
+            box.style.cssText = 'background:#1a1a2a;border:1px solid #3a3a4a;border-radius:10px;padding:20px 20px 16px;width:380px;font-family:system-ui,sans-serif;box-shadow:0 8px 32px rgba(0,0,0,0.6);';
+            var lbl = document.createElement('div');
+            lbl.textContent = 'Away message';
+            lbl.style.cssText = 'color:#aaa;font-size:12px;margin-bottom:8px;letter-spacing:0.04em;text-transform:uppercase;';
+            var inp = document.createElement('input');
+            inp.type = 'text';
+            inp.value = ${JSON.stringify(current)};
+            inp.style.cssText = 'width:100%;padding:8px 10px;background:#0f0f17;border:1px solid #3a3a4a;border-radius:6px;color:#e0e0e8;font-size:14px;outline:none;box-sizing:border-box;';
+            inp.addEventListener('focus', function() { inp.style.borderColor='#7c5cbf'; });
+            inp.addEventListener('blur',  function() { inp.style.borderColor='#3a3a4a'; });
+            var btns = document.createElement('div');
+            btns.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:14px;';
+            var cancel = document.createElement('button');
+            cancel.textContent = 'Cancel';
+            cancel.style.cssText = 'padding:6px 16px;background:transparent;border:1px solid #3a3a4a;border-radius:6px;color:#aaa;cursor:pointer;font-size:13px;';
+            var save = document.createElement('button');
+            save.textContent = 'Save';
+            save.style.cssText = 'padding:6px 18px;background:#7c5cbf;border:none;border-radius:6px;color:#fff;cursor:pointer;font-size:13px;';
+            function done(v) { document.body.removeChild(overlay); resolve(v); }
+            cancel.onclick = function() { done(null); };
+            save.onclick   = function() { done(inp.value); };
+            inp.addEventListener('keydown', function(e) {
+              if (e.key === 'Enter')  { e.preventDefault(); done(inp.value); }
+              if (e.key === 'Escape') { e.preventDefault(); done(null); }
+            });
+            btns.appendChild(cancel); btns.appendChild(save);
+            box.appendChild(lbl); box.appendChild(inp); box.appendChild(btns);
+            overlay.appendChild(box);
+            document.body.appendChild(overlay);
+            setTimeout(function() { inp.focus(); inp.select(); }, 30);
+          })
+        `).catch(() => null);
         if (result !== null && result !== undefined) {
           if (!settings.prefs) settings.prefs = {};
           settings.prefs.awayMessage = result;
