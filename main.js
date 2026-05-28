@@ -1327,11 +1327,14 @@ function injectEmojiPicker() {
       if (document.getElementById('lit-emoji-favs')) return;
       var toolbar = document.getElementById('chat-toolbar');
       if (!toolbar) return;
+      // Use absolute positioning so we don't disturb the toolbar's float layout
+      if (getComputedStyle(toolbar).position === 'static') toolbar.style.position = 'relative';
       var isOn = localStorage.getItem('lit_emoji_favs_on') !== '0';
       var bar = document.createElement('div');
       bar.id = 'lit-emoji-favs';
-      bar.style.cssText = 'float:left;display:' + (isOn ? 'flex' : 'none') + ';align-items:center;height:24px;padding:0 4px;';
-      toolbar.insertBefore(bar, toolbar.firstChild);
+      bar.style.cssText = 'position:absolute;left:0;top:0;height:24px;display:' + (isOn ? 'flex' : 'none') +
+                          ';align-items:center;padding:0 4px;gap:1px;pointer-events:auto;z-index:10;';
+      toolbar.appendChild(bar);
       if (isOn) updateFavBar(bar);
     }
 
