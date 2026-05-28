@@ -1143,8 +1143,12 @@ function injectEmojiPicker() {
     ]},
   ];
 
+  const showFavEmoji = settings.prefs?.showFavEmoji !== false;
   win.webContents.executeJavaScript(`(function() {
     if (document.getElementById('lit-emoji-picker')) return;
+
+    // Sync server-side preference to localStorage
+    localStorage.setItem('lit_emoji_favs_on', ${JSON.stringify(showFavEmoji ? '1' : '0')});
 
     var CATS = ${JSON.stringify(CATS)};
 
@@ -1442,33 +1446,8 @@ function injectNavButtons() {
       roomsBtn.addEventListener('click', function() { window.litChat && window.litChat.openRooms(); });
       logsBtn.addEventListener('click',  function() { window.litChat && window.litChat.openLogs(); });
 
-      var favsBtn = document.createElement('a');
-      favsBtn.textContent = 'Favs';
-      favsBtn.style.cssText = 'cursor:pointer;font-size:13px;padding:4px 10px;' +
-                              'border:1px solid;border-radius:4px;text-decoration:none;';
-      function syncFavsBtn() {
-        var on = localStorage.getItem('lit_emoji_favs_on') !== '0';
-        favsBtn.style.color = on ? hoverColor : baseColor;
-        favsBtn.style.borderColor = on ? hoverBorder : baseBorder;
-      }
-      syncFavsBtn();
-      favsBtn.addEventListener('mouseover', function() { favsBtn.style.color=hoverColor; favsBtn.style.borderColor=hoverBorder; });
-      favsBtn.addEventListener('mouseout',  syncFavsBtn);
-      favsBtn.addEventListener('click', function() {
-        var currentlyOn = localStorage.getItem('lit_emoji_favs_on') !== '0';
-        var nowOn = !currentlyOn;
-        localStorage.setItem('lit_emoji_favs_on', nowOn ? '1' : '0');
-        var bar = document.getElementById('lit-emoji-favs');
-        if (bar) {
-          bar.style.display = nowOn ? 'flex' : 'none';
-          if (nowOn && window._litUpdateFavBar) window._litUpdateFavBar(bar);
-        }
-        syncFavsBtn();
-      });
-
       wrap.appendChild(roomsBtn);
       wrap.appendChild(logsBtn);
-      wrap.appendChild(favsBtn);
       fw.appendChild(wrap);
     })();
   `).catch(() => {});
@@ -1789,6 +1768,28 @@ function createAppMenu() {
     { label: 'New Profile…', click: () => createProfile() },
   ];
 
+  const prefsItems = [
+    {
+      label: 'Show Favourite Emoji Bar',
+      type: 'checkbox',
+      checked: settings.prefs?.showFavEmoji !== false,
+      click: (menuItem) => {
+        if (!settings.prefs) settings.prefs = {};
+        settings.prefs.showFavEmoji = menuItem.checked;
+        saveSettings();
+        const on = menuItem.checked;
+        win.webContents.executeJavaScript(`
+          localStorage.setItem('lit_emoji_favs_on', '${on ? '1' : '0'}');
+          var bar = document.getElementById('lit-emoji-favs');
+          if (bar) {
+            bar.style.display = '${on ? 'flex' : 'none'}';
+            if (${on} && window._litUpdateFavBar) window._litUpdateFavBar(bar);
+          }
+        `).catch(() => {});
+      },
+    },
+  ];
+
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     {
       label: 'Lit Chat',
@@ -1798,6 +1799,7 @@ function createAppMenu() {
         { type: 'separator' },
         { label: 'Theme',   submenu: themeItems },
         { label: 'Profile', submenu: profileItems },
+        { label: 'Preferences', submenu: prefsItems },
         { type: 'separator' },
         { label: 'Reload',    accelerator: 'CmdOrCtrl+R',      click: () => win.webContents.reload(), visible: false },
         { label: 'ZoomIn',    accelerator: 'CmdOrCtrl+shift+=', click: () => adjustZoom(+0.5), visible: false },
