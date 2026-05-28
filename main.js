@@ -131,6 +131,11 @@ let presenceNotifyReady = false;           // false during startup roster flood
 let awayRepliedTo = new Set();             // JIDs already sent an away-reply this away session
 let awayConversations = new Map();         // per-sender conversation history for llama mode
 
+// Auto-updater state — read by createAppMenu() to reflect current status
+let updateState = 'idle';   // 'idle' | 'checking' | 'downloading' | 'ready'
+let updateVersion = null;
+let _autoUpdater = null;
+
 // Must be set before app is ready to prevent BOSH keepalive starvation
 // when the window is minimized or hidden.
 app.commandLine.appendSwitch('disable-background-timer-throttling');
@@ -1996,6 +2001,23 @@ function createAppMenu() {
         { label: 'Profile', submenu: profileItems },
         { label: 'Preferences', submenu: prefsItems },
         { type: 'separator' },
+        (() => {
+          if (!app.isPackaged) return { label: 'Check for Updates', enabled: false };
+          if (updateState === 'ready')       return { label: `Install Update (${updateVersion})…`, click: () => _autoUpdater.quitAndInstall() };
+          if (updateState === 'downloading') return { label: `Downloading ${updateVersion}…`, enabled: false };
+          if (updateState === 'checking')    return { label: 'Checking for Updates…', enabled: false };
+          return { label: 'Check for Updates', click: () => _autoUpdater?.checkForUpdates().catch(() => {}) };
+        })(),
+        { label: 'About Lit Chat', click: () => {
+          const { dialog } = require('electron');
+          dialog.showMessageBox(win, {
+            type: 'info',
+            title: 'Lit Chat',
+            message: `Lit Chat v${app.getVersion()}`,
+            detail: 'An Electron wrapper for chat.literotica.com',
+          });
+        }},
+        { type: 'separator' },
         { label: 'Reload',    accelerator: 'CmdOrCtrl+R',      click: () => win.webContents.reload(), visible: false },
         { label: 'ZoomIn',    accelerator: 'CmdOrCtrl+shift+=', click: () => adjustZoom(+0.5), visible: false },
         { label: 'ZoomIn2',   accelerator: 'CmdOrCtrl+=',       click: () => adjustZoom(+0.5), visible: false },
@@ -2010,6 +2032,63 @@ function createAppMenu() {
       ],
     },
   ]));
+}
+
+function setupAutoUpdater() {
+  if (!app.isPackaged) return;
+
+  const { autoUpdater } = require('electron-updater');
+  _autoUpdater = autoUpdater;
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+
+  autoUpdater.on('checking-for-update', () => {
+    updateState = 'checking';
+    createAppMenu();
+  });
+
+  autoUpdater.on('update-available', info => {
+    updateState = 'downloading';
+    updateVersion = info.version;
+    createAppMenu();
+    new Notification({
+      title: 'Update downloading',
+      body: `Lit Chat ${info.version} is downloading in the background.`,
+    }).show();
+  });
+
+  autoUpdater.on('update-not-available', () => {
+    updateState = 'idle';
+    createAppMenu();
+  });
+
+  autoUpdater.on('update-downloaded', info => {
+    updateState = 'ready';
+    updateVersion = info.version;
+    createAppMenu();
+    const { dialog } = require('electron');
+    dialog.showMessageBox(win, {
+      type: 'info',
+      buttons: ['Restart & Update', 'Later'],
+      defaultId: 0,
+      cancelId: 1,
+      title: 'Update Ready',
+      message: `Lit Chat ${info.version} is ready to install.`,
+      detail: 'Restart now to apply the update, or install it the next time you quit.',
+    }).then(({ response }) => {
+      if (response === 0) autoUpdater.quitAndInstall();
+    });
+  });
+
+  autoUpdater.on('error', err => {
+    console.error('[updater]', err.message);
+    updateState = 'idle';
+    createAppMenu();
+  });
+
+  // Check on startup, then every 4 hours
+  autoUpdater.checkForUpdates().catch(() => {});
+  setInterval(() => autoUpdater.checkForUpdates().catch(() => {}), 4 * 60 * 60 * 1000);
 }
 
 function attachBOSHLogger() {
@@ -2067,24 +2146,7 @@ app.whenReady().then(() => {
   createWindow();
   attachBOSHLogger();
 
-  if (app.isPackaged) {
-    const { autoUpdater } = require('electron-updater');
-    autoUpdater.autoDownload = true;
-    autoUpdater.on('update-downloaded', () => {
-      const { dialog } = require('electron');
-      dialog.showMessageBox(win, {
-        type: 'info',
-        buttons: ['Restart & Update', 'Later'],
-        defaultId: 0, cancelId: 1,
-        title: 'Update Ready',
-        message: 'A new version of Lit Chat has been downloaded.',
-        detail: 'Restart now to apply the update.',
-      }).then(({ response }) => {
-        if (response === 0) autoUpdater.quitAndInstall();
-      });
-    });
-    autoUpdater.checkForUpdates().catch(() => {});
-  }
+  setupAutoUpdater();
 
   // Silence the site's broken favicon requests
   const { session } = require('electron');
