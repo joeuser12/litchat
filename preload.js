@@ -6,4 +6,5 @@ contextBridge.exposeInMainWorld('litChat', {
   setStatusHidden:  (jid, hidden) => ipcRenderer.invoke('status:setHidden', jid, hidden),
   dmHistory:        (username) => ipcRenderer.invoke('logs:dmHistory', username),
   openLitProfile:   () => ipcRenderer.send('ui:openLitProfile'),
+  toggleAway:       () => ipcRenderer.invoke('prefs:toggleAway'),
 });

@@ -166,8 +166,9 @@ function notifyDMs(messages) {
     if (settings.prefs?.away && m.from && m.body) {
       const awayMsg = settings.prefs.awayMessage || "I'm currently away.";
       if (awayMsg.startsWith('llama-server:')) {
-        // Multi-turn AI mode — respond to every message
         sendLlamaReply(m.from, m.body).catch(e => console.error('[away/llama] error:', e.message));
+      } else if (awayMsg.startsWith('openrouter:')) {
+        sendOpenRouterReply(m.from, m.body).catch(e => console.error('[away/openrouter] error:', e.message));
       } else if (!awayRepliedTo.has(m.from)) {
         // Static reply — one per sender
         awayRepliedTo.add(m.from);
@@ -318,6 +319,72 @@ async function callLlamaServer(endpoint, messages) {
     req.write(body);
     req.end();
   });
+}
+
+function loadOpenRouterKey() {
+  try { return fs.readFileSync(path.join(PROFILE_DIR, 'openrouter.key'), 'utf8').trim(); }
+  catch { return null; }
+}
+
+async function callOpenRouter(model, apiKey, messages) {
+  const https = require('https');
+  const body = JSON.stringify({ model, messages, stream: false });
+  const opts = {
+    hostname: 'openrouter.ai',
+    path: '/api/v1/chat/completions',
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(body),
+      'Authorization': `Bearer ${apiKey}`,
+      'HTTP-Referer': 'https://github.com/joeuser12/litchat',
+      'X-Title': 'Lit Chat',
+    },
+  };
+  return new Promise((resolve, reject) => {
+    const req = https.request(opts, res => {
+      let data = '';
+      res.on('data', chunk => { data += chunk; });
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          const reply = parsed.choices?.[0]?.message?.content?.trim() || '';
+          if (!reply) console.error('[away/openrouter] unexpected response:', JSON.stringify(parsed).slice(0, 300));
+          resolve(reply);
+        } catch (e) { reject(e); }
+      });
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+async function sendOpenRouterReply(toJid, userText) {
+  const awayMsg = settings.prefs?.awayMessage || '';
+  const model = awayMsg.slice('openrouter:'.length).trim();
+  const apiKey = loadOpenRouterKey();
+  if (!apiKey) { console.error('[away/openrouter] no key found at openrouter.key'); return; }
+
+  const systemPrompt = loadSystemPrompt();
+  if (!awayConversations.has(toJid)) {
+    awayConversations.set(toJid, loadDMHistory(toJid));
+  }
+  const history = awayConversations.get(toJid);
+  history.push({ role: 'user', content: userText });
+
+  const messages = [
+    ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
+    ...history,
+  ];
+
+  console.log('[away/openrouter] calling', model, 'for', toJid);
+  const reply = await callOpenRouter(model, apiKey, messages);
+  console.log('[away/openrouter] got reply:', reply.slice(0, 80));
+  if (!reply) return;
+
+  history.push({ role: 'assistant', content: reply });
+  sendAwayReply(toJid, reply);
 }
 
 function loadDMHistory(toJid) {
@@ -480,6 +547,7 @@ function createWindow() {
 
   win.loadURL(CHAT_URL);
 
+
   win.webContents.on('did-finish-load', async () => {
     if (readyPoll) { clearInterval(readyPoll); readyPoll = null; }
     cssKeys = [];
@@ -564,7 +632,39 @@ function createWindow() {
         if (!ready) return;
         const autoJoins = Object.entries(settings.favourites || {})
           .filter(([, v]) => v.autoJoin);
-        (async () => { for (const [jid] of autoJoins) await joinRoom(jid); })();
+        (async () => {
+          // Wait for evidence that room joins will work.
+          // Strategy: watch #chat-tabs for the first tab Candy adds via its own
+          // bookmark/session restore — that's concrete proof the XMPP connection
+          // is warm.  Falls back to 3 s for a brand-new session with no bookmarks.
+          await win.webContents.executeJavaScript(`
+            new Promise(function(resolve) {
+              var resolved = false;
+              function done() { if (!resolved) { resolved = true; resolve(); } }
+
+              // Already warm — a tab is present from Candy's own restore
+              if (document.querySelector('#chat-tabs li[data-roomjid]')) {
+                done(); return;
+              }
+
+              // Watch for the first tab Candy adds itself
+              var tabs = document.querySelector('#chat-tabs');
+              var obs = tabs ? new MutationObserver(function() {
+                if (document.querySelector('#chat-tabs li[data-roomjid]')) {
+                  obs.disconnect(); done();
+                }
+              }) : null;
+              if (obs) obs.observe(tabs, { childList: true, subtree: true });
+
+              // Fallback: 3 s (no bookmarks / first-ever session)
+              setTimeout(function() { if (obs) obs.disconnect(); done(); }, 3000);
+            })
+          `).catch(() => {});
+          for (const [jid] of autoJoins) {
+            await joinRoom(jid);
+            await new Promise(r => setTimeout(r, 1500)); // let the site settle between joins
+          }
+        })();
         // Suppress presence notifications briefly while the initial roster flood passes
         setTimeout(() => { presenceNotifyReady = true; }, 5000);
         injectNavButtons();
@@ -1770,6 +1870,7 @@ function injectEmojiPicker() {
 
 function injectNavButtons() {
   const isDark = (settings.theme || 'dark') !== 'light';
+  const awayOn = settings.prefs?.away ?? false;
   win.webContents.executeJavaScript(`
     (function() {
       var fw = document.querySelector('.C_fw');
@@ -1793,8 +1894,6 @@ function injectNavButtons() {
         s.addEventListener('mouseout',  function() { s.style.color=baseColor;  s.style.borderColor=baseBorder; });
         return s;
       }
-      var roomsBtn = mkBtn('Rooms');
-      var logsBtn  = mkBtn('Logs');
       // Use capture=true so we intercept before any ancestor capture-phase handler the site may have
       function armBtn(el, action) {
         ['mousedown', 'mouseup', 'click'].forEach(function(t) {
@@ -1806,14 +1905,49 @@ function injectNavButtons() {
           }, true);
         });
       }
+
+      var roomsBtn   = mkBtn('Rooms');
+      var logsBtn    = mkBtn('Logs');
       var profileBtn = mkBtn('My Profile');
+
+      // Away button — built manually so hover respects the active state
+      var awayActive = ${JSON.stringify(awayOn)};
+      var awayBtn = document.createElement('span');
+      awayBtn.textContent = 'Away';
+      awayBtn.setAttribute('role', 'button');
+      awayBtn.style.cssText = 'cursor:pointer;font-size:13px;padding:4px 10px;' +
+        'border:1px solid;border-radius:4px;display:inline-block;user-select:none;white-space:nowrap;';
+      var BASE_BTN_CSS = 'cursor:pointer;font-size:13px;padding:4px 10px;border:1px solid;' +
+        'border-radius:4px;display:inline-block;user-select:none;white-space:nowrap;transition:none;';
+      function applyAwayStyle(on) {
+        awayActive = on;
+        awayBtn.style.cssText = BASE_BTN_CSS + (on
+          ? (isDark
+              ? 'color:#fce7f3;border-color:#db2777;background:rgba(219,39,119,0.45);font-weight:bold;'
+              : 'color:#9d174d;border-color:#db2777;background:#fce7f3;font-weight:bold;')
+          : 'color:' + baseColor + ';border-color:' + baseBorder + ';background:none;');
+      }
+      awayBtn.addEventListener('mouseover', function() {
+        awayBtn.style.color = hoverColor; awayBtn.style.borderColor = hoverBorder;
+      });
+      awayBtn.addEventListener('mouseout',  function() { applyAwayStyle(awayActive); });
+      applyAwayStyle(awayActive);
+
+      window._litSetAway = function(on) { applyAwayStyle(on); };
+
       armBtn(roomsBtn,   function() { window.litChat && window.litChat.openRooms(); });
       armBtn(logsBtn,    function() { window.litChat && window.litChat.openLogs(); });
       armBtn(profileBtn, function() { window.litChat && window.litChat.openLitProfile(); });
+      armBtn(awayBtn,    function() {
+        window.litChat && window.litChat.toggleAway()
+          .then(function(on) { applyAwayStyle(on); })
+          .catch(function(e) { console.error('[away-btn] toggleAway failed:', e); });
+      });
 
       wrap.appendChild(roomsBtn);
       wrap.appendChild(logsBtn);
       wrap.appendChild(profileBtn);
+      wrap.appendChild(awayBtn);
       fw.appendChild(wrap);
     })();
   `).catch(() => {});
@@ -1825,11 +1959,13 @@ function joinRoom(jid) {
     `new Promise(function(resolve) {
        var jid = ${JSON.stringify(jid)};
 
-       // 1. Already in the roombar — nothing to do
-       var tab = document.querySelector('li[data-roomjid=' + JSON.stringify(jid) + '] a.label');
-       if (tab) { tab.click(); resolve(); return; }
+       // 1. Already in the roombar — nothing to do.
+       // By the time we get here, Candy.Core.getUser() has confirmed auth, so a tab
+       // in the roombar means the room is genuinely joined (not just a stale restored element).
+       if (document.querySelector('li[data-roomjid=' + JSON.stringify(jid) + '] a.label')) {
+         resolve(); return;
+       }
 
-       // 2. Open the room panel, click the matching entry, then dismiss the modal
        function dismiss() {
          var m = document.getElementById('chat-modal');
          var o = document.getElementById('chat-modal-overlay');
@@ -1837,26 +1973,106 @@ function joinRoom(jid) {
          if (o) o.style.display = 'none';
        }
 
-       var tryClick = function() {
+       function waitForTab(timeoutMs) {
+         var deadline = Date.now() + (timeoutMs || 8000);
+         var poll = setInterval(function() {
+           if (document.querySelector('li[data-roomjid=' + JSON.stringify(jid) + '] a.label')) {
+             clearInterval(poll); dismiss(); resolve();
+           } else if (Date.now() > deadline) {
+             clearInterval(poll); dismiss();
+             console.warn('[join] gave up waiting for tab:', jid);
+             resolve();
+           }
+         }, 100);
+       }
+
+       // 2. Try Candy's programmatic join — bypasses pagination entirely
+       try {
+         var act = typeof Candy !== 'undefined' && Candy.Core &&
+                   Candy.Core.Action && Candy.Core.Action.Jabber &&
+                   Candy.Core.Action.Jabber.Room;
+         if (act && typeof act.Join === 'function') {
+           act.Join(jid);
+           waitForTab(8000);
+           return;
+         }
+       } catch(e) {}
+
+       // 3. Room panel UI — open it if not already open, search across pages
+       var tryClickInList = function() {
          var links = document.querySelectorAll('ul.simplePaginationChatRoomList li a');
          for (var i = 0; i < links.length; i++) {
            var href = (links[i].getAttribute('href') || '').replace(/^#/, '');
            if (href === jid) {
              links[i].click();
-             setTimeout(function() { dismiss(); resolve(); }, 600);
              return true;
            }
          }
          return false;
        };
 
-       if (!tryClick()) {
-         document.querySelector('#roomPanel-tab a.label')?.click();
-         var tries = 0;
-         var poll = setInterval(function() {
-           if (tryClick() || ++tries > 30) { clearInterval(poll); dismiss(); resolve(); }
-         }, 100);
+       // Click the pagination "next page" control
+       var seenPages = new Set();
+       function advancePage() {
+         var items = document.querySelectorAll('#roomPanel li, #chat-rooms li, .simplePagination li');
+         var foundCurrent = false;
+         for (var i = 0; i < items.length; i++) {
+           var cls = items[i].className || '';
+           if (/current/i.test(cls)) { foundCurrent = true; continue; }
+           if (foundCurrent && !(/disabled|prev/i.test(cls))) {
+             var a = items[i].querySelector('a');
+             if (a) {
+               var key = a.textContent.trim();
+               if (seenPages.has(key)) return false;
+               seenPages.add(key);
+               a.click();
+               return true;
+             }
+           }
+         }
+         return false;
        }
+
+       // Only open the panel if the room list isn't already visible —
+       // clicking the tab when it's already open would toggle it closed
+       if (!document.querySelector('ul.simplePaginationChatRoomList li a')) {
+         document.querySelector('#roomPanel-tab a.label')?.click();
+       }
+
+       var tries = 0;
+       var clickedLink = false;
+       var clickAttempts = 0;
+       var poll = setInterval(function() {
+         // After clicking the link, wait for the tab — retry the click every 3 s if needed
+         if (clickedLink) {
+           if (document.querySelector('li[data-roomjid=' + JSON.stringify(jid) + '] a.label')) {
+             clearInterval(poll); dismiss(); resolve(); return;
+           }
+           if (++tries > 80) {
+             console.warn('[join] tab never appeared after click for:', jid);
+             clearInterval(poll); dismiss(); resolve(); return;
+           }
+           // Retry the click every 30 ticks (3 s) in case the first click was lost
+           if (tries % 30 === 0 && clickAttempts < 3) {
+             ++clickAttempts;
+             tryClickInList();
+           }
+           return;
+         }
+         if (tryClickInList()) {
+           clickedLink = true; clickAttempts = 1; tries = 0; return;
+         }
+         tries++;
+         if (tries % 20 === 0) advancePage();
+         if (tries > 100) {
+           clearInterval(poll);
+           console.warn('[join] gave up on:', jid,
+             '— visible rooms:', Array.from(
+               document.querySelectorAll('ul.simplePaginationChatRoomList li a')
+             ).map(function(a){ return (a.getAttribute('href')||'').replace(/^#/,''); }));
+           dismiss(); resolve();
+         }
+       }, 100);
      })`
   ).catch(() => {});
 }
@@ -1947,6 +2163,16 @@ ipcMain.on('rooms:join',  (_e, jid) => { win.show(); win.focus(); joinRoom(jid);
 ipcMain.on('ui:openRooms', () => openRoomManager());
 ipcMain.on('ui:openLogs',  () => openLogViewer());
 ipcMain.on('ui:openLitProfile', () => openLinkWindow('https://www.literotica.com/my/#/user/profile'));
+
+ipcMain.handle('prefs:toggleAway', () => {
+  if (!settings.prefs) settings.prefs = {};
+  settings.prefs.away = !settings.prefs.away;
+  if (!settings.prefs.away) { awayRepliedTo.clear(); awayConversations.clear(); }
+  saveSettings();
+  createAppMenu();
+  updateTray();
+  return settings.prefs.away; // returned to renderer so button can update its style
+});
 
 ipcMain.handle('status:getHidden', (_e, jid) => !!(settings.hideStatusRooms?.[jid]));
 ipcMain.handle('status:setHidden', (_e, jid, hidden) => {
@@ -2300,16 +2526,39 @@ function createAppMenu() {
   ]));
 }
 
+function updateTray() {
+  if (!tray) return;
+  const away = settings.prefs?.away ?? false;
+  tray.setContextMenu(Menu.buildFromTemplate([
+    {
+      label: 'Away', type: 'checkbox', checked: away,
+      click: () => {
+        if (!settings.prefs) settings.prefs = {};
+        settings.prefs.away = !settings.prefs.away;
+        if (!settings.prefs.away) { awayRepliedTo.clear(); awayConversations.clear(); }
+        saveSettings();
+        createAppMenu();
+        updateTray();
+        // Sync the nav button in the renderer
+        if (win && !win.isDestroyed())
+          win.webContents.executeJavaScript(
+            `if (window._litSetAway) window._litSetAway(${settings.prefs.away});`
+          ).catch(() => {});
+      },
+    },
+    { type: 'separator' },
+    { label: 'Show', click: () => { win.show(); win.focus(); } },
+    { type: 'separator' },
+    { label: 'Quit', click: () => app.quit() },
+  ]));
+}
+
 function setupTray() {
   const iconPath = path.join(__dirname, 'build', 'icon.png');
   const icon = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 });
   tray = new Tray(icon);
   tray.setToolTip('Lit Chat');
-  tray.setContextMenu(Menu.buildFromTemplate([
-    { label: 'Show', click: () => { win.show(); win.focus(); } },
-    { type: 'separator' },
-    { label: 'Quit', click: () => app.quit() },
-  ]));
+  updateTray();
   tray.on('click', () => {
     if (win.isVisible()) { win.focus(); } else { win.show(); win.focus(); }
   });
