@@ -219,11 +219,82 @@ function parseLlamaEndpoint(awayMsg) {
   return { host: spec, port: 8080 };
 }
 
+let _llamaArch = null; // cached per app session
+
+async function detectLlamaArch(endpoint) {
+  if (_llamaArch) return _llamaArch;
+  const http = require('http');
+  return new Promise(resolve => {
+    const opts = {
+      path: '/v1/models',
+      method: 'GET',
+      ...(endpoint.socketPath
+        ? { socketPath: endpoint.socketPath }
+        : { hostname: endpoint.host, port: endpoint.port }),
+    };
+    const req = http.request(opts, res => {
+      let data = '';
+      res.on('data', chunk => { data += chunk; });
+      res.on('end', () => {
+        try {
+          const id = (JSON.parse(data).data?.[0]?.id || '').toLowerCase();
+          if (id.includes('gemma'))       _llamaArch = 'gemma';
+          else if (id.includes('qwen3')) _llamaArch = 'qwen3';
+          else                            _llamaArch = 'chatml';
+        } catch { _llamaArch = 'chatml'; }
+        console.log('[away/llama] detected arch:', _llamaArch);
+        resolve(_llamaArch);
+      });
+    });
+    req.on('error', () => { _llamaArch = 'chatml'; resolve(_llamaArch); });
+    req.end();
+  });
+}
+
+function buildLlamaPrompt(arch, messages) {
+  let prompt = '';
+  for (const msg of messages) {
+    if (arch === 'gemma') {
+      if (msg.role === 'system') {
+        prompt += `<start_of_turn>user\n${msg.content}\n\n`;
+      } else if (msg.role === 'user') {
+        // first system message already opened user turn; subsequent user messages start fresh
+        prompt += prompt ? `${msg.content}\n<end_of_turn>\n<start_of_turn>model\n`
+                         : `<start_of_turn>user\n${msg.content}\n<end_of_turn>\n<start_of_turn>model\n`;
+      } else if (msg.role === 'assistant') {
+        prompt += `${msg.content}<end_of_turn>\n<start_of_turn>user\n`;
+      }
+    } else {
+      // ChatML — covers Qwen3, Llama-3, Mistral, Phi, etc.
+      if (msg.role === 'system') {
+        prompt += `<|im_start|>system\n${msg.content}<|im_end|>\n`;
+      } else if (msg.role === 'user') {
+        prompt += `<|im_start|>user\n${msg.content}<|im_end|>\n`;
+      } else if (msg.role === 'assistant') {
+        prompt += `<|im_start|>assistant\n${msg.content}<|im_end|>\n`;
+      }
+    }
+  }
+  // Assistant prefill — Qwen3: empty think block skips chain-of-thought
+  if (arch === 'qwen3') prompt += '<|im_start|>assistant\n<think>\n\n</think>\n\n';
+  else if (arch === 'gemma') { /* already opened model turn above */ }
+  else prompt += '<|im_start|>assistant\n';
+  return prompt;
+}
+
 async function callLlamaServer(endpoint, messages) {
   const http = require('http');
-  const body = JSON.stringify({ messages, stream: false });
+  const arch = await detectLlamaArch(endpoint);
+  const prompt = buildLlamaPrompt(arch, messages);
+
+  const body = JSON.stringify({
+    prompt,
+    stream: false,
+    n_predict: 1024,
+    stop: ['<|im_end|>', '<|endoftext|>'],
+  });
   const opts = {
-    path: '/v1/chat/completions',
+    path: '/completion',
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
     ...(endpoint.socketPath
@@ -236,7 +307,9 @@ async function callLlamaServer(endpoint, messages) {
       res.on('data', chunk => { data += chunk; });
       res.on('end', () => {
         try {
-          const reply = JSON.parse(data).choices?.[0]?.message?.content?.trim();
+          const parsed = JSON.parse(data);
+          const reply = (parsed.content || '').replace(/<think>[\s\S]*?<\/think>\s*/g, '').trim();
+          if (!reply) console.error('[away/llama] unexpected response:', JSON.stringify(parsed).slice(0, 300));
           resolve(reply || '');
         } catch (e) { reject(e); }
       });
@@ -247,12 +320,43 @@ async function callLlamaServer(endpoint, messages) {
   });
 }
 
+function loadDMHistory(toJid) {
+  const logDir = path.join(PROFILE_DIR, 'logs');
+  if (!fs.existsSync(logDir)) return [];
+  const slash = toJid.indexOf('/');
+  const target = (slash !== -1 ? toJid.slice(slash + 1) : toJid.split('@')[0]).toLowerCase();
+  const nickOf = jid => {
+    const s = jid.indexOf('/');
+    if (s !== -1) return jid.slice(s + 1).toLowerCase();
+    const at = jid.indexOf('@');
+    return (at !== -1 ? jid.slice(0, at) : jid).toLowerCase();
+  };
+  const msgs = [];
+  for (const file of fs.readdirSync(logDir).filter(f => f.endsWith('.jsonl')).sort()) {
+    const lines = fs.readFileSync(path.join(logDir, file), 'utf8').split('\n');
+    for (const line of lines) {
+      try {
+        const m = JSON.parse(line);
+        if (m.type !== 'chat') continue;
+        const peer = nickOf(m.direction === 'sent' ? (m.to || '') : (m.from || ''));
+        if (peer === target) msgs.push(m);
+      } catch { /* skip malformed */ }
+    }
+  }
+  return msgs.slice(-10).map(m => ({
+    role: m.direction === 'sent' ? 'assistant' : 'user',
+    content: m.body || '',
+  }));
+}
+
 async function sendLlamaReply(toJid, userText) {
   const awayMsg  = settings.prefs?.awayMessage || '';
   const endpoint = parseLlamaEndpoint(awayMsg);
   const systemPrompt = loadSystemPrompt();
 
-  if (!awayConversations.has(toJid)) awayConversations.set(toJid, []);
+  if (!awayConversations.has(toJid)) {
+    awayConversations.set(toJid, loadDMHistory(toJid));
+  }
   const history = awayConversations.get(toJid);
   history.push({ role: 'user', content: userText });
 
@@ -1563,7 +1667,8 @@ function injectEmojiPicker() {
       top.forEach(function(e) {
         var sp = document.createElement('span');
         sp.textContent = e;
-        sp.title = e;
+        var entry = ALL.find(function(item) { return item.e === e; });
+        sp.title = entry ? entry.n : e;
         sp.style.cssText = 'font-size:16px;cursor:pointer;line-height:24px;opacity:0.7;padding:0 2px;transition:opacity 0.1s;';
         sp.addEventListener('mouseover', function() { sp.style.opacity = '1'; });
         sp.addEventListener('mouseout',  function() { sp.style.opacity = '0.7'; });
@@ -1683,7 +1788,7 @@ function injectNavButtons() {
         s.setAttribute('role', 'button');
         s.style.cssText = 'color:' + baseColor + ';cursor:pointer;font-size:13px;padding:4px 10px;' +
                           'border:1px solid ' + baseBorder + ';border-radius:4px;display:inline-block;' +
-                          'user-select:none;';
+                          'user-select:none;white-space:nowrap;';
         s.addEventListener('mouseover', function() { s.style.color=hoverColor; s.style.borderColor=hoverBorder; });
         s.addEventListener('mouseout',  function() { s.style.color=baseColor;  s.style.borderColor=baseBorder; });
         return s;
@@ -1701,11 +1806,14 @@ function injectNavButtons() {
           }, true);
         });
       }
-      armBtn(roomsBtn, function() { window.litChat && window.litChat.openRooms(); });
-      armBtn(logsBtn,  function() { window.litChat && window.litChat.openLogs(); });
+      var profileBtn = mkBtn('My Profile');
+      armBtn(roomsBtn,   function() { window.litChat && window.litChat.openRooms(); });
+      armBtn(logsBtn,    function() { window.litChat && window.litChat.openLogs(); });
+      armBtn(profileBtn, function() { window.litChat && window.litChat.openLitProfile(); });
 
       wrap.appendChild(roomsBtn);
       wrap.appendChild(logsBtn);
+      wrap.appendChild(profileBtn);
       fw.appendChild(wrap);
     })();
   `).catch(() => {});
@@ -1838,6 +1946,7 @@ ipcMain.handle('rooms:list', async () => {
 ipcMain.on('rooms:join',  (_e, jid) => { win.show(); win.focus(); joinRoom(jid); });
 ipcMain.on('ui:openRooms', () => openRoomManager());
 ipcMain.on('ui:openLogs',  () => openLogViewer());
+ipcMain.on('ui:openLitProfile', () => openLinkWindow('https://www.literotica.com/my/#/user/profile'));
 
 ipcMain.handle('status:getHidden', (_e, jid) => !!(settings.hideStatusRooms?.[jid]));
 ipcMain.handle('status:setHidden', (_e, jid, hidden) => {
@@ -2151,7 +2260,8 @@ function createAppMenu() {
     {
       label: 'Lit Chat',
       submenu: [
-        { label: 'View Logs',  click: () => openLogViewer() },
+        { label: 'View Logs',       click: () => openLogViewer() },
+        { label: 'Edit Lit Profile', click: () => openLinkWindow('https://www.literotica.com/my/#/user/profile') },
         { label: 'Rooms', submenu: roomItems },
         { type: 'separator' },
         { label: 'Theme',   submenu: themeItems },
@@ -2171,7 +2281,7 @@ function createAppMenu() {
             type: 'info',
             title: 'Lit Chat',
             message: `Lit Chat v${app.getVersion()}`,
-            detail: 'An Electron wrapper for chat.literotica.com',
+            detail: 'An Electron wrapper for chat.literotica.com\nBy ai_joe',
           });
         }},
         { type: 'separator' },
@@ -2182,7 +2292,6 @@ function createAppMenu() {
         { label: 'ZoomOut2',  accelerator: 'CmdOrCtrl+-',       click: () => adjustZoom(-0.5), visible: false },
         { label: 'ZoomReset', accelerator: 'CmdOrCtrl+shift+0', click: () => adjustZoom(0),    visible: false },
         { label: 'ZoomReset2',accelerator: 'CmdOrCtrl+0',       click: () => adjustZoom(0),    visible: false },
-        { label: 'Save Page Source', click: () => savePageSource() },
         { label: 'DevTools', click: () => win.webContents.openDevTools() },
         { type: 'separator' },
         { label: 'Quit', accelerator: 'CmdOrCtrl+Q', click: () => app.quit() },
