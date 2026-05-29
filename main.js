@@ -90,6 +90,10 @@ const THEMES = [
   { id: 'dark-warm',       label: 'Dark — Warm' },
   { id: 'dark-teal',       label: 'Dark — Teal' },
   { id: 'light',           label: 'Light' },
+  { id: 'warm-rose',       label: 'Warm Rose' },
+  { id: 'blue-steel',      label: 'Blue Steel' },
+  { id: 'sage',            label: 'Sage' },
+  { id: 'lavender',        label: 'Lavender' },
   { id: 'nord',            label: 'Nord' },
   { id: 'dracula',         label: 'Dracula' },
   { id: 'gruvbox',         label: 'Gruvbox' },
@@ -571,7 +575,7 @@ function createWindow() {
     }
 
     const theme = settings.theme || 'dark';
-    const LIGHT_THEMES = new Set(['light', 'solarized-light']);
+    const CUSTOM_LIGHT = new Set(['solarized-light', 'warm-rose', 'blue-steel', 'sage', 'lavender']);
     if (theme !== 'light') {
       // Always inject the bundled theme first so app updates reach everyone
       const themePath = getThemeFile(theme);
@@ -588,7 +592,7 @@ function createWindow() {
 
     // For dark-background themes, force the logo SVG paths white regardless of
     // whether the Literotica site itself has dark_theme active (they're independent).
-    if (!LIGHT_THEMES.has(theme)) {
+    if (theme !== 'light' && !CUSTOM_LIGHT.has(theme)) {
       cssKeys.push(await win.webContents.insertCSS(
         '#headerLogo path{fill:white!important}' +
         '#headerLogo .logo__l,#headerLogo .logo__r{fill:#4a89f3!important}'
@@ -690,6 +694,58 @@ function createWindow() {
   });
 }
 
+const CUSTOM_LIGHT_IDS = new Set(['light', 'solarized-light', 'warm-rose', 'blue-steel', 'sage', 'lavender']);
+
+function isLightTheme() {
+  return CUSTOM_LIGHT_IDS.has(settings.theme || 'dark');
+}
+
+const DIALOG_LIGHT_CSS = `
+  body, #toolbar, #tabs, .tab-btn.active, #notes-panel, .date-sep,
+  .ctx-header, .ctx-messages, .ctx-group { background: revert; color: revert; border-color: revert; }
+  body        { background: #f8f8fc !important; color: #1a1a2a !important; }
+  #toolbar    { background: #eeeef4 !important; border-color: #d8d8e4 !important; }
+  #tabs       { background: #eeeef4 !important; border-color: #d8d8e4 !important; }
+  .tab-btn    { background: none !important; border-color: #d8d8e4 !important; color: #888 !important; }
+  .tab-btn.active { background: #f8f8fc !important; color: #1a1a2a !important; border-color: #d8d8e4 !important; }
+  .tab        { color: #888 !important; }
+  .tab.active { color: #7c5cbf !important; border-color: #7c5cbf !important; }
+  .search-input, #filter { background: #ffffff !important; border-color: #d0d0dc !important; color: #1a1a2a !important; }
+  .search-input::placeholder, #filter::placeholder { color: #aaa !important; }
+  #refresh-btn { background: #e8e8f0 !important; border-color: #d0d0dc !important; color: #444 !important; }
+  #refresh-btn:hover { border-color: #7c5cbf !important; color: #1a1a2a !important; }
+  #messages   { background: #f8f8fc !important; }
+  .placeholder, #empty { color: #aaa !important; }
+  .ctx-group  { border-color: #d8d8e4 !important; }
+  .ctx-header { background: #eeeef4 !important; }
+  .ctx-header:hover { background: #e4e4f0 !important; }
+  .ctx-badge.dm   { background: #ede0fc !important; color: #7c5cbf !important; }
+  .ctx-badge.room { background: #d8edf8 !important; color: #2879b5 !important; }
+  .ctx-title  { color: #333 !important; }
+  .ctx-count, .ctx-chevron, .ctx-del { color: #aaa !important; }
+  .ctx-messages { background: #f8f8fc !important; }
+  .sent     { background: #e8dff8 !important; }
+  .received { background: #ddeef8 !important; }
+  .date-sep { background: #e8e8f0 !important; color: #aaa !important; }
+  mark      { background: #fff0b0 !important; color: #7a5000 !important; }
+  .msg-link { color: #5050cc !important; }
+  .msg-link:hover { color: #6060dd !important; }
+  #notes-panel { background: #eeeef4 !important; border-color: #d8d8e4 !important; }
+  #notes-panel textarea { background: #ffffff !important; border-color: #d0d0dc !important; color: #1a1a2a !important; }
+  .room-row { border-color: #e8e8f0 !important; }
+  .room-row:hover { background: #efeffa !important; }
+  .room-count { color: #aaa !important; }
+  .aj-label   { color: #aaa !important; }
+  .aj-label.on { color: #7c5cbf !important; }
+  ::-webkit-scrollbar-track { background: #eeeef4 !important; }
+  ::-webkit-scrollbar-thumb { background: #d0d0dc !important; }
+  ::-webkit-scrollbar-thumb:hover { background: #b8b8cc !important; }
+`;
+
+function injectDialogTheme(wc) {
+  if (isLightTheme()) wc.insertCSS(DIALOG_LIGHT_CSS).catch(() => {});
+}
+
 function openLogViewer() {
   if (logWin && !logWin.isDestroyed()) {
     logWin.focus();
@@ -708,6 +764,7 @@ function openLogViewer() {
     },
   });
   logWin.loadFile('log-viewer.html');
+  logWin.webContents.once('did-finish-load', () => injectDialogTheme(logWin.webContents));
   logWin.webContents.setWindowOpenHandler(({ url }) => {
     openLinkWindow(url);
     return { action: 'deny' };
@@ -1590,6 +1647,40 @@ function injectEmojiPicker() {
       ['🇪🇦','ceuta melilla'],['🇩🇬','diego garcia'],['🇭🇲','heard mcdonald islands'],
       ['🇲🇫','saint martin'],['🇸🇯','svalbard jan mayen'],['🇹🇦','tristan da cunha'],
     ]},
+    { icon: 'ツ', title: 'Text Art', type: 'text', emoji: [
+      ['╰⋃╯',                          'penis'],
+      ['(ᶅ͒)',                           'vagina'],
+      ['（ ͜•人 ͜•）',                   'boobs'],
+      ['（ ͜.人 ͜.）',                   'large boobs'],
+      ['( . 人 . )',                     'saggy boobs'],
+      ['(‿ˠ‿)',                          'ass'],
+      ['𝔾𝕆𝕆𝔻 𝔹𝕆𝕐',                  'good boy'],
+      ['𝔾𝕆𝕆𝔻 𝔾𝕀ℝ𝕃',                 'good girl'],
+      ['b( • )( • )bies',               'boobies'],
+      ['𝒫𝓁ℯ𝒶𝓈ℯ 𝒹𝒶𝒹𝒹𝓎',             'please daddy'],
+      ['✨ 𝓦𝓮𝓵𝓬𝓸𝓂𝓮 ✨',              'welcome'],
+      ['★𝒲ℯ𝓉 𝒹𝓇ℯ𝒶𝓂𝓈★',             'wet dreams'],
+      ['¯\\_(ツ)_/¯',                   'ascii shrug'],
+      ['ᕦ(ò_óˇ)ᕤ',                     'flex'],
+      ['⚞^. .^⚟',                      'ascii cat'],
+      ['𝄃𝄂𝄀𝄁𝄃𝄂𝄂𝄃',                  'barcode'],
+      ['𒅌',                             'ascii shark'],
+      ['𝓴𝓲𝓼𝓼 𝓶𝒆 𝓹𝓵𝒆𝓪𝓼𝒆',          'kiss me please'],
+      ['¡ᶠᶸᶜᵏᵧₒᵤ!',                    'fuck you'],
+      ['ℬ𝒾𝓽𝓬𝒽',                       'bitch'],
+      ['𓆩🖤𓆪',                         'winged heart'],
+      ['I ♡ ( . )( . )',                'i love boobs'],
+      ['(,,•᷄ࡇ•᷅ ,,)?',               'confused'],
+      ['kiss my ( ㅅ )',                 'kiss my ass'],
+      ['⁶🤷⁷',                          '67'],
+      ['♡𝑰 𝒍𝒐𝒗𝒆 𝒚𝒐𝒖𝒖♡',             'i love you'],
+      ['₊𖥔 ℓo͟v͟ꫀ ყoυ! ۪ ׄ໑୧ ׅ𖥔ׄ', 'love you'],
+      ['꧁Good morning ꧂',              'good morning'],
+      ['ه 🅾 𝐈𝐧𝐬𝐭𝐚𝐠𝐫𝐚𝐦 ★',          'instagram'],
+      ['𝓑𝓮𝓼𝓽𝓲𝓮🌹',                    'bestie'],
+      ['୧⍤⃝💐',                        'carrying flowers'],
+      ['𝐆𝐨𝐨𝐝 𝐍.ᐟ𝐠𝐡𝐭✨️🌛',           'good night'],
+    ]},
   ];
 
   const showFavEmoji = settings.prefs?.showFavEmoji !== false;
@@ -1603,7 +1694,7 @@ function injectEmojiPicker() {
 
     var s = document.createElement('style');
     s.textContent =
-      '#lit-emoji-picker{position:fixed;width:308px;background:#1a1a2a;border:1px solid #3a3a4a;' +
+      '#lit-emoji-picker{position:fixed;width:340px;background:#1a1a2a;border:1px solid #3a3a4a;' +
       'border-radius:10px;box-shadow:0 8px 32px rgba(0,0,0,0.6);z-index:99999;' +
       'display:none;flex-direction:column;overflow:hidden;font-family:system-ui,sans-serif;}' +
       '#lit-emoji-search-wrap{padding:6px 6px 4px;background:#0f0f17;flex-shrink:0;}' +
@@ -1626,7 +1717,14 @@ function injectEmojiPicker() {
       '.lit-emoji-item:hover{background:#2a2a3a;}' +
       '.lit-emoji-none{color:#555;font-size:12px;padding:16px;width:100%;text-align:center;}' +
       '#lit-emoji-trigger{cursor:pointer;width:auto!important;font-size:13px;line-height:16px;opacity:0.7;transition:opacity 0.15s;}' +
-      '#lit-emoji-trigger:hover{opacity:1;}';
+      '#lit-emoji-trigger:hover{opacity:1;}' +
+      '#lit-emoji-grid.text-mode{flex-direction:column;flex-wrap:nowrap;gap:1px;}' +
+      '.lit-emoji-text-item{width:100%;padding:4px 8px;cursor:pointer;border-radius:4px;' +
+      'display:flex;align-items:center;gap:8px;box-sizing:border-box;min-height:28px;}' +
+      '.lit-emoji-text-item:hover{background:#2a2a3a;}' +
+      '.lit-emoji-text-name{font-size:10px;color:#666;min-width:86px;flex-shrink:0;white-space:nowrap;' +
+      'text-transform:uppercase;letter-spacing:0.4px;}' +
+      '.lit-emoji-text-val{font-size:12px;color:#c8c8d8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;}';
     document.head.appendChild(s);
 
     var picker = document.createElement('div');
@@ -1648,14 +1746,17 @@ function injectEmojiPicker() {
     picker.appendChild(grid);
     document.body.appendChild(picker);
 
-    // Flat list for search: [{e, n}]
+    // Flat list for search: [{e, n, type}]
     var ALL = [];
     CATS.forEach(function(cat) {
-      cat.emoji.forEach(function(pair) { ALL.push({ e: pair[0], n: pair[1] }); });
+      cat.emoji.forEach(function(pair) {
+        ALL.push({ e: pair[0], n: pair[1], type: cat.type || 'emoji' });
+      });
     });
 
-    function renderEmoji(pairs) {
+    function renderEmoji(pairs, catType) {
       grid.innerHTML = '';
+      grid.classList.toggle('text-mode', catType === 'text');
       if (!pairs.length) {
         var none = document.createElement('div');
         none.className = 'lit-emoji-none';
@@ -1666,12 +1767,29 @@ function injectEmojiPicker() {
       pairs.forEach(function(pair) {
         var e = Array.isArray(pair) ? pair[0] : pair.e;
         var n = Array.isArray(pair) ? pair[1] : pair.n;
-        var span = document.createElement('span');
-        span.className = 'lit-emoji-item';
-        span.textContent = e;
-        span.title = n || e;
-        span.addEventListener('click', function(ev) { ev.stopPropagation(); insertEmoji(e); });
-        grid.appendChild(span);
+        var itype = pair.type || catType || 'emoji';
+        if (itype === 'text') {
+          var row = document.createElement('div');
+          row.className = 'lit-emoji-text-item';
+          row.title = e;
+          var nameEl = document.createElement('span');
+          nameEl.className = 'lit-emoji-text-name';
+          nameEl.textContent = n;
+          var valEl = document.createElement('span');
+          valEl.className = 'lit-emoji-text-val';
+          valEl.textContent = e;
+          row.appendChild(nameEl);
+          row.appendChild(valEl);
+          row.addEventListener('click', function(ev) { ev.stopPropagation(); insertEmoji(e); });
+          grid.appendChild(row);
+        } else {
+          var span = document.createElement('span');
+          span.className = 'lit-emoji-item';
+          span.textContent = e;
+          span.title = n || e;
+          span.addEventListener('click', function(ev) { ev.stopPropagation(); insertEmoji(e); });
+          grid.appendChild(span);
+        }
       });
       grid.scrollTop = 0;
     }
@@ -1680,7 +1798,7 @@ function injectEmojiPicker() {
       tabs.querySelectorAll('.lit-emoji-tab').forEach(function(t, i) {
         t.classList.toggle('active', i === idx);
       });
-      renderEmoji(CATS[idx].emoji);
+      renderEmoji(CATS[idx].emoji, CATS[idx].type);
     }
 
     searchInput.addEventListener('input', function(e) {
@@ -1869,7 +1987,8 @@ function injectEmojiPicker() {
 }
 
 function injectNavButtons() {
-  const isDark = (settings.theme || 'dark') !== 'light';
+  const LIGHT_THEME_IDS = new Set(['light', 'solarized-light', 'warm-rose', 'blue-steel', 'sage', 'lavender']);
+  const isDark = !LIGHT_THEME_IDS.has(settings.theme || 'dark');
   const awayOn = settings.prefs?.away ?? false;
   win.webContents.executeJavaScript(`
     (function() {
@@ -2123,6 +2242,7 @@ function openRoomManager() {
     },
   });
   roomWin.loadFile('rooms.html');
+  roomWin.webContents.once('did-finish-load', () => injectDialogTheme(roomWin.webContents));
   roomWin.on('closed', () => { roomWin = null; createAppMenu(); }); // refresh menu on close
 }
 
@@ -2230,7 +2350,8 @@ async function setTheme(theme) {
   saveSettings();
   for (const k of cssKeys) await win.webContents.removeInsertedCSS(k).catch(() => {});
   cssKeys = [];
-  const LIGHT_THEMES = new Set(['light', 'solarized-light']);
+  // Themes that supply their own CSS (everything except the bare 'light' which needs none)
+  const CUSTOM_LIGHT = new Set(['solarized-light', 'warm-rose', 'blue-steel', 'sage', 'lavender']);
   if (theme !== 'light') {
     const themePath = getThemeFile(theme);
     if (fs.existsSync(themePath))
@@ -2247,7 +2368,8 @@ async function setTheme(theme) {
       })();
     `).catch(() => {});
   }
-  if (!LIGHT_THEMES.has(theme)) {
+  // White logo override only for dark themes; light themes handle logo colour in their own CSS
+  if (theme !== 'light' && !CUSTOM_LIGHT.has(theme)) {
     cssKeys.push(await win.webContents.insertCSS(
       '#headerLogo path{fill:white!important}' +
       '#headerLogo .logo__l,#headerLogo .logo__r{fill:#4a89f3!important}'

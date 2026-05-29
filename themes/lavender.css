@@ -1,26 +1,26 @@
-/* Solarized Light — https://ethanschoonover.com/solarized/
-   base3: #FDF6E3  base2: #EEE8D5  base1: #93A1A1
-   base00: #657B83  base01: #586E75
-   blue: #268BD2  cyan: #2AA198  yellow: #B58900             */
+/* Lavender — soft violet background with purple accents
+   bg:      #FAF8FE   panel:  #EEE8F8   border: #D8CFF0
+   text:    #2A2040   sub:    #5A4A7A   muted:  #9A8AB5
+   accent:  #7055CC   link:   #8855DD                    */
 
 /* ── Page / site header background ───────────────────────────────────── */
 body, html {
-  background-color: #FDF6E3 !important;
+  background-color: #FAF8FE !important;
 }
 #HeaderComponent {
-  background-color: #EEE8D5 !important;
-  border-bottom: 1px solid #DDD6C1 !important;
+  background-color: #EEE8F8 !important;
+  border-bottom: 1px solid #D8CFF0 !important;
 }
 
 /* ── Main chat container ──────────────────────────────────────────────── */
 #candy {
-  background-color: #FDF6E3 !important;
-  color: #657B83 !important;
+  background-color: #FAF8FE !important;
+  color: #2A2040 !important;
 }
 
 /* ── Message pane ─────────────────────────────────────────────────────── */
 #candy .message-pane-wrapper {
-  background-color: #FDF6E3 !important;
+  background-color: #FAF8FE !important;
 }
 #candy .message-pane,
 #candy .message-pane li,
@@ -29,104 +29,104 @@ body, html {
   font-size: 15px !important;
 }
 #candy .message-pane li {
-  background: #FDF6E3 !important;
-  border-bottom: 1px solid #EDE8D5 !important;
+  background: #FAF8FE !important;
+  border-bottom: 1px solid #E5DCF5 !important;
   padding-top: 4px !important;
   padding-bottom: 4px !important;
   line-height: 1.55 !important;
 }
 #candy .message-pane li:hover {
-  background: #F5EDD5 !important;
+  background: #F2EDF9 !important;
 }
 #candy .message-pane li:hover small {
-  background-color: #F5EDD5 !important;
+  background-color: #F2EDF9 !important;
 }
 #candy .message-pane small {
-  color: #93A1A1 !important;
+  color: #9A8AB5 !important;
 }
 #candy .message-pane .label {
-  color: #268BD2 !important;
+  color: #7055CC !important;
 }
 #candy .message-pane div > a {
-  color: #2AA198 !important;
+  color: #8855DD !important;
 }
 #candy .message-pane .infomessage {
-  color: #93A1A1 !important;
+  color: #9A8AB5 !important;
 }
 
 /* ── Message input bar ────────────────────────────────────────────────── */
 #candy .message-form-wrapper {
-  background-color: #EEE8D5 !important;
-  border-top: 1px solid #DDD6C1;
+  background-color: #EEE8F8 !important;
+  border-top: 1px solid #D8CFF0;
 }
 #candy .message-form .field {
-  background-color: #EEE8D5 !important;
-  color: #586E75 !important;
+  background-color: #EEE8F8 !important;
+  color: #2A2040 !important;
   border: none !important;
   outline: none !important;
 }
 #candy .message-form .field::placeholder {
-  color: #93A1A1 !important;
+  color: #9A8AB5 !important;
 }
 
 /* ── User roster ──────────────────────────────────────────────────────── */
 #candy .roster-pane {
-  background-color: #EEE8D5 !important;
-  border-left: 1px solid #DDD6C1;
+  background-color: #EEE8F8 !important;
+  border-left: 1px solid #D8CFF0;
 }
 #candy .roster-pane .label {
-  color: #586E75 !important;
+  color: #5A4A7A !important;
 }
 #candy .roster-pane li {
   border-bottom: none !important;
 }
 #candy .roster-pane .user {
-  border-bottom: 1px solid #DDD6C1 !important;
+  border-bottom: 1px solid #D8CFF0 !important;
 }
 #candy .roster-pane .user:hover {
-  background-color: #E3DCC8 !important;
+  background-color: #E0D5F0 !important;
 }
 
 /* ── Room bar (topic) ─────────────────────────────────────────────────── */
 #candy .roombar {
-  background-color: #EEE8D5 !important;
-  border-bottom: 1px solid #DDD6C1 !important;
+  background-color: #EEE8F8 !important;
+  border-bottom: 1px solid #D8CFF0 !important;
 }
 
 /* ── Toolbar ──────────────────────────────────────────────────────────── */
 #candy #chat-toolbar .usercount span {
-  color: #657B83 !important;
+  color: #5A4A7A !important;
 }
 #candy #chat-toolbar {
-  color: #657B83 !important;
+  color: #5A4A7A !important;
 }
 
 /* ── Active room tab chip ─────────────────────────────────────────────── */
 #candy #activeRoom {
-  background-color: #EEE8D5 !important;
-  color: #586E75 !important;
+  background-color: #EEE8F8 !important;
+  color: #5A4A7A !important;
 }
 
 /* ── Tab bar ──────────────────────────────────────────────────────────── */
 #candy #chat-tabs:not(.modal-tabs) a {
-  background: #EEE8D5 !important;
-  color: #93A1A1 !important;
+  background: #EEE8F8 !important;
+  color: #9A8AB5 !important;
 }
 #candy #chat-tabs:not(.modal-tabs) a:hover {
-  color: #586E75 !important;
+  color: #5A4A7A !important;
 }
 #candy #chat-tabs:not(.modal-tabs) .active .label {
-  background-color: #FDF6E3 !important;
-  color: #586E75 !important;
+  background-color: #FAF8FE !important;
+  color: #2A2040 !important;
 }
 #candy #chat-tabs:not(.modal-tabs) .active .transition {
-  background: #FDF6E3 !important;
+  background: #FAF8FE !important;
 }
 #candy #chat-tabs:not(.modal-tabs) a.close {
-  color: #B8B2A0 !important;
+  color: #C0B0D8 !important;
 }
 #candy #chat-tabs:not(.modal-tabs) a.close:hover {
-  color: #586E75 !important;
+  color: #2A2040 !important;
 }
 
 /* ── Room selector modal ──────────────────────────────────────────────── */
@@ -134,70 +134,70 @@ body, html {
   background-color: rgba(0, 0, 0, 0.5) !important;
 }
 #chat-modal {
-  background: #FDF6E3 !important;
-  color: #657B83 !important;
-  border: 1px solid #DDD6C1 !important;
+  background: #FAF8FE !important;
+  color: #2A2040 !important;
+  border: 1px solid #D8CFF0 !important;
   box-shadow: 0 4px 24px rgba(0, 0, 0, 0.2) !important;
 }
 #chat-modal h2,
 #chat-modal-body h2 {
-  color: #586E75 !important;
+  color: #5A4A7A !important;
 }
 #chat-modal .close {
-  color: #93A1A1 !important;
+  color: #9A8AB5 !important;
 }
 #chat-modal .close:hover {
-  color: #586E75 !important;
-  background-color: #EEE8D5 !important;
+  color: #2A2040 !important;
+  background-color: #EEE8F8 !important;
 }
 .roomList {
-  background-color: #FDF6E3 !important;
+  background-color: #FAF8FE !important;
 }
 .roomList a {
-  color: #657B83 !important;
+  color: #2A2040 !important;
 }
 .roomList a:hover {
-  color: #268BD2 !important;
+  color: #7055CC !important;
 }
 ul.simplePaginationChatRoomList li {
-  border-bottom: 1px solid #EDE8D5;
+  border-bottom: 1px solid #E5DCF5;
 }
 ul.simplePaginationChatRoomList li:hover {
-  background-color: #EEE8D5 !important;
+  background-color: #EEE8F8 !important;
 }
 ul.simplePaginationChatRoomList li .roomCounter {
-  background-color: #DDD6C1 !important;
-  color: #657B83 !important;
+  background-color: #D8CFF0 !important;
+  color: #2A2040 !important;
 }
 ul.simplePaginationChatRoomList li .roomName,
 ul.simplePaginationChatRoomList li a {
-  color: #657B83 !important;
+  color: #2A2040 !important;
 }
 #chat-modal .modal-tabs li:hover {
-  background-color: #EEE8D5 !important;
+  background-color: #EEE8F8 !important;
 }
 #chat-modal .modal-tabs li .label {
-  color: #657B83 !important;
+  color: #2A2040 !important;
 }
 #chat-modal .modal-tabs li .unread,
 #chat-modal .modal-tabs li .close {
-  background-color: #DDD6C1 !important;
-  color: #657B83 !important;
+  background-color: #D8CFF0 !important;
+  color: #2A2040 !important;
 }
 #newRoomBlock {
-  background-color: #F5EDD5 !important;
+  background-color: #F2EDF9 !important;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15) !important;
 }
 #newRoomBlock h2 {
-  color: #586E75 !important;
+  color: #5A4A7A !important;
 }
 #roomPanelFooter #let_me_input {
-  background-color: #EEE8D5 !important;
-  border-color: #DDD6C1 !important;
-  color: #586E75 !important;
+  background-color: #EEE8F8 !important;
+  border-color: #D8CFF0 !important;
+  color: #2A2040 !important;
 }
 #roomPanelFooter #let_me_input::placeholder {
-  color: #93A1A1 !important;
+  color: #9A8AB5 !important;
 }
 
 /* ── Logo ─────────────────────────────────────────────────────────────── */
@@ -208,26 +208,26 @@ ul.simplePaginationChatRoomList li a {
   background-color: transparent !important;
 }
 #headerLogo path {
-  fill: #073642 !important;
+  fill: #100820 !important;
 }
 #headerLogo .logo__l,
 #headerLogo .logo__r {
-  fill: #268BD2 !important;
+  fill: #7055CC !important;
 }
 
 /* ── Scrollbars ───────────────────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-track { background: #EEE8D5; }
-::-webkit-scrollbar-thumb { background: #C8C2B0; border-radius: 4px; }
-::-webkit-scrollbar-thumb:hover { background: #B8B2A0; }
+::-webkit-scrollbar-track { background: #EEE8F8; }
+::-webkit-scrollbar-thumb { background: #C8B8E0; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #B0A0CC; }
 
 /* ── Custom header nav buttons ────────────────────────────────────────── */
 #lit-nav-btns span {
-  color: #268BD2 !important;
-  border-color: #C8C2B0 !important;
+  color: #7055CC !important;
+  border-color: #C8B8E0 !important;
   background: transparent !important;
 }
 #lit-nav-btns span:hover {
-  color: #002B36 !important;
-  border-color: #657B83 !important;
+  color: #100820 !important;
+  border-color: #5A4A7A !important;
 }
