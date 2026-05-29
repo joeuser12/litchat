@@ -2800,9 +2800,17 @@ app.whenReady().then(() => {
   setupTray();
   setupAutoUpdater();
 
-  // Silence the site's broken favicon requests
   const { session } = require('electron');
-  session.fromPartition(PARTITION).webRequest.onBeforeRequest(
+  const sess = session.fromPartition(PARTITION);
+
+  // Block the site's notification permission — it fires a popup for every room message.
+  // Our own DM/presence notifications go through sendNotification() directly and are unaffected.
+  sess.setPermissionRequestHandler((webContents, permission, callback) => {
+    callback(permission !== 'notifications');
+  });
+
+  // Silence the site's broken favicon requests
+  sess.webRequest.onBeforeRequest(
     { urls: ['*://*/favicon.png', '*://*/favicon.ico'] },
     (details, callback) => {
       if (details.url.includes('favicon')) callback({ cancel: true });
