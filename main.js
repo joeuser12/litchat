@@ -2448,6 +2448,7 @@ function createProfile() {
 }
 
 function sendNotification({ title, body }) {
+  if (settings.prefs?.notifications === false) return;
   const { execFile } = require('child_process');
 
   if (process.platform === 'linux') {
@@ -2540,6 +2541,16 @@ function createAppMenu() {
             if (${on} && window._litUpdateFavBar) window._litUpdateFavBar(bar);
           }
         `).catch(() => {});
+      },
+    },
+    {
+      label: 'Notifications',
+      type: 'checkbox',
+      checked: settings.prefs?.notifications !== false,
+      click: (menuItem) => {
+        if (!settings.prefs) settings.prefs = {};
+        settings.prefs.notifications = menuItem.checked;
+        saveSettings();
       },
     },
     { type: 'separator' },
