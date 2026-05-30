@@ -599,6 +599,10 @@ function createWindow() {
       ));
     }
 
+    const fsPx = settings.prefs?.fontSize;
+    if (fsPx && fsPx !== 15)
+      cssKeys.push(await win.webContents.insertCSS(fontSizeCSS(fsPx)));
+
     if (fs.existsSync(USER_JS)) {
       win.webContents.executeJavaScript(fs.readFileSync(USER_JS, 'utf8')).catch(() => {});
     }
@@ -981,6 +985,17 @@ function injectDMHistory() {
       }
     })();
   `).catch(() => {});
+}
+
+const FONT_SIZES = [
+  { px: 13, label: 'Small' },
+  { px: 15, label: 'Medium' },
+  { px: 17, label: 'Large' },
+  { px: 19, label: 'X-Large' },
+];
+
+function fontSizeCSS(px) {
+  return `#candy .message-pane,#candy .message-pane li,#candy .message-pane li span,#candy .message-pane li div{font-size:${px}px!important}`;
 }
 
 function adjustZoom(delta) {
@@ -2375,6 +2390,10 @@ async function setTheme(theme) {
       '#headerLogo .logo__l,#headerLogo .logo__r{fill:#4a89f3!important}'
     ));
   }
+  const fsPx = settings.prefs?.fontSize;
+  if (fsPx && fsPx !== 15)
+    cssKeys.push(await win.webContents.insertCSS(fontSizeCSS(fsPx)));
+
   // Re-inject nav buttons with updated theme colours
   await win.webContents.executeJavaScript(
     `var e=document.getElementById('lit-nav-btns');if(e)e.remove();`
@@ -2447,8 +2466,32 @@ function createProfile() {
   dialogWin.on('closed', () => ipcMain.removeListener('profile:new-name', onName));
 }
 
+function playNotificationSound() {
+  if (settings.prefs?.notificationSound === false) return;
+  win.webContents.executeJavaScript(`
+    (function() {
+      try {
+        var ctx = new AudioContext();
+        [523.25, 659.25].forEach(function(freq, i) {
+          var osc = ctx.createOscillator();
+          var gain = ctx.createGain();
+          osc.connect(gain); gain.connect(ctx.destination);
+          osc.type = 'sine';
+          osc.frequency.value = freq;
+          var t = ctx.currentTime + i * 0.13;
+          gain.gain.setValueAtTime(0, t);
+          gain.gain.linearRampToValueAtTime(0.12, t + 0.01);
+          gain.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
+          osc.start(t); osc.stop(t + 0.35);
+        });
+      } catch(e) {}
+    })()
+  `).catch(() => {});
+}
+
 function sendNotification({ title, body }) {
   if (settings.prefs?.notifications === false) return;
+  playNotificationSound();
   const { execFile } = require('child_process');
 
   if (process.platform === 'linux') {
@@ -2552,6 +2595,30 @@ function createAppMenu() {
         settings.prefs.notifications = menuItem.checked;
         saveSettings();
       },
+    },
+    {
+      label: 'Notification Sound',
+      type: 'checkbox',
+      checked: settings.prefs?.notificationSound !== false,
+      click: (menuItem) => {
+        if (!settings.prefs) settings.prefs = {};
+        settings.prefs.notificationSound = menuItem.checked;
+        saveSettings();
+      },
+    },
+    {
+      label: 'Text Size',
+      submenu: FONT_SIZES.map(({ px, label }) => ({
+        label,
+        type: 'checkbox',
+        checked: (settings.prefs?.fontSize ?? 15) === px,
+        click: async () => {
+          if (!settings.prefs) settings.prefs = {};
+          settings.prefs.fontSize = px;
+          saveSettings();
+          await setTheme(settings.theme || 'dark');
+        },
+      })),
     },
     { type: 'separator' },
     {
