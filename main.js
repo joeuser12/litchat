@@ -133,6 +133,10 @@ let watchList = loadWatchList();           // Set of lowercased nicks to watch
 let onlineWatched = new Set();             // currently-online watched nicks this session
 let presenceNotifyReady = false;           // false during startup roster flood
 let awayRepliedTo = new Set();             // JIDs already sent an away-reply this away session
+
+const ROOM_IDLE_MS     = 5 * 60 * 1000;   // 5-minute idle window for room notifications
+const roomLastJoin    = new Map();         // roomJid → timestamp of last join notification sent
+const roomLastMessage = new Map();         // roomJid → timestamp of last message notification sent
 let awayConversations = new Map();         // per-sender conversation history for llama mode
 
 // Auto-updater state — read by createAppMenu() to reflect current status
@@ -157,6 +161,25 @@ function nickOf(jid) {
   if (slash !== -1) return jid.slice(slash + 1) || jid;
   const at = jid.indexOf('@');
   return at !== -1 ? jid.slice(0, at) : jid;
+}
+
+function notifyRoomMessages(messages) {
+  if (!presenceNotifyReady) return;
+  for (const m of messages) {
+    if (m.type !== 'groupchat' || m.direction !== 'received') continue;
+    const slash = (m.from || '').indexOf('/');
+    if (slash === -1) continue;
+    const roomJid  = m.from.slice(0, slash);
+    const msgNick  = m.from.slice(slash + 1);
+    const fav = settings.favourites?.[roomJid];
+    if (!fav?.notifyMessage) continue;
+    const last = roomLastMessage.get(roomJid) || 0;
+    if (Date.now() - last < ROOM_IDLE_MS) continue;
+    roomLastMessage.set(roomJid, Date.now());
+    const name = fav.name || roomJid.split('@')[0];
+    const body = m.body ? (m.body.length > 80 ? m.body.slice(0, 80) + '…' : m.body) : '';
+    sendNotification({ title: name, body: `${msgNick}: ${body}` });
+  }
 }
 
 function notifyDMs(messages) {
@@ -465,17 +488,37 @@ function extractPresence(xml) {
 function handlePresence(presences) {
   watchList = loadWatchList(); // pick up any changes made via the log viewer
   for (const p of presences) {
-    const { nick, type } = p;
-    if (!watchList.has(nick)) continue;
+    const { nick, type, from } = p;
 
-    if (type === 'available' && !onlineWatched.has(nick)) {
-      onlineWatched.add(nick);
-      if (!presenceNotifyReady) continue; // suppress startup roster flood
-      sendNotification({ title: 'Now online', body: nick });
-    } else if (type === 'unavailable' && onlineWatched.has(nick)) {
-      onlineWatched.delete(nick);
-      if (!presenceNotifyReady) continue;
-      sendNotification({ title: 'Went offline', body: nick });
+    // Watch list: online/offline notifications for specific users
+    if (watchList.has(nick)) {
+      if (type === 'available' && !onlineWatched.has(nick)) {
+        onlineWatched.add(nick);
+        if (presenceNotifyReady)
+          sendNotification({ title: 'Now online', body: nick });
+      } else if (type === 'unavailable' && onlineWatched.has(nick)) {
+        onlineWatched.delete(nick);
+        if (presenceNotifyReady)
+          sendNotification({ title: 'Went offline', body: nick });
+      }
+    }
+
+    // Room join notifications
+    if (type === 'available' && presenceNotifyReady) {
+      const slash = (from || '').indexOf('/');
+      if (slash !== -1) {
+        const roomJid  = from.slice(0, slash);
+        const joinNick = from.slice(slash + 1);
+        const fav = settings.favourites?.[roomJid];
+        if (fav?.notifyJoin) {
+          const last = roomLastJoin.get(roomJid) || 0;
+          if (Date.now() - last >= ROOM_IDLE_MS) {
+            roomLastJoin.set(roomJid, Date.now());
+            const name = fav.name || roomJid.split('@')[0];
+            sendNotification({ title: name, body: `${joinNick} joined` });
+          }
+        }
+      }
     }
   }
 }
@@ -2114,99 +2157,107 @@ function joinRoom(jid) {
              clearInterval(poll); dismiss(); resolve();
            } else if (Date.now() > deadline) {
              clearInterval(poll); dismiss();
-             console.warn('[join] gave up waiting for tab:', jid);
-             resolve();
+             console.warn('[join] gave up waiting for tab, falling back to UI click:', jid);
+             tryViaUI();
            }
          }, 100);
        }
 
-       // 2. Try Candy's programmatic join — bypasses pagination entirely
-       try {
-         var act = typeof Candy !== 'undefined' && Candy.Core &&
-                   Candy.Core.Action && Candy.Core.Action.Jabber &&
-                   Candy.Core.Action.Jabber.Room;
-         if (act && typeof act.Join === 'function') {
-           act.Join(jid);
-           waitForTab(8000);
-           return;
-         }
-       } catch(e) {}
+       // 2. Try Candy's programmatic join — bypasses pagination entirely.
+       // NOTE: disabled — if the server rejects this stanza, Candy marks the room
+       // as failed internally and the subsequent UI-click fallback also silently fails.
+       // Going straight to path 3 keeps Candy's state clean for the first attempt.
+       // Re-enable if path 3 proves too slow for rooms that do work via direct join.
+       //
+       // try {
+       //   var act = typeof Candy !== 'undefined' && Candy.Core &&
+       //             Candy.Core.Action && Candy.Core.Action.Jabber &&
+       //             Candy.Core.Action.Jabber.Room;
+       //   if (act && typeof act.Join === 'function') {
+       //     act.Join(jid);
+       //     waitForTab(8000);
+       //     return;
+       //   }
+       // } catch(e) {}
 
        // 3. Room panel UI — open it if not already open, search across pages
-       var tryClickInList = function() {
-         var links = document.querySelectorAll('ul.simplePaginationChatRoomList li a');
-         for (var i = 0; i < links.length; i++) {
-           var href = (links[i].getAttribute('href') || '').replace(/^#/, '');
-           if (href === jid) {
-             links[i].click();
-             return true;
-           }
-         }
-         return false;
-       };
-
-       // Click the pagination "next page" control
-       var seenPages = new Set();
-       function advancePage() {
-         var items = document.querySelectorAll('#roomPanel li, #chat-rooms li, .simplePagination li');
-         var foundCurrent = false;
-         for (var i = 0; i < items.length; i++) {
-           var cls = items[i].className || '';
-           if (/current/i.test(cls)) { foundCurrent = true; continue; }
-           if (foundCurrent && !(/disabled|prev/i.test(cls))) {
-             var a = items[i].querySelector('a');
-             if (a) {
-               var key = a.textContent.trim();
-               if (seenPages.has(key)) return false;
-               seenPages.add(key);
-               a.click();
+       function tryViaUI() {
+         var tryClickInList = function() {
+           var links = document.querySelectorAll('ul.simplePaginationChatRoomList li a');
+           for (var i = 0; i < links.length; i++) {
+             var href = (links[i].getAttribute('href') || '').replace(/^#/, '');
+             if (href === jid) {
+               links[i].click();
                return true;
              }
            }
+           return false;
+         };
+
+         // Click the pagination "next page" control
+         var seenPages = new Set();
+         function advancePage() {
+           var items = document.querySelectorAll('#roomPanel li, #chat-rooms li, .simplePagination li');
+           var foundCurrent = false;
+           for (var i = 0; i < items.length; i++) {
+             var cls = items[i].className || '';
+             if (/current/i.test(cls)) { foundCurrent = true; continue; }
+             if (foundCurrent && !(/disabled|prev/i.test(cls))) {
+               var a = items[i].querySelector('a');
+               if (a) {
+                 var key = a.textContent.trim();
+                 if (seenPages.has(key)) return false;
+                 seenPages.add(key);
+                 a.click();
+                 return true;
+               }
+             }
+           }
+           return false;
          }
-         return false;
+         // Only open the panel if the room list isn't already visible —
+         // clicking the tab when it's already open would toggle it closed
+         if (!document.querySelector('ul.simplePaginationChatRoomList li a')) {
+           document.querySelector('#roomPanel-tab a.label')?.click();
+         }
+
+         var tries = 0;
+         var clickedLink = false;
+         var clickAttempts = 0;
+         var poll = setInterval(function() {
+           // After clicking the link, wait for the tab — retry the click every 3 s if needed
+           if (clickedLink) {
+             if (document.querySelector('li[data-roomjid=' + JSON.stringify(jid) + '] a.label')) {
+               clearInterval(poll); dismiss(); resolve(); return;
+             }
+             if (++tries > 80) {
+               console.warn('[join] tab never appeared after click for:', jid);
+               clearInterval(poll); dismiss(); resolve(); return;
+             }
+             // Retry the click every 30 ticks (3 s) in case the first click was lost
+             if (tries % 30 === 0 && clickAttempts < 3) {
+               ++clickAttempts;
+               tryClickInList();
+             }
+             return;
+           }
+           if (tryClickInList()) {
+             clickedLink = true; clickAttempts = 1; tries = 0; return;
+           }
+           tries++;
+           if (tries % 20 === 0) advancePage();
+           if (tries > 100) {
+             clearInterval(poll);
+             console.warn('[join] gave up on:', jid,
+               '— visible rooms:', Array.from(
+                 document.querySelectorAll('ul.simplePaginationChatRoomList li a')
+               ).map(function(a){ return (a.getAttribute('href')||'').replace(/^#/,''); }));
+             dismiss(); resolve();
+           }
+         }, 100);
        }
 
-       // Only open the panel if the room list isn't already visible —
-       // clicking the tab when it's already open would toggle it closed
-       if (!document.querySelector('ul.simplePaginationChatRoomList li a')) {
-         document.querySelector('#roomPanel-tab a.label')?.click();
-       }
-
-       var tries = 0;
-       var clickedLink = false;
-       var clickAttempts = 0;
-       var poll = setInterval(function() {
-         // After clicking the link, wait for the tab — retry the click every 3 s if needed
-         if (clickedLink) {
-           if (document.querySelector('li[data-roomjid=' + JSON.stringify(jid) + '] a.label')) {
-             clearInterval(poll); dismiss(); resolve(); return;
-           }
-           if (++tries > 80) {
-             console.warn('[join] tab never appeared after click for:', jid);
-             clearInterval(poll); dismiss(); resolve(); return;
-           }
-           // Retry the click every 30 ticks (3 s) in case the first click was lost
-           if (tries % 30 === 0 && clickAttempts < 3) {
-             ++clickAttempts;
-             tryClickInList();
-           }
-           return;
-         }
-         if (tryClickInList()) {
-           clickedLink = true; clickAttempts = 1; tries = 0; return;
-         }
-         tries++;
-         if (tries % 20 === 0) advancePage();
-         if (tries > 100) {
-           clearInterval(poll);
-           console.warn('[join] gave up on:', jid,
-             '— visible rooms:', Array.from(
-               document.querySelectorAll('ul.simplePaginationChatRoomList li a')
-             ).map(function(a){ return (a.getAttribute('href')||'').replace(/^#/,''); }));
-           dismiss(); resolve();
-         }
-       }, 100);
+       tryViaUI();
      })`
   ).catch(() => {});
 }
@@ -2347,7 +2398,12 @@ ipcMain.handle('rooms:getFavourites', () => settings.favourites ?? {});
 
 ipcMain.handle('rooms:setFavourite', (_e, jid, name, val) => {
   if (!settings.favourites) settings.favourites = {};
-  if (val) settings.favourites[jid] = { name, autoJoin: settings.favourites[jid]?.autoJoin ?? false };
+  if (val) settings.favourites[jid] = {
+    name,
+    autoJoin:      settings.favourites[jid]?.autoJoin      ?? false,
+    notifyJoin:    settings.favourites[jid]?.notifyJoin    ?? false,
+    notifyMessage: settings.favourites[jid]?.notifyMessage ?? false,
+  };
   else delete settings.favourites[jid];
   saveSettings();
   createAppMenu();
@@ -2358,6 +2414,18 @@ ipcMain.handle('rooms:setAutoJoin', (_e, jid, val) => {
   settings.favourites[jid].autoJoin = val;
   saveSettings();
   createAppMenu();
+});
+
+ipcMain.handle('rooms:setNotifyJoin', (_e, jid, val) => {
+  if (!settings.favourites?.[jid]) return;
+  settings.favourites[jid].notifyJoin = val;
+  saveSettings();
+});
+
+ipcMain.handle('rooms:setNotifyMessage', (_e, jid, val) => {
+  if (!settings.favourites?.[jid]) return;
+  settings.favourites[jid].notifyMessage = val;
+  saveSettings();
 });
 
 async function setTheme(theme) {
@@ -2865,6 +2933,7 @@ function attachBOSHLogger() {
         const received = extractMessages(body, 'received');
         writeMessages(received);
         notifyDMs(received);
+        notifyRoomMessages(received);
         handlePresence(extractPresence(body));
       } catch (_) {}
     }

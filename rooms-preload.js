@@ -7,6 +7,8 @@ contextBridge.exposeInMainWorld('roomsAPI', {
   joinRoom: (jid)        => ipcRenderer.send('rooms:join', jid),
   // Favourites / settings
   getFavourites: ()      => ipcRenderer.invoke('rooms:getFavourites'),
-  setFavourite: (jid, name, val) => ipcRenderer.invoke('rooms:setFavourite', jid, name, val),
-  setAutoJoin:  (jid, val)       => ipcRenderer.invoke('rooms:setAutoJoin',  jid, val),
+  setFavourite:    (jid, name, val) => ipcRenderer.invoke('rooms:setFavourite',    jid, name, val),
+  setAutoJoin:     (jid, val)       => ipcRenderer.invoke('rooms:setAutoJoin',     jid, val),
+  setNotifyJoin:   (jid, val)       => ipcRenderer.invoke('rooms:setNotifyJoin',   jid, val),
+  setNotifyMessage:(jid, val)       => ipcRenderer.invoke('rooms:setNotifyMessage', jid, val),
 });

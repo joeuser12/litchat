@@ -113,7 +113,7 @@
     .star-btn.on  { color: #f0c040; }
     .star-btn:hover { color: #f0c040; }
 
-    /* Auto-join toggle */
+    /* Auto-join and notification toggles */
     .aj-label {
       font-size: 11px;
       color: #555;
@@ -124,6 +124,17 @@
     }
     .aj-label input { accent-color: #7c5cbf; cursor: pointer; }
     .aj-label.on { color: #c09af0; }
+    .nj-label, .nm-label {
+      font-size: 11px;
+      color: #555;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      white-space: nowrap;
+    }
+    .nj-label input, .nm-label input { accent-color: #f0a040; cursor: pointer; }
+    .nj-label.on { color: #f0c070; }
+    .nm-label.on { color: #f0c070; }
 
     #empty { color: #444; text-align: center; margin-top: 60px; font-size: 13px; }
 
@@ -179,14 +190,23 @@
 
       listEl.innerHTML = rooms.map(r => {
         const isFav = !!favourites[r.jid];
-        const isAJ  = favourites[r.jid]?.autoJoin ?? false;
+        const isAJ  = favourites[r.jid]?.autoJoin      ?? false;
+        const isNJ  = favourites[r.jid]?.notifyJoin    ?? false;
+        const isNM  = favourites[r.jid]?.notifyMessage ?? false;
         return `
           <div class="room-row" data-jid="${esc(r.jid)}">
             <span class="room-count">${r.count}</span>
             <span class="room-name">${esc(r.name)}</span>
             <button class="join-btn">Join</button>
-            ${isFav ? `<label class="aj-label ${isAJ ? 'on' : ''}">
+            ${isFav ? `
+            <label class="aj-label ${isAJ ? 'on' : ''}">
               <input type="checkbox" class="aj-chk" ${isAJ ? 'checked' : ''}> auto-join
+            </label>
+            <label class="nj-label ${isNJ ? 'on' : ''}" title="Notify when someone joins (after 5 min silence)">
+              <input type="checkbox" class="nj-chk" ${isNJ ? 'checked' : ''}> notify joins
+            </label>
+            <label class="nm-label ${isNM ? 'on' : ''}" title="Notify on first message after 5 min silence">
+              <input type="checkbox" class="nm-chk" ${isNM ? 'checked' : ''}> notify msgs
             </label>` : ''}
             <button class="star-btn ${isFav ? 'on' : ''}" title="${isFav ? 'Remove from favourites' : 'Add to favourites'}">★</button>
           </div>`;
@@ -218,6 +238,22 @@
           await window.roomsAPI.setAutoJoin(jid, chk.checked);
           favourites = await window.roomsAPI.getFavourites();
           render();
+        });
+      });
+
+      listEl.querySelectorAll('.nj-chk').forEach(chk => {
+        chk.addEventListener('change', async () => {
+          const row = chk.closest('.room-row');
+          await window.roomsAPI.setNotifyJoin(row.dataset.jid, chk.checked);
+          chk.closest('.nj-label').classList.toggle('on', chk.checked);
+        });
+      });
+
+      listEl.querySelectorAll('.nm-chk').forEach(chk => {
+        chk.addEventListener('change', async () => {
+          const row = chk.closest('.room-row');
+          await window.roomsAPI.setNotifyMessage(row.dataset.jid, chk.checked);
+          chk.closest('.nm-label').classList.toggle('on', chk.checked);
         });
       });
     }
