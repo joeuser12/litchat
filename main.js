@@ -169,7 +169,7 @@ function notifyRoomMessages(messages) {
     if (m.type !== 'groupchat' || m.direction !== 'received') continue;
     const slash = (m.from || '').indexOf('/');
     if (slash === -1) continue;
-    const roomJid  = m.from.slice(0, slash);
+    const roomJid  = unescapeJid(m.from.slice(0, slash));
     const msgNick  = m.from.slice(slash + 1);
     const fav = settings.favourites?.[roomJid];
     if (!fav?.notifyMessage) continue;
@@ -468,6 +468,22 @@ async function sendLlamaReply(toJid, userText) {
   sendAwayReply(toJid, reply);
 }
 
+// Decodes XEP-0106 JID escaping (e.g. \20 → space) used in XMPP stanza from/to attributes.
+// Room hrefs in Candy's UI use plain characters; BOSH stanzas use the escaped form.
+function unescapeJid(jid) {
+  return jid
+    .replace(/\\20/g, ' ')
+    .replace(/\\22/g, '"')
+    .replace(/\\26/g, '&')
+    .replace(/\\27/g, "'")
+    .replace(/\\2f/g, '/')
+    .replace(/\\3a/g, ':')
+    .replace(/\\3c/g, '<')
+    .replace(/\\3e/g, '>')
+    .replace(/\\40/g, '@')
+    .replace(/\\5c/g, '\\');
+}
+
 // Extracts presence stanzas from a BOSH XML body.
 // Parses full elements so we can detect MUC self-join reflections (status code 110).
 function extractPresence(xml) {
@@ -511,7 +527,7 @@ function handlePresence(presences) {
     if (type === 'available' && presenceNotifyReady && !p.isSelf) {
       const slash = (from || '').indexOf('/');
       if (slash !== -1) {
-        const roomJid  = from.slice(0, slash);
+        const roomJid  = unescapeJid(from.slice(0, slash));
         const joinNick = from.slice(slash + 1);
         const fav = settings.favourites?.[roomJid];
         if (fav?.notifyJoin) {
