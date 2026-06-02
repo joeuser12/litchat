@@ -469,17 +469,21 @@ async function sendLlamaReply(toJid, userText) {
 }
 
 // Extracts presence stanzas from a BOSH XML body.
-// Handles both self-closing (<presence .../>) and element form (<presence ...>).
+// Parses full elements so we can detect MUC self-join reflections (status code 110).
 function extractPresence(xml) {
   const out = [];
-  const re = /<presence\b([^>]*?)(?:\/>|>)/g;
+  // Match full presence elements (self-closing or with body)
+  const re = /<presence\b([^>]*?)(?:\/\s*>|>([\s\S]*?)<\/presence>)/g;
   let m;
   while ((m = re.exec(xml)) !== null) {
     const attrs = m[1];
+    const inner = m[2] || '';
     const from = (attrs.match(/\bfrom=["']([^"']+)["']/) || [])[1];
     const type = (attrs.match(/\btype=["']([^"']+)["']/) || [])[1] || 'available';
     if (from && (type === 'available' || type === 'unavailable')) {
-      out.push({ nick: nickOf(from).toLowerCase(), from, type });
+      // status code 110 = MUC server reflecting our own join back to us
+      const isSelf = /code=["']110["']/.test(inner);
+      out.push({ nick: nickOf(from).toLowerCase(), from, type, isSelf });
     }
   }
   return out;
@@ -503,8 +507,8 @@ function handlePresence(presences) {
       }
     }
 
-    // Room join notifications
-    if (type === 'available' && presenceNotifyReady) {
+    // Room join notifications — skip our own join reflection (MUC status 110)
+    if (type === 'available' && presenceNotifyReady && !p.isSelf) {
       const slash = (from || '').indexOf('/');
       if (slash !== -1) {
         const roomJid  = from.slice(0, slash);
