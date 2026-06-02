@@ -2940,7 +2940,14 @@ function attachBOSHLogger() {
       // Log sent messages from the request body
       const sent = pendingRequests.get(requestId);
       if (sent) {
-        writeMessages(extractMessages(sent, 'sent'));
+        const sentMsgs = extractMessages(sent, 'sent');
+        writeMessages(sentMsgs);
+        // Reset room idle timer for our own sent messages so the server's
+        // reflection of them (received stanza) doesn't trigger a notification
+        for (const m of sentMsgs) {
+          if (m.type === 'groupchat' && m.to)
+            roomLastMessage.set(unescapeJid(m.to), Date.now());
+        }
         pendingRequests.delete(requestId);
       }
 
