@@ -3081,6 +3081,10 @@ function injectImageSharing() {
         try {
           var filePath = file.path;
           if (!filePath) throw new Error('File path not available');
+          if (typeof window.litChat === 'undefined')
+            throw new Error('preload bridge not loaded — try fully restarting the app');
+          if (typeof window.litChat.uploadPhoto !== 'function')
+            throw new Error('uploadPhoto missing from bridge (bridge keys: ' + Object.keys(window.litChat).join(', ') + ')');
           var slash = jid.indexOf('/');
           var partner = slash !== -1 ? jid.slice(slash + 1) : jid.split('@')[0];
           var result = await window.litChat.uploadPhoto(partner, filePath, file.type);
@@ -3182,10 +3186,19 @@ function injectImageSharing() {
       function addPhotoButton(pane) {
         if (pane._litPhotoBtn) return;
         var jid = pane.dataset.roomjid || '';
-        if (!jid || jid.indexOf('@conference.') !== -1) return;
+        // Skip bare conference-room JIDs; allow DMs (including room/partner JIDs with a '/')
+        var slash = jid.indexOf('/');
+        if (!jid || (slash === -1 && jid.indexOf('@conference.') !== -1)) {
+          console.log('[litpic] addPhotoButton skip (conference room):', jid);
+          return;
+        }
         var form = pane.querySelector('.message-form');
         var submitBtn = form && form.querySelector('input[type="submit"], button[type="submit"]');
-        if (!submitBtn) return;
+        if (!submitBtn) {
+          console.log('[litpic] addPhotoButton skip (no submit btn) jid:', jid, 'form:', form);
+          return;
+        }
+        console.log('[litpic] addPhotoButton OK jid:', jid);
         pane._litPhotoBtn = true;
 
         var IBTN = 'background:none;border:none;cursor:pointer;font-size:17px;' +
@@ -3252,20 +3265,31 @@ function injectImageSharing() {
         form.insertBefore(linkBtn, submitBtn);
       }
 
-      document.querySelectorAll('.room-pane[data-roomjid]').forEach(addPhotoButton);
+      var initPanes = document.querySelectorAll('.room-pane[data-roomjid]');
+      console.log('[litpic] init: found', initPanes.length, 'room-pane(s),',
+        'litChat bridge:', typeof window.litChat,
+        'uploadPhoto:', typeof (window.litChat && window.litChat.uploadPhoto));
+      initPanes.forEach(addPhotoButton);
 
       // Watch for new panes and message lists
       var chatRooms = document.getElementById('chat-rooms');
       if (chatRooms) {
         new MutationObserver(function(muts) {
           muts.forEach(function(mut) {
-            mut.addedNodes.forEach(function(pane) {
-              if (pane.nodeType !== 1) return;
-              pane.querySelectorAll('ul.message-pane, ul[class*="message"]').forEach(observePane);
-              if (pane.dataset && pane.dataset.roomjid) addPhotoButton(pane);
+            mut.addedNodes.forEach(function(node) {
+              if (node.nodeType !== 1) return;
+              node.querySelectorAll('ul.message-pane, ul[class*="message"]').forEach(observePane);
+              if (node.dataset && node.dataset.roomjid) addPhotoButton(node);
+              // Also check descendants (pane may be a wrapper)
+              node.querySelectorAll('.room-pane[data-roomjid]').forEach(function(child) {
+                child.querySelectorAll('ul.message-pane, ul[class*="message"]').forEach(observePane);
+                addPhotoButton(child);
+              });
             });
           });
-        }).observe(chatRooms, { childList: true });
+        }).observe(chatRooms, { childList: true, subtree: true });
+      } else {
+        console.log('[litpic] #chat-rooms not found — observer not set up');
       }
     })();
   `).catch(() => {});
