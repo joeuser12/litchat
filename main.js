@@ -2940,6 +2940,13 @@ function setupAutoUpdater() {
 
 // ── PicPub photo sharing ─────────────────────────────────────────────────────
 
+function invalidateDMAlbum(partnerUsername) {
+  const token = settings.dmAlbumsByPartner?.[partnerUsername];
+  if (token) delete settings.picpubAlbums[token];
+  if (settings.dmAlbumsByPartner) delete settings.dmAlbumsByPartner[partnerUsername];
+  saveSettings();
+}
+
 async function getOrCreateDMAlbum(partnerUsername) {
   const token = settings.dmAlbumsByPartner?.[partnerUsername];
   const existing = token && settings.picpubAlbums?.[token];
@@ -2961,31 +2968,41 @@ async function getOrCreateDMAlbum(partnerUsername) {
   return { token: data.token, ownerToken: data.owner_token, viewUrl: data.view_url };
 }
 
+async function uploadToAlbum(album, filePath, mimeType) {
+  const buf = fs.readFileSync(filePath);
+  const filename = path.basename(filePath);
+  const ct = mimeType || 'application/octet-stream';
+  const boundary = '----LitPicBoundary' + Date.now().toString(16);
+  const CRLF = '\r\n';
+  const bodyBuf = Buffer.concat([
+    Buffer.from(
+      `--${boundary}${CRLF}` +
+      `Content-Disposition: form-data; name="files[]"; filename="${filename}"${CRLF}` +
+      `Content-Type: ${ct}${CRLF}${CRLF}`
+    ),
+    buf,
+    Buffer.from(`${CRLF}--${boundary}--${CRLF}`),
+  ]);
+  return fetch(`https://picpub.art/v/api/albums/${album.token}/upload`, {
+    method: 'POST',
+    headers: {
+      'X-Owner-Token': album.ownerToken,
+      'Content-Type': `multipart/form-data; boundary=${boundary}`,
+    },
+    body: bodyBuf,
+  });
+}
+
 ipcMain.handle('picpub:upload', async (_e, partnerUsername, filePath, mimeType) => {
   try {
-    const album = await getOrCreateDMAlbum(partnerUsername);
-    const buf = fs.readFileSync(filePath);
-    const filename = path.basename(filePath);
-    const ct = mimeType || 'application/octet-stream';
-    const boundary = '----LitPicBoundary' + Date.now().toString(16);
-    const CRLF = '\r\n';
-    const bodyBuf = Buffer.concat([
-      Buffer.from(
-        `--${boundary}${CRLF}` +
-        `Content-Disposition: form-data; name="files[]"; filename="${filename}"${CRLF}` +
-        `Content-Type: ${ct}${CRLF}${CRLF}`
-      ),
-      buf,
-      Buffer.from(`${CRLF}--${boundary}--${CRLF}`),
-    ]);
-    const res = await fetch(`https://picpub.art/v/api/albums/${album.token}/upload`, {
-      method: 'POST',
-      headers: {
-        'X-Owner-Token': album.ownerToken,
-        'Content-Type': `multipart/form-data; boundary=${boundary}`,
-      },
-      body: bodyBuf,
-    });
+    let album = await getOrCreateDMAlbum(partnerUsername);
+    let res = await uploadToAlbum(album, filePath, mimeType);
+    // Album was deleted server-side while our cache still considered it valid — retry once
+    if (res.status === 404 || res.status === 410) {
+      invalidateDMAlbum(partnerUsername);
+      album = await getOrCreateDMAlbum(partnerUsername);
+      res = await uploadToAlbum(album, filePath, mimeType);
+    }
     if (!res.ok) throw new Error(`Upload failed: ${res.status} ${await res.text()}`);
     const data = await res.json();
     const added = data.added?.[0];
@@ -2996,17 +3013,26 @@ ipcMain.handle('picpub:upload', async (_e, partnerUsername, filePath, mimeType) 
   }
 });
 
+async function linkToAlbum(album, picpubUrl) {
+  return fetch(`https://picpub.art/v/api/albums/${album.token}/link`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Owner-Token': album.ownerToken },
+    body: JSON.stringify({ url: picpubUrl }),
+  });
+}
+
 ipcMain.handle('picpub:link', async (_e, partnerUsername, picpubUrl) => {
   try {
     if (!/^https?:\/\/picpub\.art\//.test(picpubUrl))
       throw new Error('Not a picpub.art URL');
-    const album = await getOrCreateDMAlbum(partnerUsername);
-    const res = await fetch(`https://picpub.art/v/api/albums/${album.token}/link`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Owner-Token': album.ownerToken },
-      body: JSON.stringify({ url: picpubUrl }),
-    });
-    if (!res.ok) throw new Error(`Link failed: ${res.status}`);
+    let album = await getOrCreateDMAlbum(partnerUsername);
+    let res = await linkToAlbum(album, picpubUrl);
+    if (res.status === 404 || res.status === 410) {
+      invalidateDMAlbum(partnerUsername);
+      album = await getOrCreateDMAlbum(partnerUsername);
+      res = await linkToAlbum(album, picpubUrl);
+    }
+    if (!res.ok) throw new Error(`Link failed: ${res.status} ${await res.text()}`);
     const data = await res.json();
     return { ok: true, token: album.token, hash: data.hash, native_url: data.native_url || null, viewUrl: album.viewUrl };
   } catch (e) {
