@@ -2978,7 +2978,8 @@ function injectImageSharing() {
       if (window._litImageSharingActive) return;
       window._litImageSharingActive = true;
 
-      // Detect photo messages in a chat LI and append inline thumbnail
+      // ── Inline rendering ────────────────────────────────────────────────────
+
       function renderPhotoMsg(li) {
         if (li._litPhotoRendered) return;
         var text = li.textContent || '';
@@ -2986,25 +2987,20 @@ function injectImageSharing() {
         if (!m) return;
         li._litPhotoRendered = true;
         var token = m[1], hash = m[2];
-        var wrap = document.createElement('div');
-        wrap.style.cssText = 'margin:4px 0 2px 0';
         var img = document.createElement('img');
         img.src = 'litpic://' + token + '/' + hash;
         img.style.cssText = 'max-width:300px;max-height:300px;object-fit:contain;' +
-          'border-radius:8px;cursor:pointer;display:block';
+          'border-radius:8px;cursor:pointer;display:block;margin:4px 0 2px';
         img.title = 'Click to open album';
         img.addEventListener('click', function() {
           window.open('https://picpub.art/v/' + token);
         });
-        wrap.appendChild(img);
-        li.appendChild(wrap);
+        li.appendChild(img);
       }
 
-      // Observe message panes for new LIs
       function observePane(ul) {
         if (ul._litPhotoObs) return;
         ul._litPhotoObs = true;
-        // scan existing messages
         ul.querySelectorAll('li').forEach(renderPhotoMsg);
         new MutationObserver(function(muts) {
           muts.forEach(function(mut) {
@@ -3020,109 +3016,39 @@ function injectImageSharing() {
 
       document.querySelectorAll('ul.message-pane, ul[class*="message"]').forEach(observePane);
 
-      // Watch for new message panes added by Candy
-      var chatRooms = document.getElementById('chat-rooms');
-      if (chatRooms) {
-        new MutationObserver(function(muts) {
-          muts.forEach(function(mut) {
-            mut.addedNodes.forEach(function(pane) {
-              if (pane.nodeType !== 1) return;
-              pane.querySelectorAll('ul.message-pane, ul[class*="message"]').forEach(observePane);
-            });
-          });
-        }).observe(chatRooms, { childList: true });
-      }
+      // ── Upload logic (shared by button) ─────────────────────────────────────
 
-      // Drag-and-drop: document-level capture listeners intercept before any Candy handlers.
-      // We use the active-tab approach (same as existing setupPerRoomStatus code) rather
-      // than closest() so the whole chat area works as a drop target.
-      var _litDragPane = null;
-
-      function getActiveDMJid() {
-        var tab = document.querySelector('#chat-tabs li.active[data-roomjid]');
-        if (!tab) return null;
-        var jid = tab.dataset.roomjid || '';
-        return (jid && jid.indexOf('@conference.') === -1) ? jid : null;
-      }
-
-      function getActiveDMPane(jid) {
-        return document.querySelector('.room-pane[data-roomjid=' + JSON.stringify(jid) + ']');
-      }
-
-      function isInChatArea(el) {
-        var area = document.getElementById('chat-rooms') || document.getElementById('candy');
-        return area ? area.contains(el) : document.body.contains(el);
-      }
-
-      // Don't bother checking dataTransfer.types on dragover — it can be unreliable
-      // for OS file drags in Electron. We verify it's an image on drop instead.
-      document.addEventListener('dragover', function(e) {
-        if (!isInChatArea(e.target)) return;
-        var jid = getActiveDMJid();
-        if (!jid) return;
-        e.preventDefault();
-        e.stopPropagation();
-        e.dataTransfer.dropEffect = 'copy';
-        var pane = getActiveDMPane(jid);
-        if (pane && _litDragPane !== pane) {
-          if (_litDragPane) _litDragPane.style.outline = '';
-          _litDragPane = pane;
-          pane.style.outline = '2px dashed #7c5cbf';
-        }
-      }, true);
-
-      document.addEventListener('dragleave', function(e) {
-        if (!_litDragPane) return;
-        if (!_litDragPane.contains(e.relatedTarget)) {
-          _litDragPane.style.outline = '';
-          _litDragPane = null;
-        }
-      }, true);
-
-      document.addEventListener('drop', async function(e) {
-        if (!isInChatArea(e.target)) return;
-        var jid = getActiveDMJid();
-        if (!jid) return;
-        e.preventDefault();
-        e.stopPropagation();
-        if (_litDragPane) { _litDragPane.style.outline = ''; _litDragPane = null; }
-
-        var file = Array.from(e.dataTransfer.files).find(function(f) {
-          return f.type.startsWith('image/');
-        });
-        if (!file) return;
-
-        var pane = getActiveDMPane(jid);
-        var previewUrl = URL.createObjectURL(file);
+      async function handlePhotoUpload(jid, file) {
+        var pane = document.querySelector('.room-pane[data-roomjid=' + JSON.stringify(jid) + ']');
         var msgPane = pane ? pane.querySelector('ul.message-pane, ul[class*="message"]') : null;
         var indLi;
 
         if (msgPane) {
           indLi = document.createElement('li');
-          indLi.style.cssText = 'list-style:none;padding:2px 8px;border-bottom:1px solid rgba(255,255,255,0.04)';
-          var indicator = document.createElement('div');
-          indicator.style.cssText = 'padding:6px 10px;color:#7c5cbf;font-size:12px;font-style:italic';
-          indicator.textContent = 'Uploading image…';
-          indLi.appendChild(indicator);
+          indLi.style.cssText = 'list-style:none;padding:2px 8px';
+          var ind = document.createElement('span');
+          ind.style.cssText = 'color:#7c5cbf;font-size:12px;font-style:italic';
+          ind.textContent = 'Uploading image…';
+          indLi.appendChild(ind);
           msgPane.appendChild(indLi);
         }
 
         try {
           var filePath = file.path;
-          if (!filePath) throw new Error('File path unavailable');
+          if (!filePath) throw new Error('File path not available');
           var slash = jid.indexOf('/');
           var partner = slash !== -1 ? jid.slice(slash + 1) : jid.split('@')[0];
           var result = await window.litChat.uploadPhoto(partner, filePath, file.type);
           if (indLi) indLi.remove();
-
           if (!result.ok) throw new Error(result.error || 'upload failed');
 
+          // Show preview immediately using a local blob URL
           if (msgPane) {
             var li = document.createElement('li');
             li._litPhotoRendered = true;
             li.style.cssText = 'list-style:none;padding:4px 8px;border-bottom:1px solid rgba(255,255,255,0.04)';
             var img = document.createElement('img');
-            img.src = previewUrl;
+            img.src = URL.createObjectURL(file);
             img.style.cssText = 'max-width:300px;max-height:300px;object-fit:contain;border-radius:8px;cursor:pointer;display:block;margin:4px 0';
             img.title = 'Click to open album';
             img.addEventListener('click', function() { window.open(result.viewUrl); });
@@ -3132,15 +3058,16 @@ function injectImageSharing() {
             if (scroller) scroller.scrollTop = scroller.scrollHeight;
           }
 
+          // Send the XMPP DM with album link
           try {
             var conn = Candy.Core.getConnection();
             var msgBody = '\\u{1F4F7} View photo: https://picpub.art/v/' + result.token + '#' + result.hash;
             var stanza = $msg({ to: jid, type: 'chat' }).c('body').t(msgBody);
             conn.send(stanza.tree ? stanza.tree() : stanza);
           } catch (sendErr) {
-            console.warn('[picpub] message send failed:', sendErr.message);
+            console.warn('[picpub] send failed:', sendErr.message);
           }
-        } catch(err) {
+        } catch (err) {
           if (indLi) indLi.remove();
           if (msgPane) {
             var errLi = document.createElement('li');
@@ -3150,7 +3077,58 @@ function injectImageSharing() {
             setTimeout(function() { errLi.remove(); }, 5000);
           }
         }
-      }, true);
+      }
+
+      // ── 📷 button in each DM message form ───────────────────────────────────
+
+      function addPhotoButton(pane) {
+        if (pane._litPhotoBtn) return;
+        var jid = pane.dataset.roomjid || '';
+        if (!jid || jid.indexOf('@conference.') !== -1) return;
+        var form = pane.querySelector('.message-form');
+        var submitBtn = form && form.querySelector('input[type="submit"], button[type="submit"]');
+        if (!submitBtn) return;
+        pane._litPhotoBtn = true;
+
+        var fileInput = document.createElement('input');
+        fileInput.type = 'file';
+        fileInput.accept = 'image/*';
+        fileInput.style.cssText = 'display:none';
+        fileInput.addEventListener('change', function() {
+          var f = fileInput.files[0];
+          fileInput.value = '';
+          if (f) handlePhotoUpload(jid, f);
+        });
+
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.title = 'Share photo';
+        btn.textContent = '\\u{1F4F7}';
+        btn.style.cssText = 'background:none;border:none;cursor:pointer;font-size:17px;' +
+          'padding:0 4px;opacity:0.55;line-height:1;vertical-align:middle;flex-shrink:0';
+        btn.addEventListener('mouseenter', function() { btn.style.opacity = '1'; });
+        btn.addEventListener('mouseleave', function() { btn.style.opacity = '0.55'; });
+        btn.addEventListener('click', function() { fileInput.click(); });
+
+        form.insertBefore(fileInput, submitBtn);
+        form.insertBefore(btn, submitBtn);
+      }
+
+      document.querySelectorAll('.room-pane[data-roomjid]').forEach(addPhotoButton);
+
+      // Watch for new panes and message lists
+      var chatRooms = document.getElementById('chat-rooms');
+      if (chatRooms) {
+        new MutationObserver(function(muts) {
+          muts.forEach(function(mut) {
+            mut.addedNodes.forEach(function(pane) {
+              if (pane.nodeType !== 1) return;
+              pane.querySelectorAll('ul.message-pane, ul[class*="message"]').forEach(observePane);
+              if (pane.dataset && pane.dataset.roomjid) addPhotoButton(pane);
+            });
+          });
+        }).observe(chatRooms, { childList: true });
+      }
     })();
   `).catch(() => {});
 }
