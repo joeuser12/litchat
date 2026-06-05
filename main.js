@@ -972,18 +972,27 @@ function injectDMHistory() {
             : nickOf(m.from || '');
           var body = escHtml(unescXml(m.body || ''));
           // Render photo messages inline
-          var photoM = /\u{1F4F7} View photo: https:\\/\\/picpub\\.art\\/v\\/([a-f0-9]+)#([\\w.]+)/u.exec(body);
-          if (photoM) {
-            var pToken = photoM[1], pHash = photoM[2];
-            body = '<a href="https://picpub.art/v/' + pToken + '" target="_blank" ' +
-                   'style="display:inline-block">' +
-                   '<img src="litpic://' + pToken + '/' + pHash + '" ' +
-                   'style="max-width:280px;max-height:280px;object-fit:contain;border-radius:6px;' +
-                   'display:block;margin:4px 0;cursor:pointer" title="Click to open album"></a>';
+          var IMG_S = 'max-width:280px;max-height:280px;object-fit:contain;border-radius:6px;display:block;margin:4px 0;cursor:pointer';
+          // Format A: linked native — "📷 https://picpub.art/hash.ext"
+          var nativeM = /^\u{1F4F7} (https:\/\/picpub\.art\/[a-z0-9]+\.[a-z]+)$/u.exec(m.body ? m.body.trim() : '');
+          if (nativeM) {
+            var nurl = escHtml(nativeM[1]);
+            body = '<a href="' + nurl + '" target="_blank" style="display:inline-block">' +
+                   '<img src="' + nurl + '" style="' + IMG_S + '" title="Click to view image"></a>';
           } else {
-            // linkify
-            body = body.replace(/(https?:\\/\\/[^\\s<>"']+)/g,
-              '<a href="$1" target="_blank" style="color:#818cf8;text-decoration:underline">$1</a>');
+            // Format B: uploaded — "📷 View photo: https://picpub.art/v/TOKEN#HASH"
+            var photoM = /\u{1F4F7} View photo: https:\\/\\/picpub\\.art\\/v\\/([a-f0-9]+)#([\\w.]+)/u.exec(body);
+            if (photoM) {
+              var pToken = photoM[1], pHash = photoM[2];
+              body = '<a href="https://picpub.art/v/' + pToken + '" target="_blank" ' +
+                     'style="display:inline-block">' +
+                     '<img src="litpic://' + pToken + '/' + pHash + '" ' +
+                     'style="' + IMG_S + '" title="Click to open album"></a>';
+            } else {
+              // linkify
+              body = body.replace(/(https?:\\/\\/[^\\s<>"']+)/g,
+                '<a href="$1" target="_blank" style="color:#818cf8;text-decoration:underline">$1</a>');
+            }
           }
           return '<li style="padding:3px 8px;border-bottom:1px solid rgba(255,255,255,0.04);list-style:none">' +
             '<small style="color:#4a4870;margin-right:6px">' + escHtml(fmtTs(m.ts)) + '</small>' +
@@ -2972,6 +2981,24 @@ ipcMain.handle('picpub:upload', async (_e, partnerUsername, filePath, mimeType) 
   }
 });
 
+ipcMain.handle('picpub:link', async (_e, partnerUsername, picpubUrl) => {
+  try {
+    if (!/^https?:\/\/picpub\.art\//.test(picpubUrl))
+      throw new Error('Not a picpub.art URL');
+    const album = await getOrCreateDMAlbum(partnerUsername);
+    const res = await fetch(`https://picpub.art/v/api/albums/${album.token}/link`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Owner-Token': album.ownerToken },
+      body: JSON.stringify({ url: picpubUrl }),
+    });
+    if (!res.ok) throw new Error(`Link failed: ${res.status}`);
+    const data = await res.json();
+    return { ok: true, token: album.token, hash: data.hash, native_url: data.native_url || null, viewUrl: album.viewUrl };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
 function injectImageSharing() {
   win.webContents.executeJavaScript(`
     (function() {
@@ -2980,22 +3007,40 @@ function injectImageSharing() {
 
       // ── Inline rendering ────────────────────────────────────────────────────
 
+      var IMG_STYLE = 'max-width:300px;max-height:300px;object-fit:contain;' +
+        'border-radius:8px;cursor:pointer;display:block;margin:4px 0 2px';
+
+      function makeThumb(src, onclick) {
+        var img = document.createElement('img');
+        img.src = src;
+        img.style.cssText = IMG_STYLE;
+        img.addEventListener('click', onclick);
+        return img;
+      }
+
       function renderPhotoMsg(li) {
         if (li._litPhotoRendered) return;
         var text = li.textContent || '';
+
+        // Format A: linked image — native URL, directly embeddable, no auth needed
+        // Message body: "📷 https://picpub.art/hash.ext"
+        var nativeM = /^\u{1F4F7} (https:\\/\\/picpub\\.art\\/[a-z0-9]+\\.[a-z]+)$/u.exec(text.trim());
+        if (nativeM) {
+          li._litPhotoRendered = true;
+          var nurl = nativeM[1];
+          li.appendChild(makeThumb(nurl, function() { window.open(nurl); }));
+          return;
+        }
+
+        // Format B: uploaded image — proxied via litpic://
+        // Message body: "📷 View photo: https://picpub.art/v/TOKEN#HASH"
         var m = /\u{1F4F7} View photo: https:\\/\\/picpub\\.art\\/v\\/([a-f0-9]+)#([\\w.]+)/u.exec(text);
         if (!m) return;
         li._litPhotoRendered = true;
         var token = m[1], hash = m[2];
-        var img = document.createElement('img');
-        img.src = 'litpic://' + token + '/' + hash;
-        img.style.cssText = 'max-width:300px;max-height:300px;object-fit:contain;' +
-          'border-radius:8px;cursor:pointer;display:block;margin:4px 0 2px';
-        img.title = 'Click to open album';
-        img.addEventListener('click', function() {
+        li.appendChild(makeThumb('litpic://' + token + '/' + hash, function() {
           window.open('https://picpub.art/v/' + token);
-        });
-        li.appendChild(img);
+        }));
       }
 
       function observePane(ul) {
@@ -3079,7 +3124,60 @@ function injectImageSharing() {
         }
       }
 
-      // ── 📷 button in each DM message form ───────────────────────────────────
+      // ── 📷 / 🔗 buttons in each DM message form ────────────────────────────
+
+      async function handlePicpubLink(jid, url) {
+        var pane = document.querySelector('.room-pane[data-roomjid=' + JSON.stringify(jid) + ']');
+        var msgPane = pane ? pane.querySelector('ul.message-pane, ul[class*="message"]') : null;
+        var indLi;
+        if (msgPane) {
+          indLi = document.createElement('li');
+          indLi.style.cssText = 'list-style:none;padding:2px 8px';
+          var ind = document.createElement('span');
+          ind.style.cssText = 'color:#7c5cbf;font-size:12px;font-style:italic';
+          ind.textContent = 'Linking image…';
+          indLi.appendChild(ind);
+          msgPane.appendChild(indLi);
+        }
+        try {
+          var slash = jid.indexOf('/');
+          var partner = slash !== -1 ? jid.slice(slash + 1) : jid.split('@')[0];
+          var result = await window.litChat.linkPhoto(partner, url);
+          if (indLi) indLi.remove();
+          if (!result.ok) throw new Error(result.error || 'link failed');
+
+          if (msgPane && result.native_url) {
+            var li = document.createElement('li');
+            li._litPhotoRendered = true;
+            li.style.cssText = 'list-style:none;padding:4px 8px;border-bottom:1px solid rgba(255,255,255,0.04)';
+            li.appendChild(makeThumb(result.native_url, function() { window.open(result.viewUrl); }));
+            msgPane.appendChild(li);
+            var scroller = msgPane.closest('.message-pane-wrapper') || msgPane.parentElement;
+            if (scroller) scroller.scrollTop = scroller.scrollHeight;
+          }
+
+          try {
+            var conn = Candy.Core.getConnection();
+            // Linked images: send native_url directly — no auth needed, embeddable by recipient
+            var msgBody = result.native_url
+              ? '\\u{1F4F7} ' + result.native_url
+              : '\\u{1F4F7} View photo: https://picpub.art/v/' + result.token + '#' + result.hash;
+            var stanza = $msg({ to: jid, type: 'chat' }).c('body').t(msgBody);
+            conn.send(stanza.tree ? stanza.tree() : stanza);
+          } catch (sendErr) {
+            console.warn('[picpub] send failed:', sendErr.message);
+          }
+        } catch (err) {
+          if (indLi) indLi.remove();
+          if (msgPane) {
+            var errLi = document.createElement('li');
+            errLi.style.cssText = 'list-style:none;padding:4px 8px;color:#e05050;font-size:12px';
+            errLi.textContent = 'Link failed: ' + err.message;
+            msgPane.appendChild(errLi);
+            setTimeout(function() { errLi.remove(); }, 5000);
+          }
+        }
+      }
 
       function addPhotoButton(pane) {
         if (pane._litPhotoBtn) return;
@@ -3090,28 +3188,68 @@ function injectImageSharing() {
         if (!submitBtn) return;
         pane._litPhotoBtn = true;
 
+        var IBTN = 'background:none;border:none;cursor:pointer;font-size:17px;' +
+                   'padding:0 4px;opacity:0.55;line-height:1;vertical-align:middle;flex-shrink:0';
+        function iconBtn(emoji, title) {
+          var b = document.createElement('button');
+          b.type = 'button'; b.title = title; b.textContent = emoji; b.style.cssText = IBTN;
+          b.addEventListener('mouseenter', function() { b.style.opacity = '1'; });
+          b.addEventListener('mouseleave', function() { b.style.opacity = '0.55'; });
+          return b;
+        }
+
+        // Hidden file input
         var fileInput = document.createElement('input');
-        fileInput.type = 'file';
-        fileInput.accept = 'image/*';
-        fileInput.style.cssText = 'display:none';
+        fileInput.type = 'file'; fileInput.accept = 'image/*'; fileInput.style.cssText = 'display:none';
         fileInput.addEventListener('change', function() {
-          var f = fileInput.files[0];
-          fileInput.value = '';
+          var f = fileInput.files[0]; fileInput.value = '';
           if (f) handlePhotoUpload(jid, f);
         });
 
-        var btn = document.createElement('button');
-        btn.type = 'button';
-        btn.title = 'Share photo';
-        btn.textContent = '\\u{1F4F7}';
-        btn.style.cssText = 'background:none;border:none;cursor:pointer;font-size:17px;' +
-          'padding:0 4px;opacity:0.55;line-height:1;vertical-align:middle;flex-shrink:0';
-        btn.addEventListener('mouseenter', function() { btn.style.opacity = '1'; });
-        btn.addEventListener('mouseleave', function() { btn.style.opacity = '0.55'; });
-        btn.addEventListener('click', function() { fileInput.click(); });
+        // 📷 — opens file picker
+        var photoBtn = iconBtn('\\u{1F4F7}', 'Upload photo');
+        photoBtn.addEventListener('click', function() { fileInput.click(); });
+
+        // 🔗 — toggles URL input bar for linking existing picpub.art images
+        var linkBtn = iconBtn('\\u{1F517}', 'Link picpub.art image');
+
+        // URL bar (hidden until 🔗 is clicked)
+        var formWrapper = pane.querySelector('.message-form-wrapper') || form.parentElement;
+        var urlBar = document.createElement('div');
+        urlBar.style.cssText = 'display:none;align-items:center;gap:6px;padding:4px 8px;' +
+          'background:#1a1a2a;border-top:1px solid #2a2a3a';
+        var urlInput = document.createElement('input');
+        urlInput.type = 'text';
+        urlInput.placeholder = 'https://picpub.art/…';
+        urlInput.style.cssText = 'flex:1;padding:4px 8px;background:#0f0f17;border:1px solid #3a3a4a;' +
+          'border-radius:5px;color:#e0e0e8;font-size:12px;outline:none;min-width:0';
+        var goBtn = document.createElement('button');
+        goBtn.type = 'button'; goBtn.textContent = '✓';
+        goBtn.style.cssText = 'padding:3px 10px;background:#7c5cbf;border:none;border-radius:5px;' +
+          'color:#fff;cursor:pointer;font-size:12px;flex-shrink:0';
+        urlBar.appendChild(urlInput); urlBar.appendChild(goBtn);
+        if (formWrapper) formWrapper.appendChild(urlBar);
+
+        function submitUrl() {
+          var u = urlInput.value.trim();
+          urlInput.value = ''; urlBar.style.display = 'none'; linkBtn.style.opacity = '0.55';
+          if (u) handlePicpubLink(jid, u);
+        }
+        linkBtn.addEventListener('click', function() {
+          var open = urlBar.style.display !== 'none';
+          urlBar.style.display = open ? 'none' : 'flex';
+          linkBtn.style.opacity = open ? '0.55' : '1';
+          if (!open) { urlInput.focus(); }
+        });
+        urlInput.addEventListener('keydown', function(e) {
+          if (e.key === 'Enter') { e.preventDefault(); submitUrl(); }
+          if (e.key === 'Escape') { urlBar.style.display = 'none'; linkBtn.style.opacity = '0.55'; }
+        });
+        goBtn.addEventListener('click', submitUrl);
 
         form.insertBefore(fileInput, submitBtn);
-        form.insertBefore(btn, submitBtn);
+        form.insertBefore(photoBtn, submitBtn);
+        form.insertBefore(linkBtn, submitBtn);
       }
 
       document.querySelectorAll('.room-pane[data-roomjid]').forEach(addPhotoButton);

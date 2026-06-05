@@ -9,4 +9,6 @@ contextBridge.exposeInMainWorld('litChat', {
   toggleAway:       () => ipcRenderer.invoke('prefs:toggleAway'),
   uploadPhoto:      (partnerUser, filePath, mimeType) =>
                       ipcRenderer.invoke('picpub:upload', partnerUser, filePath, mimeType),
+  linkPhoto:        (partnerUser, url) =>
+                      ipcRenderer.invoke('picpub:link', partnerUser, url),
 });
