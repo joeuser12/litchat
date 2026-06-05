@@ -984,7 +984,8 @@ function injectDMHistory() {
             var photoM = /\u{1F4F7} View photo: https:\\/\\/picpub\\.art\\/v\\/([a-f0-9]+)#([\\w.]+)/u.exec(body);
             if (photoM) {
               var pToken = photoM[1], pHash = photoM[2];
-              body = '<a href="https://picpub.art/v/' + pToken + '" target="_blank" ' +
+              body = '<a href="https://picpub.art/v/' + pToken + '#' + pHash + '" target="_blank" ' +
+                     'onclick="if(window._litOpenAlbum){window._litOpenAlbum(\'' + pToken + '\',\'' + pHash + '\');return false;}" ' +
                      'style="display:inline-block">' +
                      '<img src="litpic://' + pToken + '/' + pHash + '" ' +
                      'style="' + IMG_S + '" title="Click to open album"></a>';
@@ -2999,6 +3000,21 @@ ipcMain.handle('picpub:link', async (_e, partnerUsername, picpubUrl) => {
   }
 });
 
+ipcMain.handle('picpub:viewerLink', async (_e, token) => {
+  const album = settings.picpubAlbums?.[token];
+  if (!album?.ownerToken || !myLitUsername) return null;
+  try {
+    const res = await fetch(`https://picpub.art/v/api/albums/${token}/viewer-link`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Owner-Token': album.ownerToken },
+      body: JSON.stringify({ username: myLitUsername }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.url || null;
+  } catch { return null; }
+});
+
 function injectImageSharing() {
   win.webContents.executeJavaScript(`
     (function() {
@@ -3017,6 +3033,17 @@ function injectImageSharing() {
         img.addEventListener('click', onclick);
         return img;
       }
+
+      // Open album viewer with a signed viewer-link so the gate is bypassed
+      function openAlbum(token, hash) {
+        var fallback = 'https://picpub.art/v/' + token + (hash ? '#' + hash : '');
+        if (!window.litChat || !window.litChat.getViewerLink) { window.open(fallback); return; }
+        window.litChat.getViewerLink(token).then(function(signed) {
+          window.open(signed ? signed + (hash ? '#' + hash : '') : fallback);
+        }).catch(function() { window.open(fallback); });
+      }
+      // Expose for buildHistory onclick attributes (injected in a separate executeJavaScript)
+      window._litOpenAlbum = openAlbum;
 
       function renderPhotoMsg(li) {
         if (li._litPhotoRendered) return;
@@ -3039,7 +3066,7 @@ function injectImageSharing() {
         li._litPhotoRendered = true;
         var token = m[1], hash = m[2];
         li.appendChild(makeThumb('litpic://' + token + '/' + hash, function() {
-          window.open('https://picpub.art/v/' + token);
+          openAlbum(token, hash);
         }));
       }
 
@@ -3100,7 +3127,7 @@ function injectImageSharing() {
             img.src = URL.createObjectURL(file);
             img.style.cssText = 'max-width:300px;max-height:300px;object-fit:contain;border-radius:8px;cursor:pointer;display:block;margin:4px 0';
             img.title = 'Click to open album';
-            img.addEventListener('click', function() { window.open(result.viewUrl); });
+            img.addEventListener('click', function() { openAlbum(result.token, result.hash); });
             li.appendChild(img);
             msgPane.appendChild(li);
             var scroller = msgPane.closest('.message-pane-wrapper') || msgPane.parentElement;
@@ -3154,7 +3181,7 @@ function injectImageSharing() {
             var li = document.createElement('li');
             li._litPhotoRendered = true;
             li.style.cssText = 'list-style:none;padding:4px 8px;border-bottom:1px solid rgba(255,255,255,0.04)';
-            li.appendChild(makeThumb(result.native_url, function() { window.open(result.viewUrl); }));
+            li.appendChild(makeThumb(result.native_url, function() { openAlbum(result.token, result.hash); }));
             msgPane.appendChild(li);
             var scroller = msgPane.closest('.message-pane-wrapper') || msgPane.parentElement;
             if (scroller) scroller.scrollTop = scroller.scrollHeight;

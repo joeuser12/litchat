@@ -11,4 +11,6 @@ contextBridge.exposeInMainWorld('litChat', {
                       ipcRenderer.invoke('picpub:upload', partnerUser, filePath, mimeType),
   linkPhoto:        (partnerUser, url) =>
                       ipcRenderer.invoke('picpub:link', partnerUser, url),
+  getViewerLink:    (token) =>
+                      ipcRenderer.invoke('picpub:viewerLink', token),
 });
