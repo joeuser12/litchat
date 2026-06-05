@@ -974,7 +974,7 @@ function injectDMHistory() {
           // Render photo messages inline
           var IMG_S = 'max-width:280px;max-height:280px;object-fit:contain;border-radius:6px;display:block;margin:4px 0;cursor:pointer';
           // Format A: linked native — "📷 https://picpub.art/hash.ext"
-          var nativeM = /^\u{1F4F7} (https:\/\/picpub\.art\/[a-z0-9]+\.[a-z]+)$/u.exec(m.body ? m.body.trim() : '');
+          var nativeM = /^\u{1F4F7} (https:\\/\\/picpub\\.art\\/[a-z0-9]+\\.[a-z]+)$/u.exec(m.body ? m.body.trim() : '');
           if (nativeM) {
             var nurl = escHtml(nativeM[1]);
             body = '<a href="' + nurl + '" target="_blank" style="display:inline-block">' +
