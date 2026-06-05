@@ -3052,13 +3052,13 @@ async function makeViewerLink(token, ownerToken, username) {
       body: JSON.stringify({ username }),
     });
     if (!res.ok) {
-      console.log('[picpub:viewerLink] API error:', res.status, await res.text());
+      console.warn('[picpub:viewerLink] API error:', res.status, await res.text());
       return null;
     }
     const data = await res.json();
     return data.url || null;
   } catch (e) {
-    console.log('[picpub:viewerLink] fetch error:', e.message);
+    console.warn('[picpub:viewerLink] fetch error:', e.message);
     return null;
   }
 }
@@ -3066,10 +3066,7 @@ async function makeViewerLink(token, ownerToken, username) {
 ipcMain.handle('picpub:viewerLink', async (_e, token) => {
   const album = settings.picpubAlbums?.[token];
   const username = myLitUsername || album?.literoticaUser;
-  if (!album?.ownerToken || !username) {
-    console.log('[picpub:viewerLink] skip — ownerToken:', !!album?.ownerToken, 'username:', username);
-    return null;
-  }
+  if (!album?.ownerToken || !username) return null;
   return makeViewerLink(token, album.ownerToken, username);
 });
 
@@ -3276,17 +3273,10 @@ function injectImageSharing() {
         var jid = pane.dataset.roomjid || '';
         // Skip bare conference-room JIDs; allow DMs (including room/partner JIDs with a '/')
         var slash = jid.indexOf('/');
-        if (!jid || (slash === -1 && jid.indexOf('@conference.') !== -1)) {
-          console.log('[litpic] addPhotoButton skip (conference room):', jid);
-          return;
-        }
+        if (!jid || (slash === -1 && jid.indexOf('@conference.') !== -1)) return;
         var form = pane.querySelector('.message-form');
         var submitBtn = form && form.querySelector('input[type="submit"], button[type="submit"]');
-        if (!submitBtn) {
-          console.log('[litpic] addPhotoButton skip (no submit btn) jid:', jid, 'form:', form);
-          return;
-        }
-        console.log('[litpic] addPhotoButton OK jid:', jid);
+        if (!submitBtn) return;
         pane._litPhotoBtn = true;
 
         var IBTN = 'background:none;border:none;cursor:pointer;font-size:17px;' +
@@ -3353,11 +3343,7 @@ function injectImageSharing() {
         form.insertBefore(linkBtn, submitBtn);
       }
 
-      var initPanes = document.querySelectorAll('.room-pane[data-roomjid]');
-      console.log('[litpic] init: found', initPanes.length, 'room-pane(s),',
-        'litChat bridge:', typeof window.litChat,
-        'uploadPhoto:', typeof (window.litChat && window.litChat.uploadPhoto));
-      initPanes.forEach(addPhotoButton);
+      document.querySelectorAll('.room-pane[data-roomjid]').forEach(addPhotoButton);
 
       // Watch for new panes and message lists
       var chatRooms = document.getElementById('chat-rooms');
@@ -3376,8 +3362,6 @@ function injectImageSharing() {
             });
           });
         }).observe(chatRooms, { childList: true, subtree: true });
-      } else {
-        console.log('[litpic] #chat-rooms not found — observer not set up');
       }
     })();
   `).catch(() => {});
