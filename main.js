@@ -981,12 +981,13 @@ function injectDMHistory() {
                    '<img src="' + nurl + '" style="' + IMG_S + '" title="Click to view image"></a>';
           } else {
             // Format B: uploaded — "📷 View photo: https://picpub.art/v/TOKEN#HASH"
-            var photoM = /\u{1F4F7} View photo: https:\\/\\/picpub\\.art\\/v\\/([a-f0-9]+)(?:\\?[^#]*)?#([\\w.]+)/u.exec(body);
+            var photoM = /\u{1F4F7} View photo: (https:\\/\\/picpub\\.art\\/v\\/([a-f0-9]+)(?:\\?[^#]*)?)#([\\w.]+)/u.exec(m.body || '');
             if (photoM) {
-              var pToken = photoM[1], pHash = photoM[2];
-              body = '<a href="https://picpub.art/v/' + pToken + '#' + pHash + '" target="_blank" ' +
-                     'data-pt="' + pToken + '" data-ph="' + pHash + '" ' +
-                     'onclick="var t=this.dataset.pt,h=this.dataset.ph;if(window._litOpenAlbum){window._litOpenAlbum(t,h);return false;}" ' +
+              var pBase = photoM[1], pToken = photoM[2], pHash = photoM[3];
+              var pFull = escHtml(pBase + '#' + pHash);
+              body = '<a href="' + pFull + '" target="_blank" ' +
+                     'data-pt="' + pToken + '" data-ph="' + pHash + '" data-pu="' + pFull + '" ' +
+                     'onclick="var t=this.dataset.pt,h=this.dataset.ph,u=this.dataset.pu;if(window._litOpenAlbum){window._litOpenAlbum(t,h,u);return false;}" ' +
                      'style="display:inline-block">' +
                      '<img src="litpic://' + pToken + '/' + pHash + '" ' +
                      'style="' + IMG_S + '" title="Click to open album"></a>';
@@ -3091,9 +3092,11 @@ function injectImageSharing() {
         return img;
       }
 
-      // Open album viewer with a signed viewer-link so the gate is bypassed
-      function openAlbum(token, hash) {
-        var fallback = 'https://picpub.art/v/' + token + (hash ? '#' + hash : '');
+      // Open album viewer with a signed viewer-link so the gate is bypassed.
+      // signedFallback: the URL already in the message (may contain ?vt=), used when we
+      // don't own the album and can't generate a fresh viewer-link ourselves.
+      function openAlbum(token, hash, signedFallback) {
+        var fallback = signedFallback || ('https://picpub.art/v/' + token + (hash ? '#' + hash : ''));
         if (!window.litChat || !window.litChat.getViewerLink) { window.open(fallback); return; }
         window.litChat.getViewerLink(token).then(function(signed) {
           window.open(signed ? signed + (hash ? '#' + hash : '') : fallback);
@@ -3118,12 +3121,12 @@ function injectImageSharing() {
 
         // Format B: uploaded image — proxied via litpic://
         // Message body: "📷 View photo: https://picpub.art/v/TOKEN#HASH"
-        var m = /\u{1F4F7} View photo: https:\\/\\/picpub\\.art\\/v\\/([a-f0-9]+)(?:\\?[^#]*)?#([\\w.]+)/u.exec(text);
+        var m = /\u{1F4F7} View photo: (https:\\/\\/picpub\\.art\\/v\\/([a-f0-9]+)(?:\\?[^#]*)?)#([\\w.]+)/u.exec(text);
         if (!m) return;
         li._litPhotoRendered = true;
-        var token = m[1], hash = m[2];
+        var signedBase = m[1], token = m[2], hash = m[3];
         li.appendChild(makeThumb('litpic://' + token + '/' + hash, function() {
-          openAlbum(token, hash);
+          openAlbum(token, hash, signedBase + '#' + hash);
         }));
       }
 
