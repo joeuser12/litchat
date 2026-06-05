@@ -3033,29 +3033,38 @@ function injectImageSharing() {
         }).observe(chatRooms, { childList: true });
       }
 
-      // Drag-and-drop: document-level capture listeners intercept before any Candy handlers,
-      // regardless of which child element the cursor is over.
+      // Drag-and-drop: document-level capture listeners intercept before any Candy handlers.
+      // We use the active-tab approach (same as existing setupPerRoomStatus code) rather
+      // than closest() so the whole chat area works as a drop target.
       var _litDragPane = null;
 
-      function dmPaneFor(el) {
-        var pane = el && el.closest ? el.closest('.room-pane[data-roomjid]') : null;
-        if (!pane) return null;
-        var jid = pane.dataset.roomjid || '';
-        return (jid && jid.indexOf('@conference.') === -1) ? pane : null;
+      function getActiveDMJid() {
+        var tab = document.querySelector('#chat-tabs li.active[data-roomjid]');
+        if (!tab) return null;
+        var jid = tab.dataset.roomjid || '';
+        return (jid && jid.indexOf('@conference.') === -1) ? jid : null;
       }
 
+      function getActiveDMPane(jid) {
+        return document.querySelector('.room-pane[data-roomjid=' + JSON.stringify(jid) + ']');
+      }
+
+      function isInChatArea(el) {
+        var area = document.getElementById('chat-rooms') || document.getElementById('candy');
+        return area ? area.contains(el) : document.body.contains(el);
+      }
+
+      // Don't bother checking dataTransfer.types on dragover — it can be unreliable
+      // for OS file drags in Electron. We verify it's an image on drop instead.
       document.addEventListener('dragover', function(e) {
-        var types = e.dataTransfer.types;
-        var hasFiles = false;
-        for (var i = 0; i < types.length; i++) {
-          if (types[i] === 'Files' || types[i] === 'files') { hasFiles = true; break; }
-        }
-        if (!hasFiles) return;
-        var pane = dmPaneFor(e.target);
-        if (!pane) return;
+        if (!isInChatArea(e.target)) return;
+        var jid = getActiveDMJid();
+        if (!jid) return;
         e.preventDefault();
         e.stopPropagation();
-        if (_litDragPane !== pane) {
+        e.dataTransfer.dropEffect = 'copy';
+        var pane = getActiveDMPane(jid);
+        if (pane && _litDragPane !== pane) {
           if (_litDragPane) _litDragPane.style.outline = '';
           _litDragPane = pane;
           pane.style.outline = '2px dashed #7c5cbf';
@@ -3071,8 +3080,9 @@ function injectImageSharing() {
       }, true);
 
       document.addEventListener('drop', async function(e) {
-        var pane = dmPaneFor(e.target);
-        if (!pane) return;
+        if (!isInChatArea(e.target)) return;
+        var jid = getActiveDMJid();
+        if (!jid) return;
         e.preventDefault();
         e.stopPropagation();
         if (_litDragPane) { _litDragPane.style.outline = ''; _litDragPane = null; }
@@ -3082,9 +3092,9 @@ function injectImageSharing() {
         });
         if (!file) return;
 
-        var jid = pane.dataset.roomjid || '';
+        var pane = getActiveDMPane(jid);
         var previewUrl = URL.createObjectURL(file);
-        var msgPane = pane.querySelector('ul.message-pane, ul[class*="message"]');
+        var msgPane = pane ? pane.querySelector('ul.message-pane, ul[class*="message"]') : null;
         var indLi;
 
         if (msgPane) {
