@@ -2951,7 +2951,7 @@ async function getOrCreateDMAlbum(partnerUsername) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ literotica_user: myLitUsername || 'user', ttl: '1h' }),
   });
-  if (!res.ok) throw new Error(`PicPub create failed: ${res.status}`);
+  if (!res.ok) throw new Error(`PicPub create failed: ${res.status} ${await res.text()}`);
   const data = await res.json();
   if (!settings.picpubAlbums) settings.picpubAlbums = {};
   if (!settings.dmAlbumsByPartner) settings.dmAlbumsByPartner = {};
@@ -2973,7 +2973,7 @@ ipcMain.handle('picpub:upload', async (_e, partnerUsername, filePath, mimeType) 
       headers: { 'X-Owner-Token': album.ownerToken },
       body: fd,
     });
-    if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
+    if (!res.ok) throw new Error(`Upload failed: ${res.status} ${await res.text()}`);
     const data = await res.json();
     const added = data.added?.[0];
     if (!added) throw new Error('No file returned from upload');
