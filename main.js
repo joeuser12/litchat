@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Tray, nativeImage, shell, Notification, ipcMain } = require('electron');
+const { app, BrowserWindow, Menu, Tray, nativeImage, shell, Notification, ipcMain, protocol } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -137,6 +137,12 @@ let awayRepliedTo = new Set();             // JIDs already sent an away-reply th
 const ROOM_IDLE_MS     = 5 * 60 * 1000;   // 5-minute idle window for room notifications
 const roomLastJoin    = new Map();         // roomJid → timestamp of last join notification sent
 const roomLastMessage = new Map();         // roomJid → timestamp of last message notification sent
+let myLitUsername = null;                  // local-part of our own JID, detected from sent messages
+
+// litpic:// is used for proxied PicPub image URLs with owner-token auth
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'litpic', privileges: { bypassCSP: true } },
+]);
 let awayConversations = new Map();         // per-sender conversation history for llama mode
 
 // Auto-updater state — read by createAppMenu() to reflect current status
@@ -742,6 +748,7 @@ function createWindow() {
         setupPerRoomStatus();
         injectEmojiPicker();
         injectDMHistory();
+        injectImageSharing();
       }
     }, 500);
   });
@@ -964,9 +971,20 @@ function injectDMHistory() {
             ? (myNick || 'me')
             : nickOf(m.from || '');
           var body = escHtml(unescXml(m.body || ''));
-          // linkify
-          body = body.replace(/(https?:\\/\\/[^\\s<>"']+)/g,
-            '<a href="$1" target="_blank" style="color:#818cf8;text-decoration:underline">$1</a>');
+          // Render photo messages inline
+          var photoM = /\u{1F4F7} View photo: https:\\/\\/picpub\\.art\\/v\\/([a-f0-9]+)#([\\w.]+)/u.exec(body);
+          if (photoM) {
+            var pToken = photoM[1], pHash = photoM[2];
+            body = '<a href="https://picpub.art/v/' + pToken + '" target="_blank" ' +
+                   'style="display:inline-block">' +
+                   '<img src="litpic://' + pToken + '/' + pHash + '" ' +
+                   'style="max-width:280px;max-height:280px;object-fit:contain;border-radius:6px;' +
+                   'display:block;margin:4px 0;cursor:pointer" title="Click to open album"></a>';
+          } else {
+            // linkify
+            body = body.replace(/(https?:\\/\\/[^\\s<>"']+)/g,
+              '<a href="$1" target="_blank" style="color:#818cf8;text-decoration:underline">$1</a>');
+          }
           return '<li style="padding:3px 8px;border-bottom:1px solid rgba(255,255,255,0.04);list-style:none">' +
             '<small style="color:#4a4870;margin-right:6px">' + escHtml(fmtTs(m.ts)) + '</small>' +
             '<span style="color:#818cf8;font-weight:600;margin-right:6px">' + escHtml(sender) + '</span>' +
@@ -2909,6 +2927,209 @@ function setupAutoUpdater() {
   setInterval(() => autoUpdater.checkForUpdates().catch(() => {}), 4 * 60 * 60 * 1000);
 }
 
+// ── PicPub photo sharing ─────────────────────────────────────────────────────
+
+async function getOrCreateDMAlbum(partnerUsername) {
+  const token = settings.dmAlbumsByPartner?.[partnerUsername];
+  const existing = token && settings.picpubAlbums?.[token];
+  if (existing && existing.expiresAt > Date.now() / 1000 + 120) {
+    return { token, ownerToken: existing.ownerToken, viewUrl: `https://picpub.art/v/${token}` };
+  }
+  const res = await fetch('https://picpub.art/v/api/albums', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ literotica_user: myLitUsername || 'user', ttl: '1h' }),
+  });
+  if (!res.ok) throw new Error(`PicPub create failed: ${res.status}`);
+  const data = await res.json();
+  if (!settings.picpubAlbums) settings.picpubAlbums = {};
+  if (!settings.dmAlbumsByPartner) settings.dmAlbumsByPartner = {};
+  settings.picpubAlbums[data.token] = { ownerToken: data.owner_token, expiresAt: data.expires_at };
+  settings.dmAlbumsByPartner[partnerUsername] = data.token;
+  saveSettings();
+  return { token: data.token, ownerToken: data.owner_token, viewUrl: data.view_url };
+}
+
+ipcMain.handle('picpub:upload', async (_e, partnerUsername, filePath, mimeType) => {
+  try {
+    const album = await getOrCreateDMAlbum(partnerUsername);
+    const buf = fs.readFileSync(filePath);
+    const blob = new Blob([buf], { type: mimeType || 'application/octet-stream' });
+    const fd = new FormData();
+    fd.append('files[]', blob, path.basename(filePath));
+    const res = await fetch(`https://picpub.art/v/api/albums/${album.token}/upload`, {
+      method: 'POST',
+      headers: { 'X-Owner-Token': album.ownerToken },
+      body: fd,
+    });
+    if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
+    const data = await res.json();
+    const added = data.added?.[0];
+    if (!added) throw new Error('No file returned from upload');
+    return { ok: true, token: album.token, hash: added.hash, viewUrl: album.viewUrl };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+function injectImageSharing() {
+  win.webContents.executeJavaScript(`
+    (function() {
+      if (window._litImageSharingActive) return;
+      window._litImageSharingActive = true;
+
+      // Detect photo messages in a chat LI and append inline thumbnail
+      function renderPhotoMsg(li) {
+        if (li._litPhotoRendered) return;
+        var text = li.textContent || '';
+        var m = /\u{1F4F7} View photo: https:\\/\\/picpub\\.art\\/v\\/([a-f0-9]+)#([\\w.]+)/u.exec(text);
+        if (!m) return;
+        li._litPhotoRendered = true;
+        var token = m[1], hash = m[2];
+        var wrap = document.createElement('div');
+        wrap.style.cssText = 'margin:4px 0 2px 0';
+        var img = document.createElement('img');
+        img.src = 'litpic://' + token + '/' + hash;
+        img.style.cssText = 'max-width:300px;max-height:300px;object-fit:contain;' +
+          'border-radius:8px;cursor:pointer;display:block';
+        img.title = 'Click to open album';
+        img.addEventListener('click', function() {
+          window.open('https://picpub.art/v/' + token);
+        });
+        wrap.appendChild(img);
+        li.appendChild(wrap);
+      }
+
+      // Observe message panes for new LIs
+      function observePane(ul) {
+        if (ul._litPhotoObs) return;
+        ul._litPhotoObs = true;
+        // scan existing messages
+        ul.querySelectorAll('li').forEach(renderPhotoMsg);
+        new MutationObserver(function(muts) {
+          muts.forEach(function(mut) {
+            mut.addedNodes.forEach(function(n) {
+              if (n.nodeType === 1) {
+                if (n.tagName === 'LI') renderPhotoMsg(n);
+                else n.querySelectorAll('li').forEach(renderPhotoMsg);
+              }
+            });
+          });
+        }).observe(ul, { childList: true, subtree: true });
+      }
+
+      document.querySelectorAll('ul.message-pane, ul[class*="message"]').forEach(observePane);
+
+      // Watch for new message panes added by Candy
+      var chatRooms = document.getElementById('chat-rooms');
+      if (chatRooms) {
+        new MutationObserver(function(muts) {
+          muts.forEach(function(mut) {
+            mut.addedNodes.forEach(function(pane) {
+              if (pane.nodeType !== 1) return;
+              pane.querySelectorAll('ul.message-pane, ul[class*="message"]').forEach(observePane);
+              if (pane.dataset && pane.dataset.roomjid) setupDMDragDrop(pane);
+            });
+          });
+        }).observe(chatRooms, { childList: true });
+      }
+
+      // Drag-and-drop for DM panes
+      function setupDMDragDrop(pane) {
+        if (pane._litDragActive) return;
+        var jid = pane.dataset.roomjid || '';
+        if (!jid || jid.indexOf('@conference.') !== -1) return;
+        pane._litDragActive = true;
+
+        pane.addEventListener('dragover', function(e) {
+          if (e.dataTransfer.types.indexOf('Files') !== -1 ||
+              e.dataTransfer.types.indexOf('files') !== -1) {
+            e.preventDefault();
+            e.stopPropagation();
+            pane.style.outline = '2px dashed #7c5cbf';
+          }
+        });
+        pane.addEventListener('dragleave', function(e) {
+          if (!pane.contains(e.relatedTarget)) pane.style.outline = '';
+        });
+        pane.addEventListener('drop', async function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          pane.style.outline = '';
+          var file = Array.from(e.dataTransfer.files).find(function(f) {
+            return f.type.startsWith('image/');
+          });
+          if (!file) return;
+
+          // Immediate local preview while uploading
+          var previewUrl = URL.createObjectURL(file);
+          var msgPane = pane.querySelector('ul.message-pane, ul[class*="message"]');
+
+          var indicator = document.createElement('div');
+          indicator.style.cssText = 'padding:6px 10px;color:#7c5cbf;font-size:12px;font-style:italic';
+          indicator.textContent = 'Uploading image…';
+          if (msgPane) {
+            var indLi = document.createElement('li');
+            indLi.style.cssText = 'list-style:none;padding:2px 8px;border-bottom:1px solid rgba(255,255,255,0.04)';
+            indLi.appendChild(indicator);
+            msgPane.appendChild(indLi);
+          }
+
+          try {
+            var filePath = file.path;
+            if (!filePath) throw new Error('File path unavailable');
+            var slash = jid.indexOf('/');
+            var partner = slash !== -1 ? jid.slice(slash + 1) : jid.split('@')[0];
+            var result = await window.litChat.uploadPhoto(partner, filePath, file.type);
+            if (indLi) indLi.remove();
+
+            if (!result.ok) throw new Error(result.error || 'upload failed');
+
+            // Show preview via blob URL (valid for this session)
+            if (msgPane) {
+              var li = document.createElement('li');
+              li._litPhotoRendered = true; // skip MutationObserver re-render
+              li.style.cssText = 'list-style:none;padding:4px 8px;border-bottom:1px solid rgba(255,255,255,0.04)';
+              var img = document.createElement('img');
+              img.src = previewUrl;
+              img.style.cssText = 'max-width:300px;max-height:300px;object-fit:contain;border-radius:8px;cursor:pointer;display:block;margin:4px 0';
+              img.title = 'Click to open album';
+              img.addEventListener('click', function() { window.open(result.viewUrl); });
+              li.appendChild(img);
+              msgPane.appendChild(li);
+              var scroller = msgPane.closest('.message-pane-wrapper') || msgPane.parentElement;
+              if (scroller) scroller.scrollTop = scroller.scrollHeight;
+            }
+
+            // Send XMPP DM so partner receives the album link and we log it
+            try {
+              var conn = Candy.Core.getConnection();
+              var msgBody = '\\u{1F4F7} View photo: https://picpub.art/v/' + result.token + '#' + result.hash;
+              var stanza = $msg({ to: jid, type: 'chat' }).c('body').t(msgBody);
+              conn.send(stanza.tree ? stanza.tree() : stanza);
+            } catch (sendErr) {
+              console.warn('[picpub] message send failed:', sendErr.message);
+            }
+          } catch(err) {
+            if (indLi) indLi.remove();
+            if (msgPane) {
+              var errLi = document.createElement('li');
+              errLi.style.cssText = 'list-style:none;padding:4px 8px;color:#e05050;font-size:12px';
+              errLi.textContent = 'Upload failed: ' + err.message;
+              msgPane.appendChild(errLi);
+              setTimeout(function() { errLi.remove(); }, 5000);
+            }
+          }
+        });
+      }
+
+      document.querySelectorAll('.room-pane[data-roomjid]').forEach(setupDMDragDrop);
+    })();
+  `).catch(() => {});
+}
+
+// ── End PicPub photo sharing ─────────────────────────────────────────────────
+
 function attachBOSHLogger() {
   const dbg = win.webContents.debugger;
   try {
@@ -2942,6 +3163,15 @@ function attachBOSHLogger() {
       if (sent) {
         const sentMsgs = extractMessages(sent, 'sent');
         writeMessages(sentMsgs);
+        // Detect our own Literotica username from the local-part of our JID
+        if (!myLitUsername) {
+          for (const m of sentMsgs) {
+            if (m.from) {
+              const at = m.from.indexOf('@');
+              if (at !== -1) { myLitUsername = m.from.slice(0, at); break; }
+            }
+          }
+        }
         // Reset room idle timer for our own sent messages so the server's
         // reflection of them (received stanza) doesn't trigger a notification
         for (const m of sentMsgs) {
@@ -2968,6 +3198,24 @@ function attachBOSHLogger() {
 }
 
 app.whenReady().then(() => {
+  // Proxy litpic://TOKEN/HASH → PicPub API with owner-token auth
+  protocol.handle('litpic', async (request) => {
+    const after = request.url.slice('litpic://'.length);
+    const slash = after.indexOf('/');
+    if (slash === -1) return new Response('Bad URL', { status: 400 });
+    const token = after.slice(0, slash);
+    const hash  = after.slice(slash + 1);
+    const album = settings.picpubAlbums?.[token];
+    if (!album) return new Response('Album not found', { status: 404 });
+    try {
+      return await fetch(`https://picpub.art/v/api/albums/${token}/images/${hash}`, {
+        headers: { 'X-Owner-Token': album.ownerToken },
+      });
+    } catch (e) {
+      return new Response(e.message, { status: 502 });
+    }
+  });
+
   createAppMenu();
   createWindow();
   attachBOSHLogger();
