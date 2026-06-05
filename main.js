@@ -2965,13 +2965,26 @@ ipcMain.handle('picpub:upload', async (_e, partnerUsername, filePath, mimeType) 
   try {
     const album = await getOrCreateDMAlbum(partnerUsername);
     const buf = fs.readFileSync(filePath);
-    const blob = new Blob([buf], { type: mimeType || 'application/octet-stream' });
-    const fd = new FormData();
-    fd.append('files[]', blob, path.basename(filePath));
+    const filename = path.basename(filePath);
+    const ct = mimeType || 'application/octet-stream';
+    const boundary = '----LitPicBoundary' + Date.now().toString(16);
+    const CRLF = '\r\n';
+    const bodyBuf = Buffer.concat([
+      Buffer.from(
+        `--${boundary}${CRLF}` +
+        `Content-Disposition: form-data; name="files[]"; filename="${filename}"${CRLF}` +
+        `Content-Type: ${ct}${CRLF}${CRLF}`
+      ),
+      buf,
+      Buffer.from(`${CRLF}--${boundary}--${CRLF}`),
+    ]);
     const res = await fetch(`https://picpub.art/v/api/albums/${album.token}/upload`, {
       method: 'POST',
-      headers: { 'X-Owner-Token': album.ownerToken },
-      body: fd,
+      headers: {
+        'X-Owner-Token': album.ownerToken,
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+      },
+      body: bodyBuf,
     });
     if (!res.ok) throw new Error(`Upload failed: ${res.status} ${await res.text()}`);
     const data = await res.json();
