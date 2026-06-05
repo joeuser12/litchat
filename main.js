@@ -981,7 +981,7 @@ function injectDMHistory() {
                    '<img src="' + nurl + '" style="' + IMG_S + '" title="Click to view image"></a>';
           } else {
             // Format B: uploaded — "📷 View photo: https://picpub.art/v/TOKEN#HASH"
-            var photoM = /\u{1F4F7} View photo: https:\\/\\/picpub\\.art\\/v\\/([a-f0-9]+)#([\\w.]+)/u.exec(body);
+            var photoM = /\u{1F4F7} View photo: https:\\/\\/picpub\\.art\\/v\\/([a-f0-9]+)(?:\\?[^#]*)?#([\\w.]+)/u.exec(body);
             if (photoM) {
               var pToken = photoM[1], pHash = photoM[2];
               body = '<a href="https://picpub.art/v/' + pToken + '#' + pHash + '" target="_blank" ' +
@@ -3007,7 +3007,8 @@ ipcMain.handle('picpub:upload', async (_e, partnerUsername, filePath, mimeType) 
     const data = await res.json();
     const added = data.added?.[0];
     if (!added) throw new Error('No file returned from upload');
-    return { ok: true, token: album.token, hash: added.hash, viewUrl: album.viewUrl };
+    const partnerViewUrl = await makeViewerLink(album.token, album.ownerToken, partnerUsername);
+    return { ok: true, token: album.token, hash: added.hash, viewUrl: album.viewUrl, partnerViewUrl };
   } catch (e) {
     return { ok: false, error: e.message };
   }
@@ -3034,23 +3035,19 @@ ipcMain.handle('picpub:link', async (_e, partnerUsername, picpubUrl) => {
     }
     if (!res.ok) throw new Error(`Link failed: ${res.status} ${await res.text()}`);
     const data = await res.json();
-    return { ok: true, token: album.token, hash: data.hash, native_url: data.native_url || null, viewUrl: album.viewUrl };
+    const partnerViewUrl = await makeViewerLink(album.token, album.ownerToken, partnerUsername);
+    return { ok: true, token: album.token, hash: data.hash, native_url: data.native_url || null, viewUrl: album.viewUrl, partnerViewUrl };
   } catch (e) {
     return { ok: false, error: e.message };
   }
 });
 
-ipcMain.handle('picpub:viewerLink', async (_e, token) => {
-  const album = settings.picpubAlbums?.[token];
-  const username = myLitUsername || album?.literoticaUser;
-  if (!album?.ownerToken || !username) {
-    console.log('[picpub:viewerLink] skip — ownerToken:', !!album?.ownerToken, 'username:', username);
-    return null;
-  }
+async function makeViewerLink(token, ownerToken, username) {
+  if (!ownerToken || !username) return null;
   try {
     const res = await fetch(`https://picpub.art/v/api/albums/${token}/viewer-link`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Owner-Token': album.ownerToken },
+      headers: { 'Content-Type': 'application/json', 'X-Owner-Token': ownerToken },
       body: JSON.stringify({ username }),
     });
     if (!res.ok) {
@@ -3063,6 +3060,16 @@ ipcMain.handle('picpub:viewerLink', async (_e, token) => {
     console.log('[picpub:viewerLink] fetch error:', e.message);
     return null;
   }
+}
+
+ipcMain.handle('picpub:viewerLink', async (_e, token) => {
+  const album = settings.picpubAlbums?.[token];
+  const username = myLitUsername || album?.literoticaUser;
+  if (!album?.ownerToken || !username) {
+    console.log('[picpub:viewerLink] skip — ownerToken:', !!album?.ownerToken, 'username:', username);
+    return null;
+  }
+  return makeViewerLink(token, album.ownerToken, username);
 });
 
 function injectImageSharing() {
@@ -3111,7 +3118,7 @@ function injectImageSharing() {
 
         // Format B: uploaded image — proxied via litpic://
         // Message body: "📷 View photo: https://picpub.art/v/TOKEN#HASH"
-        var m = /\u{1F4F7} View photo: https:\\/\\/picpub\\.art\\/v\\/([a-f0-9]+)#([\\w.]+)/u.exec(text);
+        var m = /\u{1F4F7} View photo: https:\\/\\/picpub\\.art\\/v\\/([a-f0-9]+)(?:\\?[^#]*)?#([\\w.]+)/u.exec(text);
         if (!m) return;
         li._litPhotoRendered = true;
         var token = m[1], hash = m[2];
@@ -3187,7 +3194,8 @@ function injectImageSharing() {
           // Send the XMPP DM with album link
           try {
             var conn = Candy.Core.getConnection();
-            var msgBody = '\\u{1F4F7} View photo: https://picpub.art/v/' + result.token + '#' + result.hash;
+            var viewBase = result.partnerViewUrl || ('https://picpub.art/v/' + result.token);
+            var msgBody = '\\u{1F4F7} View photo: ' + viewBase + '#' + result.hash;
             var stanza = $msg({ to: jid, type: 'chat' }).c('body').t(msgBody);
             conn.send(stanza.tree ? stanza.tree() : stanza);
           } catch (sendErr) {
