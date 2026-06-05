@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Tray, nativeImage, shell, Notification, ipcMain, protocol } = require('electron');
+const { app, BrowserWindow, Menu, Tray, nativeImage, shell, Notification, ipcMain, protocol, session } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -3394,7 +3394,8 @@ function attachBOSHLogger() {
 
 app.whenReady().then(() => {
   // Proxy litpic://TOKEN/HASH → PicPub API with owner-token auth
-  protocol.handle('litpic', async (request) => {
+  // Must be registered on the partition session, not the default session.
+  session.fromPartition(PARTITION).protocol.handle('litpic', async (request) => {
     const after = request.url.slice('litpic://'.length);
     const slash = after.indexOf('/');
     if (slash === -1) return new Response('Bad URL', { status: 400 });
@@ -3422,7 +3423,6 @@ app.whenReady().then(() => {
   setupTray();
   setupAutoUpdater();
 
-  const { session } = require('electron');
   const sess = session.fromPartition(PARTITION);
 
   // Block the site's notification permission — it fires a popup for every room message.
