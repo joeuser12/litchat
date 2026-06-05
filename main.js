@@ -2955,7 +2955,7 @@ async function getOrCreateDMAlbum(partnerUsername) {
   const data = await res.json();
   if (!settings.picpubAlbums) settings.picpubAlbums = {};
   if (!settings.dmAlbumsByPartner) settings.dmAlbumsByPartner = {};
-  settings.picpubAlbums[data.token] = { ownerToken: data.owner_token, expiresAt: data.expires_at };
+  settings.picpubAlbums[data.token] = { ownerToken: data.owner_token, expiresAt: data.expires_at, literoticaUser: myLitUsername || 'user' };
   settings.dmAlbumsByPartner[partnerUsername] = data.token;
   saveSettings();
   return { token: data.token, ownerToken: data.owner_token, viewUrl: data.view_url };
@@ -3016,17 +3016,27 @@ ipcMain.handle('picpub:link', async (_e, partnerUsername, picpubUrl) => {
 
 ipcMain.handle('picpub:viewerLink', async (_e, token) => {
   const album = settings.picpubAlbums?.[token];
-  if (!album?.ownerToken || !myLitUsername) return null;
+  const username = myLitUsername || album?.literoticaUser;
+  if (!album?.ownerToken || !username) {
+    console.log('[picpub:viewerLink] skip — ownerToken:', !!album?.ownerToken, 'username:', username);
+    return null;
+  }
   try {
     const res = await fetch(`https://picpub.art/v/api/albums/${token}/viewer-link`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Owner-Token': album.ownerToken },
-      body: JSON.stringify({ username: myLitUsername }),
+      body: JSON.stringify({ username }),
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      console.log('[picpub:viewerLink] API error:', res.status, await res.text());
+      return null;
+    }
     const data = await res.json();
     return data.url || null;
-  } catch { return null; }
+  } catch (e) {
+    console.log('[picpub:viewerLink] fetch error:', e.message);
+    return null;
+  }
 });
 
 function injectImageSharing() {
