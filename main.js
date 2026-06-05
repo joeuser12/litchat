@@ -985,7 +985,8 @@ function injectDMHistory() {
             if (photoM) {
               var pToken = photoM[1], pHash = photoM[2];
               body = '<a href="https://picpub.art/v/' + pToken + '#' + pHash + '" target="_blank" ' +
-                     'onclick="if(window._litOpenAlbum){window._litOpenAlbum(\'' + pToken + '\',\'' + pHash + '\');return false;}" ' +
+                     'data-pt="' + pToken + '" data-ph="' + pHash + '" ' +
+                     'onclick="var t=this.dataset.pt,h=this.dataset.ph;if(window._litOpenAlbum){window._litOpenAlbum(t,h);return false;}" ' +
                      'style="display:inline-block">' +
                      '<img src="litpic://' + pToken + '/' + pHash + '" ' +
                      'style="' + IMG_S + '" title="Click to open album"></a>';
