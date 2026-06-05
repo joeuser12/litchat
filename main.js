@@ -3028,102 +3028,119 @@ function injectImageSharing() {
             mut.addedNodes.forEach(function(pane) {
               if (pane.nodeType !== 1) return;
               pane.querySelectorAll('ul.message-pane, ul[class*="message"]').forEach(observePane);
-              if (pane.dataset && pane.dataset.roomjid) setupDMDragDrop(pane);
             });
           });
         }).observe(chatRooms, { childList: true });
       }
 
-      // Drag-and-drop for DM panes
-      function setupDMDragDrop(pane) {
-        if (pane._litDragActive) return;
+      // Drag-and-drop: document-level capture listeners intercept before any Candy handlers,
+      // regardless of which child element the cursor is over.
+      var _litDragPane = null;
+
+      function dmPaneFor(el) {
+        var pane = el && el.closest ? el.closest('.room-pane[data-roomjid]') : null;
+        if (!pane) return null;
         var jid = pane.dataset.roomjid || '';
-        if (!jid || jid.indexOf('@conference.') !== -1) return;
-        pane._litDragActive = true;
+        return (jid && jid.indexOf('@conference.') === -1) ? pane : null;
+      }
 
-        pane.addEventListener('dragover', function(e) {
-          if (e.dataTransfer.types.indexOf('Files') !== -1 ||
-              e.dataTransfer.types.indexOf('files') !== -1) {
-            e.preventDefault();
-            e.stopPropagation();
-            pane.style.outline = '2px dashed #7c5cbf';
-          }
+      document.addEventListener('dragover', function(e) {
+        var types = e.dataTransfer.types;
+        var hasFiles = false;
+        for (var i = 0; i < types.length; i++) {
+          if (types[i] === 'Files' || types[i] === 'files') { hasFiles = true; break; }
+        }
+        if (!hasFiles) return;
+        var pane = dmPaneFor(e.target);
+        if (!pane) return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (_litDragPane !== pane) {
+          if (_litDragPane) _litDragPane.style.outline = '';
+          _litDragPane = pane;
+          pane.style.outline = '2px dashed #7c5cbf';
+        }
+      }, true);
+
+      document.addEventListener('dragleave', function(e) {
+        if (!_litDragPane) return;
+        if (!_litDragPane.contains(e.relatedTarget)) {
+          _litDragPane.style.outline = '';
+          _litDragPane = null;
+        }
+      }, true);
+
+      document.addEventListener('drop', async function(e) {
+        var pane = dmPaneFor(e.target);
+        if (!pane) return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (_litDragPane) { _litDragPane.style.outline = ''; _litDragPane = null; }
+
+        var file = Array.from(e.dataTransfer.files).find(function(f) {
+          return f.type.startsWith('image/');
         });
-        pane.addEventListener('dragleave', function(e) {
-          if (!pane.contains(e.relatedTarget)) pane.style.outline = '';
-        });
-        pane.addEventListener('drop', async function(e) {
-          e.preventDefault();
-          e.stopPropagation();
-          pane.style.outline = '';
-          var file = Array.from(e.dataTransfer.files).find(function(f) {
-            return f.type.startsWith('image/');
-          });
-          if (!file) return;
+        if (!file) return;
 
-          // Immediate local preview while uploading
-          var previewUrl = URL.createObjectURL(file);
-          var msgPane = pane.querySelector('ul.message-pane, ul[class*="message"]');
+        var jid = pane.dataset.roomjid || '';
+        var previewUrl = URL.createObjectURL(file);
+        var msgPane = pane.querySelector('ul.message-pane, ul[class*="message"]');
+        var indLi;
 
+        if (msgPane) {
+          indLi = document.createElement('li');
+          indLi.style.cssText = 'list-style:none;padding:2px 8px;border-bottom:1px solid rgba(255,255,255,0.04)';
           var indicator = document.createElement('div');
           indicator.style.cssText = 'padding:6px 10px;color:#7c5cbf;font-size:12px;font-style:italic';
           indicator.textContent = 'Uploading image…';
+          indLi.appendChild(indicator);
+          msgPane.appendChild(indLi);
+        }
+
+        try {
+          var filePath = file.path;
+          if (!filePath) throw new Error('File path unavailable');
+          var slash = jid.indexOf('/');
+          var partner = slash !== -1 ? jid.slice(slash + 1) : jid.split('@')[0];
+          var result = await window.litChat.uploadPhoto(partner, filePath, file.type);
+          if (indLi) indLi.remove();
+
+          if (!result.ok) throw new Error(result.error || 'upload failed');
+
           if (msgPane) {
-            var indLi = document.createElement('li');
-            indLi.style.cssText = 'list-style:none;padding:2px 8px;border-bottom:1px solid rgba(255,255,255,0.04)';
-            indLi.appendChild(indicator);
-            msgPane.appendChild(indLi);
+            var li = document.createElement('li');
+            li._litPhotoRendered = true;
+            li.style.cssText = 'list-style:none;padding:4px 8px;border-bottom:1px solid rgba(255,255,255,0.04)';
+            var img = document.createElement('img');
+            img.src = previewUrl;
+            img.style.cssText = 'max-width:300px;max-height:300px;object-fit:contain;border-radius:8px;cursor:pointer;display:block;margin:4px 0';
+            img.title = 'Click to open album';
+            img.addEventListener('click', function() { window.open(result.viewUrl); });
+            li.appendChild(img);
+            msgPane.appendChild(li);
+            var scroller = msgPane.closest('.message-pane-wrapper') || msgPane.parentElement;
+            if (scroller) scroller.scrollTop = scroller.scrollHeight;
           }
 
           try {
-            var filePath = file.path;
-            if (!filePath) throw new Error('File path unavailable');
-            var slash = jid.indexOf('/');
-            var partner = slash !== -1 ? jid.slice(slash + 1) : jid.split('@')[0];
-            var result = await window.litChat.uploadPhoto(partner, filePath, file.type);
-            if (indLi) indLi.remove();
-
-            if (!result.ok) throw new Error(result.error || 'upload failed');
-
-            // Show preview via blob URL (valid for this session)
-            if (msgPane) {
-              var li = document.createElement('li');
-              li._litPhotoRendered = true; // skip MutationObserver re-render
-              li.style.cssText = 'list-style:none;padding:4px 8px;border-bottom:1px solid rgba(255,255,255,0.04)';
-              var img = document.createElement('img');
-              img.src = previewUrl;
-              img.style.cssText = 'max-width:300px;max-height:300px;object-fit:contain;border-radius:8px;cursor:pointer;display:block;margin:4px 0';
-              img.title = 'Click to open album';
-              img.addEventListener('click', function() { window.open(result.viewUrl); });
-              li.appendChild(img);
-              msgPane.appendChild(li);
-              var scroller = msgPane.closest('.message-pane-wrapper') || msgPane.parentElement;
-              if (scroller) scroller.scrollTop = scroller.scrollHeight;
-            }
-
-            // Send XMPP DM so partner receives the album link and we log it
-            try {
-              var conn = Candy.Core.getConnection();
-              var msgBody = '\\u{1F4F7} View photo: https://picpub.art/v/' + result.token + '#' + result.hash;
-              var stanza = $msg({ to: jid, type: 'chat' }).c('body').t(msgBody);
-              conn.send(stanza.tree ? stanza.tree() : stanza);
-            } catch (sendErr) {
-              console.warn('[picpub] message send failed:', sendErr.message);
-            }
-          } catch(err) {
-            if (indLi) indLi.remove();
-            if (msgPane) {
-              var errLi = document.createElement('li');
-              errLi.style.cssText = 'list-style:none;padding:4px 8px;color:#e05050;font-size:12px';
-              errLi.textContent = 'Upload failed: ' + err.message;
-              msgPane.appendChild(errLi);
-              setTimeout(function() { errLi.remove(); }, 5000);
-            }
+            var conn = Candy.Core.getConnection();
+            var msgBody = '\\u{1F4F7} View photo: https://picpub.art/v/' + result.token + '#' + result.hash;
+            var stanza = $msg({ to: jid, type: 'chat' }).c('body').t(msgBody);
+            conn.send(stanza.tree ? stanza.tree() : stanza);
+          } catch (sendErr) {
+            console.warn('[picpub] message send failed:', sendErr.message);
           }
-        });
-      }
-
-      document.querySelectorAll('.room-pane[data-roomjid]').forEach(setupDMDragDrop);
+        } catch(err) {
+          if (indLi) indLi.remove();
+          if (msgPane) {
+            var errLi = document.createElement('li');
+            errLi.style.cssText = 'list-style:none;padding:4px 8px;color:#e05050;font-size:12px';
+            errLi.textContent = 'Upload failed: ' + err.message;
+            msgPane.appendChild(errLi);
+            setTimeout(function() { errLi.remove(); }, 5000);
+          }
+        }
+      }, true);
     })();
   `).catch(() => {});
 }
