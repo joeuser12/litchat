@@ -3206,10 +3206,15 @@ app.whenReady().then(() => {
     const token = after.slice(0, slash);
     const hash  = after.slice(slash + 1);
     const album = settings.picpubAlbums?.[token];
-    if (!album) return new Response('Album not found', { status: 404 });
+    const authHeader = album
+      ? { 'X-Owner-Token': album.ownerToken }
+      : myLitUsername
+        ? { 'X-Viewer': myLitUsername }
+        : null;
+    if (!authHeader) return new Response('No auth available', { status: 401 });
     try {
       return await fetch(`https://picpub.art/v/api/albums/${token}/images/${hash}`, {
-        headers: { 'X-Owner-Token': album.ownerToken },
+        headers: authHeader,
       });
     } catch (e) {
       return new Response(e.message, { status: 502 });
