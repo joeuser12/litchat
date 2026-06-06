@@ -138,6 +138,7 @@ const ROOM_IDLE_MS     = 5 * 60 * 1000;   // 5-minute idle window for room notif
 const roomLastJoin    = new Map();         // roomJid → timestamp of last join notification sent
 const roomLastMessage = new Map();         // roomJid → timestamp of last message notification sent
 let myLitUsername = null;                  // local-part of our own JID, detected from sent messages
+const picpubExpiredTokens = new Set();     // tokens confirmed dead via HEAD check this session
 
 // litpic:// is used for proxied PicPub image URLs with owner-token auth
 protocol.registerSchemesAsPrivileged([
@@ -979,6 +980,8 @@ function injectDMHistory() {
             var nurl = escHtml(nativeM[1]);
             body = '<a href="' + nurl + '" target="_blank" style="display:inline-block">' +
                    '<img src="' + nurl + '" style="' + IMG_S + '" title="Click to view image"></a>';
+          } else if (m._photoExpired) {
+            body = '<span style="color:#444;font-style:italic">📷 (photo expired)</span>';
           } else {
             // Format B: uploaded — "📷 View photo: https://picpub.art/v/TOKEN#HASH"
             var photoM = /\u{1F4F7} View photo: (https:\\/\\/picpub\\.art\\/v\\/([a-f0-9]+)(?:\\?[^#]*)?)#([\\w.]+)/u.exec(m.body || '');
@@ -2418,11 +2421,10 @@ ipcMain.handle('status:setHidden', (_e, jid, hidden) => {
   saveSettings();
 });
 
-ipcMain.handle('logs:dmHistory', (_e, username) => {
+ipcMain.handle('logs:dmHistory', async (_e, username) => {
   const logDir = path.join(PROFILE_DIR, 'logs');
   if (!fs.existsSync(logDir)) return [];
   const target = username.toLowerCase();
-  // Extract the peer nick from a JID: room@server/Nick → "nick", user@server → "user"
   const nickOf = jid => {
     const slash = jid.indexOf('/');
     if (slash !== -1) return jid.slice(slash + 1).toLowerCase();
@@ -2439,6 +2441,37 @@ ipcMain.handle('logs:dmHistory', (_e, username) => {
         const peer = nickOf(m.direction === 'sent' ? (m.to || '') : (m.from || ''));
         if (peer === target) msgs.push(m);
       } catch { /* skip malformed lines */ }
+    }
+  }
+  const now = Date.now() / 1000;
+  const photoRe = /\u{1F4F7} View photo: https:\/\/picpub\.art\/v\/([a-f0-9]+)/u;
+  const toCheck = new Set();
+  for (const m of msgs.slice(-30)) {
+    const match = photoRe.exec(m.body || '');
+    if (!match) continue;
+    const token = match[1];
+    const album = settings.picpubAlbums?.[token];
+    if (album) {
+      if (album.expiresAt < now) m._photoExpired = true;
+    } else if (picpubExpiredTokens.has(token)) {
+      m._photoExpired = true;
+    } else {
+      toCheck.add(token);
+    }
+  }
+  // HEAD-check tokens we don't own (partner's uploads) in parallel
+  if (toCheck.size) {
+    await Promise.all([...toCheck].map(async token => {
+      try {
+        const res = await fetch(`https://picpub.art/v/${token}`, { method: 'HEAD' });
+        if (res.status === 404 || res.status === 410) picpubExpiredTokens.add(token);
+      } catch { /* network error — assume still live */ }
+    }));
+    // Second pass: annotate now that we have results
+    for (const m of msgs) {
+      if (m._photoExpired) continue;
+      const match = photoRe.exec(m.body || '');
+      if (match && picpubExpiredTokens.has(match[1])) m._photoExpired = true;
     }
   }
   return msgs.slice(-30);
