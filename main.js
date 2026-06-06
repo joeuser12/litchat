@@ -988,11 +988,13 @@ function injectDMHistory() {
             if (photoM) {
               var pBase = photoM[1], pToken = photoM[2], pHash = photoM[3];
               var pFull = escHtml(pBase + '#' + pHash);
+              var pVtM = /[?&]vt=([^&#]+)/.exec(pBase);
+              var pLitpic = 'litpic://' + pToken + '/' + pHash + (pVtM ? '?vt=' + pVtM[1] : '');
               body = '<a href="' + pFull + '" target="_blank" ' +
                      'data-pt="' + pToken + '" data-ph="' + pHash + '" data-pu="' + pFull + '" ' +
                      'onclick="var t=this.dataset.pt,h=this.dataset.ph,u=this.dataset.pu;if(window._litOpenAlbum){window._litOpenAlbum(t,h,u);return false;}" ' +
                      'style="display:inline-block">' +
-                     '<img src="litpic://' + pToken + '/' + pHash + '" ' +
+                     '<img src="' + pLitpic + '" ' +
                      'data-lp-token="' + pToken + '" data-lp-hash="' + pHash + '" ' +
                      'oncontextmenu="window.litChat&&window.litChat.photoContextMenu(this.dataset.lpToken,this.dataset.lpHash);return false;" ' +
                      'style="' + IMG_S + '" title="Click to open album"></a>';
@@ -3279,7 +3281,9 @@ function injectImageSharing() {
         if (!m) return;
         li._litPhotoRendered = true;
         var signedBase = m[1], token = m[2], hash = m[3];
-        li.appendChild(makeThumb('litpic://' + token + '/' + hash, function() {
+        var vtM = /[?&]vt=([^&#]+)/.exec(signedBase);
+        var litpicSrc = 'litpic://' + token + '/' + hash + (vtM ? '?vt=' + vtM[1] : '');
+        li.appendChild(makeThumb(litpicSrc, function() {
           openAlbum(token, hash, signedBase + '#' + hash);
         }, token, hash));
       }
@@ -3632,17 +3636,23 @@ app.whenReady().then(() => {
   // Proxy litpic://TOKEN/HASH → PicPub API with owner-token auth
   // Must be registered on the partition session, not the default session.
   session.fromPartition(PARTITION).protocol.handle('litpic', async (request) => {
-    const after = request.url.slice('litpic://'.length);
+    const qmark = request.url.indexOf('?');
+    const base  = qmark === -1 ? request.url : request.url.slice(0, qmark);
+    const query = qmark === -1 ? '' : request.url.slice(qmark + 1);
+    const after = base.slice('litpic://'.length);
     const slash = after.indexOf('/');
     if (slash === -1) return new Response('Bad URL', { status: 400 });
     const token = after.slice(0, slash);
     const hash  = after.slice(slash + 1);
+    const vtCode = new URLSearchParams(query).get('vt');
     const album = settings.picpubAlbums?.[token];
-    const authHeader = album
+    const authHeader = album?.ownerToken
       ? { 'X-Owner-Token': album.ownerToken }
-      : myLitUsername
-        ? { 'X-Viewer': myLitUsername }
-        : null;
+      : vtCode
+        ? { 'X-Viewer-Token': vtCode }
+        : myLitUsername
+          ? { 'X-Viewer': myLitUsername }
+          : null;
     if (!authHeader) return new Response('No auth available', { status: 401 });
     try {
       return await fetch(`https://picpub.art/v/api/albums/${token}/images/${hash}`, {
