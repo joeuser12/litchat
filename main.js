@@ -3411,6 +3411,29 @@ function injectImageSharing() {
         form.insertBefore(fileInput, submitBtn);
         form.insertBefore(photoBtn, submitBtn);
         form.insertBefore(linkBtn, submitBtn);
+
+        // Drag-and-drop onto the DM pane
+        var dragDepth = 0;
+        pane.addEventListener('dragenter', function(e) {
+          if (!e.dataTransfer.types.includes('Files')) return;
+          e.preventDefault();
+          if (++dragDepth === 1) pane.style.outline = '2px dashed #7c5cbf';
+        });
+        pane.addEventListener('dragover', function(e) {
+          if (!e.dataTransfer.types.includes('Files')) return;
+          e.preventDefault();
+        });
+        pane.addEventListener('dragleave', function() {
+          if (--dragDepth === 0) pane.style.outline = '';
+        });
+        pane.addEventListener('drop', function(e) {
+          e.preventDefault();
+          pane.style.outline = ''; dragDepth = 0;
+          var file = Array.from(e.dataTransfer.files).find(function(f) {
+            return f.type.startsWith('image/');
+          });
+          if (file) handlePhotoUpload(jid, file);
+        });
       }
 
       document.querySelectorAll('.room-pane[data-roomjid]').forEach(addPhotoButton);

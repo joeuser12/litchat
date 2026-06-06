@@ -9,7 +9,7 @@
   },
   "main": "main.js",
   "scripts": {
-    "start": "electron .",
+    "start": "electron . --disable-gpu-vsync",
     "build:linux": "electron-builder --linux",
     "build:win": "electron-builder --win",
     "build:mac": "electron-builder --mac",
