@@ -3574,68 +3574,73 @@ function injectImageSharing() {
 
       // ── Photo gallery ────────────────────────────────────────────────────────
 
-      function showGallery(partner, pane) {
-        var existing = pane.querySelector('.lit-gallery');
+      function showGallery(partner) {
+        var existing = document.querySelector('.lit-gallery');
         if (existing) { existing.remove(); return; }
-        var overlay = document.createElement('div');
-        overlay.className = 'lit-gallery';
-        overlay.style.cssText =
-          'position:absolute;top:0;left:0;right:0;bottom:0;z-index:20;' +
-          'background:rgba(10,10,18,0.97);display:flex;flex-direction:column;overflow:hidden';
-        pane.style.position = 'relative';
+        // Full-viewport backdrop so the gallery floats above everything
+        var backdrop = document.createElement('div');
+        backdrop.className = 'lit-gallery';
+        backdrop.style.cssText =
+          'position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;' +
+          'background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center';
+        backdrop.addEventListener('click', function(e) { if (e.target === backdrop) backdrop.remove(); });
+        document.body.appendChild(backdrop);
+        // Panel
+        var panel = document.createElement('div');
+        panel.style.cssText =
+          'background:#141420;border-radius:8px;width:640px;max-width:92vw;max-height:80vh;' +
+          'display:flex;flex-direction:column;overflow:hidden;box-shadow:0 8px 40px rgba(0,0,0,0.7)';
+        backdrop.appendChild(panel);
         // Header
         var hdr = document.createElement('div');
         hdr.style.cssText =
-          'display:flex;align-items:center;justify-content:space-between;' +
-          'padding:10px 14px;border-bottom:1px solid rgba(255,255,255,0.1);flex-shrink:0';
+          'display:flex;align-items:center;justify-content:space-between;flex-shrink:0;' +
+          'padding:11px 16px;border-bottom:1px solid rgba(255,255,255,0.08)';
         var htitle = document.createElement('span');
         htitle.style.cssText = 'font-size:13px;font-weight:600;color:#ccc';
         htitle.textContent = 'Photos with ' + partner;
         var closeBtn = document.createElement('button');
-        closeBtn.textContent = '×';
+        closeBtn.textContent = '\\u00D7';
         closeBtn.style.cssText =
-          'background:none;border:none;color:#888;font-size:20px;cursor:pointer;line-height:1;padding:0 2px';
-        closeBtn.addEventListener('click', function() { overlay.remove(); });
+          'background:none;border:none;color:#666;font-size:22px;cursor:pointer;line-height:1;padding:0 4px';
+        closeBtn.addEventListener('mouseenter', function() { closeBtn.style.color = '#ccc'; });
+        closeBtn.addEventListener('mouseleave', function() { closeBtn.style.color = '#666'; });
+        closeBtn.addEventListener('click', function() { backdrop.remove(); });
         hdr.appendChild(htitle); hdr.appendChild(closeBtn);
-        overlay.appendChild(hdr);
-        // Loading state
+        panel.appendChild(hdr);
+        // Body
         var body = document.createElement('div');
-        body.style.cssText = 'flex:1;overflow-y:auto;padding:12px';
-        var loading = document.createElement('div');
-        loading.style.cssText = 'color:#555;font-size:12px;font-style:italic;text-align:center;padding:40px 0';
-        loading.textContent = 'Loading…';
-        body.appendChild(loading);
-        overlay.appendChild(body);
-        pane.appendChild(overlay);
-        // Fetch photos
+        body.style.cssText = 'flex:1;overflow-y:auto;padding:14px';
+        body.innerHTML = '<div style="color:#555;font-size:12px;font-style:italic;text-align:center;padding:40px 0">Loading…</div>';
+        panel.appendChild(body);
+        // Fetch and render
         window.litChat.dmPhotos(partner).then(function(photos) {
           body.innerHTML = '';
           if (!photos || !photos.length) {
-            body.innerHTML = '<div style="color:#555;font-size:12px;text-align:center;padding:40px 0">No photos found</div>';
+            body.innerHTML = '<div style="color:#555;font-size:12px;text-align:center;padding:40px 0">No photos shared yet</div>';
             return;
           }
           var grid = document.createElement('div');
-          grid.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fill,minmax(88px,1fr));gap:6px';
+          grid.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fill,minmax(90px,1fr));gap:6px';
           photos.forEach(function(photo) {
             var cell = document.createElement('div');
             cell.style.cssText =
-              'width:100%;aspect-ratio:1;border-radius:5px;overflow:hidden;background:#1a1a28;' +
-              'cursor:' + (photo.viewUrl ? 'pointer' : 'default') + ';position:relative';
+              'aspect-ratio:1/1;border-radius:5px;overflow:hidden;background:#1e1e2e;position:relative;' +
+              'cursor:' + (photo.viewUrl ? 'pointer' : 'default');
             if (photo.viewUrl) {
               cell.addEventListener('click', function() { window.open(photo.viewUrl); });
-              cell.title = new Date((photo.ts || 0) * 1000).toLocaleDateString();
+              if (photo.ts) cell.title = new Date(photo.ts * 1000).toLocaleDateString();
             }
             if (photo.thumbSrc) {
               var img = document.createElement('img');
               img.src = photo.thumbSrc;
-              img.style.cssText = 'width:100%;height:100%;object-fit:cover';
-              if (!photo.viewUrl) img.style.opacity = '0.35';
+              img.style.cssText = 'width:100%;height:100%;object-fit:cover' + (photo.viewUrl ? '' : ';opacity:0.3');
               cell.appendChild(img);
             } else {
               var ph = document.createElement('div');
               ph.style.cssText =
-                'width:100%;height:100%;display:flex;align-items:center;justify-content:center;' +
-                'font-size:24px;opacity:0.2';
+                'width:100%;height:100%;display:flex;align-items:center;' +
+                'justify-content:center;font-size:26px;opacity:0.15';
               ph.textContent = '\\u{1F4F7}';
               cell.appendChild(ph);
             }
@@ -3643,7 +3648,7 @@ function injectImageSharing() {
               var exp = document.createElement('div');
               exp.style.cssText =
                 'position:absolute;bottom:0;left:0;right:0;font-size:9px;text-align:center;' +
-                'background:rgba(0,0,0,0.6);color:#666;padding:2px 0';
+                'background:rgba(0,0,0,0.65);color:#555;padding:2px 0;letter-spacing:.03em';
               exp.textContent = 'expired';
               cell.appendChild(exp);
             }
@@ -3843,7 +3848,7 @@ function injectImageSharing() {
 
         // 🖼 — opens photo gallery for this DM
         var galleryBtn = iconBtn('\\u{1F5BC}\\uFE0F', 'Photo gallery');
-        galleryBtn.addEventListener('click', function() { showGallery(partner, pane); });
+        galleryBtn.addEventListener('click', function() { showGallery(partner); });
 
         form.insertBefore(fileInput, submitBtn);
         form.insertBefore(photoBtn, submitBtn);
