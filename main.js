@@ -3293,6 +3293,101 @@ ipcMain.handle('picpub:contextMenu', (_e, token, hash) => {
   return null;
 });
 
+// ── Link previews ────────────────────────────────────────────────────────────
+
+const linkPreviewCache = new Map(); // url → { result, ts }
+
+ipcMain.handle('links:preview', async (_e, url) => {
+  const cached = linkPreviewCache.get(url);
+  if (cached && Date.now() - cached.ts < 3_600_000) return cached.result;
+  try {
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LitChat/1.0)' },
+      signal: AbortSignal.timeout(5000),
+      redirect: 'follow',
+    });
+    if (!res.ok) { linkPreviewCache.set(url, { result: null, ts: Date.now() }); return null; }
+    const html = await res.text();
+    function getMeta(prop) {
+      const esc = prop.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const r1 = new RegExp('<meta[^>]+property=["\']' + esc + '["\'][^>]+content=["\']([^"\']+)["\']', 'i');
+      const r2 = new RegExp('<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']' + esc + '["\']', 'i');
+      return (html.match(r1)?.[1] || html.match(r2)?.[1])?.trim() || null;
+    }
+    function getNameMeta(name) {
+      const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const r1 = new RegExp('<meta[^>]+name=["\']' + esc + '["\'][^>]+content=["\']([^"\']+)["\']', 'i');
+      const r2 = new RegExp('<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']' + esc + '["\']', 'i');
+      return (html.match(r1)?.[1] || html.match(r2)?.[1])?.trim() || null;
+    }
+    const title       = getMeta('og:title')       || html.match(/<title[^>]*>([^<]{1,200})<\/title>/i)?.[1]?.trim() || null;
+    const description = getMeta('og:description') || getNameMeta('description') || null;
+    const image       = getMeta('og:image')       || null;
+    const siteName    = getMeta('og:site_name')   || null;
+    if (!title && !description) { linkPreviewCache.set(url, { result: null, ts: Date.now() }); return null; }
+    const result = { title, description: description ? description.slice(0, 200) : null, image, siteName };
+    linkPreviewCache.set(url, { result, ts: Date.now() });
+    return result;
+  } catch {
+    linkPreviewCache.set(url, { result: null, ts: Date.now() });
+    return null;
+  }
+});
+
+// ── Photo gallery ─────────────────────────────────────────────────────────────
+
+ipcMain.handle('logs:dmPhotos', (_e, username) => {
+  const logDir = path.join(PROFILE_DIR, 'logs');
+  if (!fs.existsSync(logDir)) return [];
+  const target = username.toLowerCase();
+  const nickOf = jid => {
+    const slash = jid.indexOf('/');
+    if (slash !== -1) return jid.slice(slash + 1).toLowerCase();
+    const at = jid.indexOf('@');
+    return (at !== -1 ? jid.slice(0, at) : jid).toLowerCase();
+  };
+  const fmtA = /^\u{1F4F7} (https:\/\/picpub\.art\/([a-z0-9]+\.[a-z]+))/u;
+  const fmtB = /\u{1F4F7} View photo: https:\/\/picpub\.art\/v\/([a-f0-9]+)(?:\?[^#]*)?#([\w.]+)/u;
+  const seen = new Set();
+  const photos = [];
+  for (const file of fs.readdirSync(logDir).filter(f => f.endsWith('.jsonl')).sort()) {
+    const lines = fs.readFileSync(path.join(logDir, file), 'utf8').split('\n');
+    for (const line of lines) {
+      try {
+        const m = JSON.parse(line);
+        if (m.type !== 'chat') continue;
+        const peer = nickOf(m.direction === 'sent' ? (m.to || '') : (m.from || ''));
+        if (peer !== target) continue;
+        let hash, token, viewUrl;
+        const mA = fmtA.exec(m.body || '');
+        const mB = !mA && fmtB.exec(m.body || '');
+        if (mA) {
+          hash = mA[2]; viewUrl = mA[1]; token = null;
+        } else if (mB) {
+          token = mB[1]; hash = mB[2];
+          const album = settings.picpubAlbums?.[token];
+          const expired = album ? album.expiresAt < Date.now() / 1000 : false;
+          viewUrl = expired ? null : `https://picpub.art/v/${token}#${hash}`;
+        } else continue;
+        if (!hash || seen.has(hash)) continue;
+        seen.add(hash);
+        const meta = photoMeta[hash];
+        let thumbSrc = null;
+        if (meta?.nativeUrl) {
+          thumbSrc = `https://picpub.art/96x96/${hash}`;
+        } else {
+          const tf = path.join(THUMBS_DIR, hash + '.jpg');
+          if (fs.existsSync(tf))
+            thumbSrc = 'data:image/jpeg;base64,' + fs.readFileSync(tf).toString('base64');
+        }
+        if (!viewUrl && meta?.nativeUrl) viewUrl = meta.nativeUrl;
+        photos.push({ hash, thumbSrc, viewUrl, ts: m.ts, direction: m.direction });
+      } catch {}
+    }
+  }
+  return photos.reverse();
+});
+
 function injectImageSharing() {
   win.webContents.executeJavaScript(`
     (function() {
@@ -3415,8 +3510,8 @@ function injectImageSharing() {
           muts.forEach(function(mut) {
             mut.addedNodes.forEach(function(n) {
               if (n.nodeType === 1) {
-                if (n.tagName === 'LI') renderPhotoMsg(n);
-                else n.querySelectorAll('li').forEach(renderPhotoMsg);
+                if (n.tagName === 'LI') { renderPhotoMsg(n); renderLinkPreview(n); }
+                else n.querySelectorAll('li').forEach(function(li) { renderPhotoMsg(li); renderLinkPreview(li); });
               }
             });
           });
@@ -3424,6 +3519,141 @@ function injectImageSharing() {
       }
 
       document.querySelectorAll('ul.message-pane, ul[class*="message"]').forEach(observePane);
+
+      // ── Link previews ────────────────────────────────────────────────────────
+
+      var _previewSkipRe = /\\.(?:jpg|jpeg|png|gif|webp|svg|mp4|webm|mov|pdf|zip|tar|gz)(\\?|#|$)/i;
+      function renderLinkPreview(li) {
+        if (li._litPreviewDone || li._litPhotoRendered) return;
+        li._litPreviewDone = true;
+        var text = li.textContent || '';
+        var m = /(https?:\\/\\/[^\\s<>"']{12,})/.exec(text);
+        if (!m) return;
+        var url = m[1].replace(/[.,;:!?)]+$/, ''); // strip trailing punctuation
+        if (/picpub\\.art/.test(url) || _previewSkipRe.test(url)) return;
+        if (!window.litChat || !window.litChat.getLinkPreview) return;
+        window.litChat.getLinkPreview(url).then(function(p) {
+          if (!p || !li.isConnected) return;
+          var card = document.createElement('div');
+          card.style.cssText =
+            'border-left:3px solid #7c5cbf;border-radius:0 6px 6px 0;background:rgba(0,0,0,0.28);' +
+            'padding:7px 10px;margin:5px 0 2px;max-width:420px;cursor:pointer;' +
+            'display:flex;gap:10px;align-items:flex-start;box-sizing:border-box';
+          card.addEventListener('click', function() { window.open(url); });
+          var txt = document.createElement('div');
+          txt.style.cssText = 'flex:1;min-width:0;overflow:hidden';
+          if (p.siteName) {
+            var site = document.createElement('div');
+            site.style.cssText = 'font-size:10px;color:#666;margin-bottom:2px;text-transform:uppercase;letter-spacing:.04em';
+            site.textContent = p.siteName;
+            txt.appendChild(site);
+          }
+          if (p.title) {
+            var title = document.createElement('div');
+            title.style.cssText = 'font-size:13px;font-weight:600;color:#ccc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
+            title.textContent = p.title;
+            txt.appendChild(title);
+          }
+          if (p.description) {
+            var desc = document.createElement('div');
+            desc.style.cssText = 'font-size:12px;color:#888;margin-top:3px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden';
+            desc.textContent = p.description;
+            txt.appendChild(desc);
+          }
+          card.appendChild(txt);
+          if (p.image) {
+            var thumb = document.createElement('img');
+            thumb.src = p.image;
+            thumb.style.cssText = 'width:64px;height:64px;object-fit:cover;border-radius:4px;flex-shrink:0';
+            thumb.onerror = function() { thumb.remove(); };
+            card.appendChild(thumb);
+          }
+          li.appendChild(card);
+        }).catch(function() {});
+      }
+
+      // ── Photo gallery ────────────────────────────────────────────────────────
+
+      function showGallery(partner, pane) {
+        var existing = pane.querySelector('.lit-gallery');
+        if (existing) { existing.remove(); return; }
+        var overlay = document.createElement('div');
+        overlay.className = 'lit-gallery';
+        overlay.style.cssText =
+          'position:absolute;top:0;left:0;right:0;bottom:0;z-index:20;' +
+          'background:rgba(10,10,18,0.97);display:flex;flex-direction:column;overflow:hidden';
+        pane.style.position = 'relative';
+        // Header
+        var hdr = document.createElement('div');
+        hdr.style.cssText =
+          'display:flex;align-items:center;justify-content:space-between;' +
+          'padding:10px 14px;border-bottom:1px solid rgba(255,255,255,0.1);flex-shrink:0';
+        var htitle = document.createElement('span');
+        htitle.style.cssText = 'font-size:13px;font-weight:600;color:#ccc';
+        htitle.textContent = 'Photos with ' + partner;
+        var closeBtn = document.createElement('button');
+        closeBtn.textContent = '×';
+        closeBtn.style.cssText =
+          'background:none;border:none;color:#888;font-size:20px;cursor:pointer;line-height:1;padding:0 2px';
+        closeBtn.addEventListener('click', function() { overlay.remove(); });
+        hdr.appendChild(htitle); hdr.appendChild(closeBtn);
+        overlay.appendChild(hdr);
+        // Loading state
+        var body = document.createElement('div');
+        body.style.cssText = 'flex:1;overflow-y:auto;padding:12px';
+        var loading = document.createElement('div');
+        loading.style.cssText = 'color:#555;font-size:12px;font-style:italic;text-align:center;padding:40px 0';
+        loading.textContent = 'Loading…';
+        body.appendChild(loading);
+        overlay.appendChild(body);
+        pane.appendChild(overlay);
+        // Fetch photos
+        window.litChat.dmPhotos(partner).then(function(photos) {
+          body.innerHTML = '';
+          if (!photos || !photos.length) {
+            body.innerHTML = '<div style="color:#555;font-size:12px;text-align:center;padding:40px 0">No photos found</div>';
+            return;
+          }
+          var grid = document.createElement('div');
+          grid.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fill,minmax(88px,1fr));gap:6px';
+          photos.forEach(function(photo) {
+            var cell = document.createElement('div');
+            cell.style.cssText =
+              'width:100%;aspect-ratio:1;border-radius:5px;overflow:hidden;background:#1a1a28;' +
+              'cursor:' + (photo.viewUrl ? 'pointer' : 'default') + ';position:relative';
+            if (photo.viewUrl) {
+              cell.addEventListener('click', function() { window.open(photo.viewUrl); });
+              cell.title = new Date((photo.ts || 0) * 1000).toLocaleDateString();
+            }
+            if (photo.thumbSrc) {
+              var img = document.createElement('img');
+              img.src = photo.thumbSrc;
+              img.style.cssText = 'width:100%;height:100%;object-fit:cover';
+              if (!photo.viewUrl) img.style.opacity = '0.35';
+              cell.appendChild(img);
+            } else {
+              var ph = document.createElement('div');
+              ph.style.cssText =
+                'width:100%;height:100%;display:flex;align-items:center;justify-content:center;' +
+                'font-size:24px;opacity:0.2';
+              ph.textContent = '\\u{1F4F7}';
+              cell.appendChild(ph);
+            }
+            if (!photo.viewUrl) {
+              var exp = document.createElement('div');
+              exp.style.cssText =
+                'position:absolute;bottom:0;left:0;right:0;font-size:9px;text-align:center;' +
+                'background:rgba(0,0,0,0.6);color:#666;padding:2px 0';
+              exp.textContent = 'expired';
+              cell.appendChild(exp);
+            }
+            grid.appendChild(cell);
+          });
+          body.appendChild(grid);
+        }).catch(function() {
+          body.innerHTML = '<div style="color:#e05050;font-size:12px;text-align:center;padding:40px 0">Failed to load photos</div>';
+        });
+      }
 
       // ── Upload logic (shared by button) ─────────────────────────────────────
 
@@ -3440,6 +3670,8 @@ function injectImageSharing() {
           ind.textContent = 'Uploading image…';
           indLi.appendChild(ind);
           msgPane.appendChild(indLi);
+          var indScroller = msgPane.closest('.message-pane-wrapper') || msgPane.parentElement;
+          if (indScroller) indScroller.scrollTop = indScroller.scrollHeight;
         }
 
         try {
@@ -3472,6 +3704,10 @@ function injectImageSharing() {
               window.litChat.photoContextMenu(result.token, result.hash);
             });
             captureThumb(img, result.hash);
+            img.addEventListener('load', function() {
+              var s = msgPane.closest('.message-pane-wrapper') || msgPane.parentElement;
+              if (s) s.scrollTop = s.scrollHeight;
+            }, { once: true });
             li.appendChild(img);
             msgPane.appendChild(li);
             var scroller = msgPane.closest('.message-pane-wrapper') || msgPane.parentElement;
@@ -3514,6 +3750,8 @@ function injectImageSharing() {
           ind.textContent = 'Linking image…';
           indLi.appendChild(ind);
           msgPane.appendChild(indLi);
+          var indScroller = msgPane.closest('.message-pane-wrapper') || msgPane.parentElement;
+          if (indScroller) indScroller.scrollTop = indScroller.scrollHeight;
         }
         try {
           var slash = jid.indexOf('/');
@@ -3536,7 +3774,12 @@ function injectImageSharing() {
               }
             }
             var thumbSrc = result.native_url || ('litpic://' + result.token + '/' + result.hash);
-            li.appendChild(makeThumb(thumbSrc, function() { openAlbum(result.token, result.hash); }, result.token, result.hash));
+            var thumb = makeThumb(thumbSrc, function() { openAlbum(result.token, result.hash); }, result.token, result.hash);
+            thumb.addEventListener('load', function() {
+              var s = msgPane.closest('.message-pane-wrapper') || msgPane.parentElement;
+              if (s) s.scrollTop = s.scrollHeight;
+            }, { once: true });
+            li.appendChild(thumb);
             msgPane.appendChild(li);
             var scroller = msgPane.closest('.message-pane-wrapper') || msgPane.parentElement;
             if (scroller) scroller.scrollTop = scroller.scrollHeight;
@@ -3570,6 +3813,7 @@ function injectImageSharing() {
         // Skip bare conference-room JIDs; allow DMs (including room/partner JIDs with a '/')
         var slash = jid.indexOf('/');
         if (!jid || (slash === -1 && jid.indexOf('@conference.') !== -1)) return;
+        var partner = slash !== -1 ? jid.slice(slash + 1) : jid.split('@')[0];
         var form = pane.querySelector('.message-form');
         var submitBtn = form && form.querySelector('input[type="submit"], button[type="submit"]');
         if (!submitBtn) return;
@@ -3597,8 +3841,13 @@ function injectImageSharing() {
         var photoBtn = iconBtn('\\u{1F4F7}', 'Upload photo');
         photoBtn.addEventListener('click', function() { fileInput.click(); });
 
+        // 🖼 — opens photo gallery for this DM
+        var galleryBtn = iconBtn('\\u{1F5BC}\\uFE0F', 'Photo gallery');
+        galleryBtn.addEventListener('click', function() { showGallery(partner, pane); });
+
         form.insertBefore(fileInput, submitBtn);
         form.insertBefore(photoBtn, submitBtn);
+        form.insertBefore(galleryBtn, submitBtn);
 
         // Intercept form submit: if the input contains a picpub.art URL, link it instead of sending
         var textInput = form.querySelector('input[type="text"], textarea');
