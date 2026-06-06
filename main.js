@@ -3261,6 +3261,33 @@ function injectImageSharing() {
       // Expose for buildHistory onclick attributes (injected in a separate executeJavaScript)
       window._litOpenAlbum = openAlbum;
 
+      // Remove the photo message text so only the thumbnail shows.
+      // If there is surrounding text, remove just the photo portion; otherwise hide the element.
+      // URL part is optional because Candy's link detection may have moved it into an <a> element.
+      var _photoTextRe = /\\s*\\u{1F4F7}(?:\\s+View photo:)?(?:\\s+https?:\\/\\/\\S*)?\\s*/gu;
+      function hidePhotoText(li, thumb) {
+        // Hide any <a> elements Candy created for the picpub viewer URL
+        li.querySelectorAll('a').forEach(function(a) {
+          if (thumb && thumb.contains(a)) return;
+          if (/picpub\\.art\\/v\\//.test(a.getAttribute('href') || '')) a.style.display = 'none';
+        });
+        function walk(node) {
+          if (node === thumb || (thumb && thumb.contains(node))) return;
+          if (node.nodeType === 3 && node.nodeValue.indexOf('\\u{1F4F7}') !== -1) {
+            var cleaned = node.nodeValue.replace(_photoTextRe, ' ').trimEnd();
+            if (!cleaned.trim()) {
+              var p = node.parentElement;
+              if (p && p !== li) p.style.display = 'none';
+            } else {
+              node.nodeValue = cleaned;
+            }
+          } else if (node.nodeType === 1) {
+            for (var c = node.firstChild; c; c = c.nextSibling) walk(c);
+          }
+        }
+        walk(li);
+      }
+
       function renderPhotoMsg(li) {
         if (li._litPhotoRendered) return;
         var text = li.textContent || '';
@@ -3271,7 +3298,9 @@ function injectImageSharing() {
         if (nativeM) {
           li._litPhotoRendered = true;
           var nurl = nativeM[1];
-          li.appendChild(makeThumb(nurl, function() { window.open(nurl); }));
+          var thumb = makeThumb(nurl, function() { window.open(nurl); });
+          li.appendChild(thumb);
+          hidePhotoText(li, thumb);
           return;
         }
 
@@ -3283,9 +3312,11 @@ function injectImageSharing() {
         var signedBase = m[1], token = m[2], hash = m[3];
         var vtM = /[?&]vt=([^&#]+)/.exec(signedBase);
         var litpicSrc = 'litpic://' + token + '/' + hash + (vtM ? '?vt=' + vtM[1] : '');
-        li.appendChild(makeThumb(litpicSrc, function() {
+        var thumb = makeThumb(litpicSrc, function() {
           openAlbum(token, hash, signedBase + '#' + hash);
-        }, token, hash));
+        }, token, hash);
+        li.appendChild(thumb);
+        hidePhotoText(li, thumb);
       }
 
       function observePane(ul) {
@@ -3382,7 +3413,7 @@ function injectImageSharing() {
 
       // ── 📷 / 🔗 buttons in each DM message form ────────────────────────────
 
-      async function handlePicpubLink(jid, url) {
+      async function handlePicpubLink(jid, url, context) {
         var pane = document.querySelector('.room-pane[data-roomjid=' + JSON.stringify(jid) + ']');
         var msgPane = pane ? pane.querySelector('ul.message-pane, ul[class*="message"]') : null;
         var indLi;
@@ -3402,11 +3433,21 @@ function injectImageSharing() {
           if (indLi) indLi.remove();
           if (!result.ok) throw new Error(result.error || 'link failed');
 
-          if (msgPane && result.native_url) {
+          if (msgPane) {
             var li = document.createElement('li');
             li._litPhotoRendered = true;
             li.style.cssText = 'list-style:none;padding:4px 8px;border-bottom:1px solid rgba(255,255,255,0.04)';
-            li.appendChild(makeThumb(result.native_url, function() { openAlbum(result.token, result.hash); }));
+            if (context) {
+              var surroundText = context.replace(url, '').replace(/\\s+/g, ' ').trim();
+              if (surroundText) {
+                var textEl = document.createElement('span');
+                textEl.style.cssText = 'display:block;font-size:13px;margin-bottom:4px';
+                textEl.textContent = surroundText;
+                li.appendChild(textEl);
+              }
+            }
+            var thumbSrc = result.native_url || ('litpic://' + result.token + '/' + result.hash);
+            li.appendChild(makeThumb(thumbSrc, function() { openAlbum(result.token, result.hash); }, result.token, result.hash));
             msgPane.appendChild(li);
             var scroller = msgPane.closest('.message-pane-wrapper') || msgPane.parentElement;
             if (scroller) scroller.scrollTop = scroller.scrollHeight;
@@ -3414,10 +3455,9 @@ function injectImageSharing() {
 
           try {
             var conn = Candy.Core.getConnection();
-            // Linked images: send native_url directly — no auth needed, embeddable by recipient
-            var msgBody = result.native_url
-              ? '\\u{1F4F7} ' + result.native_url
-              : '\\u{1F4F7} View photo: https://picpub.art/v/' + result.token + '#' + result.hash;
+            var viewBase = result.partnerViewUrl || ('https://picpub.art/v/' + result.token);
+            var photoFmt = '\\u{1F4F7} View photo: ' + viewBase + '#' + result.hash;
+            var msgBody = context ? context.replace(url, photoFmt) : photoFmt;
             var stanza = $msg({ to: jid, type: 'chat' }).c('body').t(msgBody);
             conn.send(stanza.tree ? stanza.tree() : stanza);
           } catch (sendErr) {
@@ -3468,46 +3508,24 @@ function injectImageSharing() {
         var photoBtn = iconBtn('\\u{1F4F7}', 'Upload photo');
         photoBtn.addEventListener('click', function() { fileInput.click(); });
 
-        // 🔗 — toggles URL input bar for linking existing picpub.art images
-        var linkBtn = iconBtn('\\u{1F517}', 'Link picpub.art image');
-
-        // URL bar (hidden until 🔗 is clicked)
-        var formWrapper = pane.querySelector('.message-form-wrapper') || form.parentElement;
-        var urlBar = document.createElement('div');
-        urlBar.style.cssText = 'display:none;align-items:center;gap:6px;padding:4px 8px;' +
-          'background:#1a1a2a;border-top:1px solid #2a2a3a';
-        var urlInput = document.createElement('input');
-        urlInput.type = 'text';
-        urlInput.placeholder = 'https://picpub.art/…';
-        urlInput.style.cssText = 'flex:1;padding:4px 8px;background:#0f0f17;border:1px solid #3a3a4a;' +
-          'border-radius:5px;color:#e0e0e8;font-size:12px;outline:none;min-width:0';
-        var goBtn = document.createElement('button');
-        goBtn.type = 'button'; goBtn.textContent = '✓';
-        goBtn.style.cssText = 'padding:3px 10px;background:#7c5cbf;border:none;border-radius:5px;' +
-          'color:#fff;cursor:pointer;font-size:12px;flex-shrink:0';
-        urlBar.appendChild(urlInput); urlBar.appendChild(goBtn);
-        if (formWrapper) formWrapper.appendChild(urlBar);
-
-        function submitUrl() {
-          var u = urlInput.value.trim();
-          urlInput.value = ''; urlBar.style.display = 'none'; linkBtn.style.opacity = '0.55';
-          if (u) handlePicpubLink(jid, u);
-        }
-        linkBtn.addEventListener('click', function() {
-          var open = urlBar.style.display !== 'none';
-          urlBar.style.display = open ? 'none' : 'flex';
-          linkBtn.style.opacity = open ? '0.55' : '1';
-          if (!open) { urlInput.focus(); }
-        });
-        urlInput.addEventListener('keydown', function(e) {
-          if (e.key === 'Enter') { e.preventDefault(); submitUrl(); }
-          if (e.key === 'Escape') { urlBar.style.display = 'none'; linkBtn.style.opacity = '0.55'; }
-        });
-        goBtn.addEventListener('click', submitUrl);
-
         form.insertBefore(fileInput, submitBtn);
         form.insertBefore(photoBtn, submitBtn);
-        form.insertBefore(linkBtn, submitBtn);
+
+        // Intercept form submit: if the input contains a picpub.art URL, link it instead of sending
+        var textInput = form.querySelector('input[type="text"], textarea');
+        if (textInput) {
+          form.addEventListener('submit', function(e) {
+            var val = textInput.value.trim();
+            var urlM = /(https?:\\/\\/picpub\\.art\\/\\S+)/.exec(val);
+            if (!urlM) return;
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            textInput.value = '';
+            var picpubUrl = urlM[1];
+            var context = val === picpubUrl ? null : val;
+            handlePicpubLink(jid, picpubUrl, context);
+          }, true);
+        }
 
         // Drag-and-drop onto the DM pane
         var dragDepth = 0;
