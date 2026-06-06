@@ -3471,6 +3471,26 @@ function injectImageSharing() {
         walk(li);
       }
 
+      function hideImgUrl(li, iurl) {
+        li.querySelectorAll('a').forEach(function(a) {
+          var href = a.getAttribute('href') || '';
+          if (href === iurl || a.textContent.trim() === iurl) a.style.display = 'none';
+        });
+        (function walk(node) {
+          if (node.nodeType === 3 && node.nodeValue.indexOf(iurl) !== -1) {
+            var cleaned = node.nodeValue.replace(iurl, '').replace(/\\s{2,}/g, ' ').trimEnd();
+            if (!cleaned.trim()) {
+              var p = node.parentElement;
+              if (p && p !== li) p.style.display = 'none';
+            } else {
+              node.nodeValue = cleaned;
+            }
+          } else if (node.nodeType === 1) {
+            for (var c = node.firstChild; c; c = c.nextSibling) walk(c);
+          }
+        })(li);
+      }
+
       function renderPhotoMsg(li) {
         if (li._litPhotoRendered) return;
         var text = li.textContent || '';
@@ -3490,16 +3510,27 @@ function injectImageSharing() {
         // Format B: uploaded image — proxied via litpic://
         // Message body: "📷 View photo: https://picpub.art/v/TOKEN#HASH"
         var m = /\u{1F4F7} View photo: (https:\\/\\/picpub\\.art\\/v\\/([a-f0-9]+)(?:\\?[^#]*)?)#([\\w.]+)/u.exec(text);
-        if (!m) return;
+        if (m) {
+          li._litPhotoRendered = true;
+          var signedBase = m[1], token = m[2], hash = m[3];
+          var vtM = /[?&]vt=([^&#]+)/.exec(signedBase);
+          var litpicSrc = 'litpic://' + token + '/' + hash + (vtM ? '?vt=' + vtM[1] : '');
+          var thumb = makeThumb(litpicSrc, function() {
+            openAlbum(token, hash, signedBase + '#' + hash);
+          }, token, hash);
+          li.appendChild(thumb);
+          hidePhotoText(li, thumb);
+          return;
+        }
+
+        // Format C: direct image URL from any host (jpg/jpeg/png/gif/webp)
+        var imgM = /(https?:\\/\\/[^\\s<>"']+\\.(?:jpg|jpeg|png|gif|webp)(?:\\?[^\\s<>"']*)?)/i.exec(text);
+        if (!imgM) return;
+        var iurl = imgM[1];
         li._litPhotoRendered = true;
-        var signedBase = m[1], token = m[2], hash = m[3];
-        var vtM = /[?&]vt=([^&#]+)/.exec(signedBase);
-        var litpicSrc = 'litpic://' + token + '/' + hash + (vtM ? '?vt=' + vtM[1] : '');
-        var thumb = makeThumb(litpicSrc, function() {
-          openAlbum(token, hash, signedBase + '#' + hash);
-        }, token, hash);
-        li.appendChild(thumb);
-        hidePhotoText(li, thumb);
+        var imgThumb = makeThumb(iurl, function() { window.open(iurl); });
+        li.appendChild(imgThumb);
+        hideImgUrl(li, iurl);
       }
 
       function observePane(ul) {
