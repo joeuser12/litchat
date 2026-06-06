@@ -3082,6 +3082,7 @@ async function getOrCreateDMAlbum(partnerUsername) {
   settings.picpubAlbums[data.token] = { ownerToken: data.owner_token, expiresAt: data.expires_at, literoticaUser: myLitUsername || 'user' };
   settings.dmAlbumsByPartner[partnerUsername] = data.token;
   saveSettings();
+  createAppMenu();
   return { token: data.token, ownerToken: data.owner_token, viewUrl: data.view_url };
 }
 
