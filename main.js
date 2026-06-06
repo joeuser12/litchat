@@ -2725,6 +2725,25 @@ function createAppMenu() {
       },
     },
     {
+      label: 'Photo Link Duration',
+      submenu: [
+        { ttl: '1h', label: '1 hour' },
+        { ttl: '6h', label: '6 hours' },
+        { ttl: '24h', label: '24 hours' },
+        { ttl: '7d', label: '7 days' },
+      ].map(({ ttl, label }) => ({
+        label,
+        type: 'checkbox',
+        checked: (settings.prefs?.photoTtl ?? '1h') === ttl,
+        click: () => {
+          if (!settings.prefs) settings.prefs = {};
+          settings.prefs.photoTtl = ttl;
+          saveSettings();
+          createAppMenu();
+        },
+      })),
+    },
+    {
       label: 'Text Size',
       submenu: FONT_SIZES.map(({ px, label }) => ({
         label,
@@ -2737,6 +2756,17 @@ function createAppMenu() {
           await setTheme(settings.theme || 'dark');
         },
       })),
+    },
+    { type: 'separator' },
+    {
+      label: 'Watermark IP on Shared Photos',
+      type: 'checkbox',
+      checked: settings.prefs?.watermarkIp ?? false,
+      click: (menuItem) => {
+        if (!settings.prefs) settings.prefs = {};
+        settings.prefs.watermarkIp = menuItem.checked;
+        saveSettings();
+      },
     },
     { type: 'separator' },
     {
@@ -2957,7 +2987,14 @@ async function getOrCreateDMAlbum(partnerUsername) {
   const res = await fetch('https://picpub.art/v/api/albums', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ literotica_user: myLitUsername || 'user', ttl: '1h' }),
+    body: JSON.stringify({
+      literotica_user: myLitUsername || 'user',
+      ttl: settings.prefs?.photoTtl ?? '1h',
+      options: {
+        show_chat: false,
+        ...(settings.prefs?.watermarkIp ? { watermark_ip: true } : {}),
+      },
+    }),
   });
   if (!res.ok) throw new Error(`PicPub create failed: ${res.status} ${await res.text()}`);
   const data = await res.json();
