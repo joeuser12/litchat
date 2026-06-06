@@ -137,7 +137,7 @@ let awayRepliedTo = new Set();             // JIDs already sent an away-reply th
 const ROOM_IDLE_MS     = 5 * 60 * 1000;   // 5-minute idle window for room notifications
 const roomLastJoin    = new Map();         // roomJid → timestamp of last join notification sent
 const roomLastMessage = new Map();         // roomJid → timestamp of last message notification sent
-let myLitUsername = null;                  // local-part of our own JID, detected from sent messages
+let myLitUsername = settings.prefs?.litUsername || null;  // local-part of our own JID
 const picpubExpiredTokens = new Set();     // tokens confirmed dead via HEAD check this session
 
 // litpic:// is used for proxied PicPub image URLs with owner-token auth
@@ -993,6 +993,8 @@ function injectDMHistory() {
                      'onclick="var t=this.dataset.pt,h=this.dataset.ph,u=this.dataset.pu;if(window._litOpenAlbum){window._litOpenAlbum(t,h,u);return false;}" ' +
                      'style="display:inline-block">' +
                      '<img src="litpic://' + pToken + '/' + pHash + '" ' +
+                     'data-lp-token="' + pToken + '" data-lp-hash="' + pHash + '" ' +
+                     'oncontextmenu="window.litChat&&window.litChat.photoContextMenu(this.dataset.lpToken,this.dataset.lpHash);return false;" ' +
                      'style="' + IMG_S + '" title="Click to open album"></a>';
             } else {
               // linkify
@@ -2685,6 +2687,49 @@ function sendTestNotification() {
   });
 }
 
+function buildPhotoAlbumsSubmenu() {
+  const now = Date.now() / 1000;
+  const entries = Object.entries(settings.dmAlbumsByPartner || {})
+    .map(([partner, token]) => {
+      const album = settings.picpubAlbums?.[token];
+      return (album && album.expiresAt > now) ? { partner, token, album } : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.partner.localeCompare(b.partner));
+
+  if (!entries.length) return [{ label: 'No active albums', enabled: false }];
+
+  return entries.map(({ partner, token, album }) => {
+    const secs = album.expiresAt - now;
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    const expiry = h > 0 ? `${h}h ${m}m` : `${m}m`;
+    return {
+      label: `${partner} — expires in ${expiry}`,
+      submenu: [
+        { label: 'Delete Album', click: async () => {
+          const { response } = await require('electron').dialog.showMessageBox(win, {
+            type: 'warning',
+            buttons: ['Delete', 'Cancel'],
+            defaultId: 1,
+            message: `Delete album for ${partner}?`,
+            detail: 'This removes all photos from the album. Shared links will stop working.',
+          });
+          if (response !== 0) return;
+          try {
+            await fetch(`https://picpub.art/v/api/albums/${token}`, {
+              method: 'DELETE',
+              headers: { 'X-Owner-Token': album.ownerToken },
+            });
+          } catch { /* already gone */ }
+          invalidateDMAlbum(partner);
+          createAppMenu();
+        }},
+      ],
+    };
+  });
+}
+
 function createAppMenu() {
   const favs = Object.entries(settings.favourites ?? {});
   const roomItems = favs.length
@@ -2870,6 +2915,7 @@ function createAppMenu() {
         { label: 'View Logs',       click: () => openLogViewer() },
         { label: 'Edit Lit Profile', click: () => openLinkWindow('https://www.literotica.com/my/#/user/profile') },
         { label: 'Rooms', submenu: roomItems },
+        { label: 'Photo Albums', submenu: buildPhotoAlbumsSubmenu() },
         { type: 'separator' },
         { label: 'Theme',   submenu: themeItems },
         { label: 'Profile', submenu: profileItems },
@@ -3140,6 +3186,38 @@ ipcMain.handle('picpub:viewerLink', async (_e, token) => {
   return makeViewerLink(token, album.ownerToken, username);
 });
 
+ipcMain.handle('picpub:contextMenu', (_e, token, hash) => {
+  const album = settings.picpubAlbums?.[token];
+  if (!album?.ownerToken) return null;  // not our album — no menu
+  const menu = Menu.buildFromTemplate([{
+    label: 'Remove image from album',
+    click: async () => {
+      try {
+        const res = await fetch(`https://picpub.art/v/api/albums/${token}/images/${hash}`, {
+          method: 'DELETE',
+          headers: { 'X-Owner-Token': album.ownerToken },
+        });
+        if (!res.ok) { console.warn('[picpub] remove image failed:', res.status); return; }
+        // Replace the thumbnail in the renderer with a dim placeholder
+        win.webContents.executeJavaScript(`
+          document.querySelectorAll('img[data-lp-token="${token}"][data-lp-hash="${hash}"]')
+            .forEach(function(img) {
+              var wrap = img.closest('a') || img;
+              var ph = document.createElement('span');
+              ph.style.cssText = 'color:#444;font-style:italic;font-size:12px';
+              ph.textContent = '\\u{1F4F7} (image removed)';
+              wrap.replaceWith(ph);
+            });
+        `).catch(() => {});
+      } catch (e) {
+        console.warn('[picpub] remove image error:', e.message);
+      }
+    },
+  }]);
+  menu.popup({ window: win });
+  return null;
+});
+
 function injectImageSharing() {
   win.webContents.executeJavaScript(`
     (function() {
@@ -3151,11 +3229,19 @@ function injectImageSharing() {
       var IMG_STYLE = 'max-width:300px;max-height:300px;object-fit:contain;' +
         'border-radius:8px;cursor:pointer;display:block;margin:4px 0 2px';
 
-      function makeThumb(src, onclick) {
+      function makeThumb(src, onclick, token, hash) {
         var img = document.createElement('img');
         img.src = src;
         img.style.cssText = IMG_STYLE;
         img.addEventListener('click', onclick);
+        if (token && hash) {
+          img.dataset.lpToken = token;
+          img.dataset.lpHash = hash;
+          img.addEventListener('contextmenu', function(e) {
+            e.preventDefault();
+            window.litChat.photoContextMenu(token, hash);
+          });
+        }
         return img;
       }
 
@@ -3194,7 +3280,7 @@ function injectImageSharing() {
         var signedBase = m[1], token = m[2], hash = m[3];
         li.appendChild(makeThumb('litpic://' + token + '/' + hash, function() {
           openAlbum(token, hash, signedBase + '#' + hash);
-        }));
+        }, token, hash));
       }
 
       function observePane(ul) {
@@ -3254,7 +3340,13 @@ function injectImageSharing() {
             img.src = URL.createObjectURL(file);
             img.style.cssText = 'max-width:300px;max-height:300px;object-fit:contain;border-radius:8px;cursor:pointer;display:block;margin:4px 0';
             img.title = 'Click to open album';
+            img.dataset.lpToken = result.token;
+            img.dataset.lpHash = result.hash;
             img.addEventListener('click', function() { openAlbum(result.token, result.hash); });
+            img.addEventListener('contextmenu', function(e) {
+              e.preventDefault();
+              window.litChat.photoContextMenu(result.token, result.hash);
+            });
             li.appendChild(img);
             msgPane.appendChild(li);
             var scroller = msgPane.closest('.message-pane-wrapper') || msgPane.parentElement;
@@ -3500,7 +3592,13 @@ function attachBOSHLogger() {
           for (const m of sentMsgs) {
             if (m.from) {
               const at = m.from.indexOf('@');
-              if (at !== -1) { myLitUsername = m.from.slice(0, at); break; }
+              if (at !== -1) {
+                myLitUsername = m.from.slice(0, at);
+                if (!settings.prefs) settings.prefs = {};
+                settings.prefs.litUsername = myLitUsername;
+                saveSettings();
+                break;
+              }
             }
           }
         }

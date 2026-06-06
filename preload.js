@@ -13,4 +13,6 @@ contextBridge.exposeInMainWorld('litChat', {
                       ipcRenderer.invoke('picpub:link', partnerUser, url),
   getViewerLink:    (token) =>
                       ipcRenderer.invoke('picpub:viewerLink', token),
+  photoContextMenu: (token, hash) =>
+                      ipcRenderer.invoke('picpub:contextMenu', token, hash),
 });
