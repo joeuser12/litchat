@@ -1023,9 +1023,10 @@ function injectDMHistory() {
           } else if (m._photoExpired) {
             var THUMB_S = 'max-width:96px;max-height:96px;object-fit:contain;border-radius:4px;' +
               'opacity:0.55;display:block;margin:4px 0;cursor:default';
+            var isExpiredVideo = /\\.(?:mp4|webm|mov|mkv|avi)#?/i.test(m.body || '');
             body = m._thumbSrc
               ? '<img src="' + m._thumbSrc + '" style="' + THUMB_S + '" title="Expired photo">'
-              : '<span style="color:#444;font-style:italic">📷 (photo expired)</span>';
+              : '<span style="color:#444;font-style:italic">' + (isExpiredVideo ? '📹 (video expired)' : '📷 (photo expired)') + '</span>';
           } else {
             // Format B: uploaded — "📷 View photo: https://picpub.art/v/TOKEN#HASH"
             var photoM = /\u{1F4F7} View photo: (https:\\/\\/picpub\\.art\\/v\\/([a-f0-9]+)(?:\\?[^#]*)?)#([\\w.]+)/u.exec(m.body || '');
@@ -2530,9 +2531,10 @@ ipcMain.handle('logs:dmHistory', async (_e, username) => {
     if (!match) continue;
     const hash = match[2];
     const meta = photoMeta[hash];
-    if (meta?.nativeUrl) {
+    const isVideo = /\.(mp4|webm|mov|mkv|avi)$/i.test(hash);
+    if (!isVideo && meta?.nativeUrl) {
       m._thumbSrc = `https://picpub.art/96x96/${hash}`;
-    } else {
+    } else if (!isVideo) {
       const thumbFile = path.join(THUMBS_DIR, hash + '.jpg');
       if (fs.existsSync(thumbFile))
         m._thumbSrc = 'data:image/jpeg;base64,' + fs.readFileSync(thumbFile).toString('base64');
@@ -3372,16 +3374,17 @@ ipcMain.handle('logs:dmPhotos', (_e, username) => {
         if (!hash || seen.has(hash)) continue;
         seen.add(hash);
         const meta = photoMeta[hash];
+        const isVideo = /\.(mp4|webm|mov|mkv|avi)$/i.test(hash);
         let thumbSrc = null;
-        if (meta?.nativeUrl) {
+        if (!isVideo && meta?.nativeUrl) {
           thumbSrc = `https://picpub.art/96x96/${hash}`;
-        } else {
+        } else if (!isVideo) {
           const tf = path.join(THUMBS_DIR, hash + '.jpg');
           if (fs.existsSync(tf))
             thumbSrc = 'data:image/jpeg;base64,' + fs.readFileSync(tf).toString('base64');
         }
         if (!viewUrl && meta?.nativeUrl) viewUrl = meta.nativeUrl;
-        photos.push({ hash, thumbSrc, viewUrl, ts: m.ts, direction: m.direction });
+        photos.push({ hash, thumbSrc, viewUrl, ts: m.ts, direction: m.direction, isVideo });
       } catch {}
     }
   }
@@ -3399,6 +3402,10 @@ function injectImageSharing() {
       var IMG_STYLE = 'max-width:300px;max-height:300px;object-fit:contain;' +
         'border-radius:8px;cursor:pointer;display:block;margin:4px 0 2px';
 
+      function isVideoHash(s) {
+        return s && /\\.(?:mp4|webm|mov|mkv|avi)$/i.test(s);
+      }
+
       function captureThumb(img, hash) {
         if (!hash || !window.litChat || !window.litChat.saveThumb) return;
         img.addEventListener('load', function() {
@@ -3415,20 +3422,30 @@ function injectImageSharing() {
       }
 
       function makeThumb(src, onclick, token, hash) {
-        var img = document.createElement('img');
-        img.src = src;
-        img.style.cssText = IMG_STYLE;
-        img.addEventListener('click', onclick);
+        var isVid = isVideoHash(hash) || isVideoHash(src);
+        var el;
+        if (isVid) {
+          el = document.createElement('video');
+          el.src = src;
+          el.controls = true;
+          el.preload = 'metadata';
+          el.style.cssText = IMG_STYLE;
+        } else {
+          el = document.createElement('img');
+          el.src = src;
+          el.style.cssText = IMG_STYLE;
+          el.addEventListener('click', onclick);
+          captureThumb(el, hash);
+        }
         if (token && hash) {
-          img.dataset.lpToken = token;
-          img.dataset.lpHash = hash;
-          img.addEventListener('contextmenu', function(e) {
+          el.dataset.lpToken = token;
+          el.dataset.lpHash = hash;
+          el.addEventListener('contextmenu', function(e) {
             e.preventDefault();
             window.litChat.photoContextMenu(token, hash);
           });
         }
-        captureThumb(img, hash);
-        return img;
+        return el;
       }
 
       // Open album viewer with a signed viewer-link so the gate is bypassed.
@@ -3674,8 +3691,8 @@ function injectImageSharing() {
               var ph = document.createElement('div');
               ph.style.cssText =
                 'width:100%;height:100%;display:flex;align-items:center;' +
-                'justify-content:center;font-size:26px;opacity:0.15';
-              ph.textContent = '\\u{1F4F7}';
+                'justify-content:center;font-size:26px;opacity:' + (photo.isVideo ? '0.5' : '0.15');
+              ph.textContent = photo.isVideo ? '\\u{1F4F9}' : '\\u{1F4F7}';
               cell.appendChild(ph);
             }
             if (!photo.viewUrl) {
@@ -4050,8 +4067,11 @@ app.whenReady().then(() => {
           : null;
     if (!authHeader) return new Response('No auth available', { status: 401 });
     try {
+      const fetchHeaders = Object.assign({}, authHeader);
+      const rangeHeader = request.headers.get('Range');
+      if (rangeHeader) fetchHeaders['Range'] = rangeHeader;
       return await fetch(`https://picpub.art/v/api/albums/${token}/images/${hash}`, {
-        headers: authHeader,
+        headers: fetchHeaders,
       });
     } catch (e) {
       return new Response(e.message, { status: 502 });
