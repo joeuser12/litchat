@@ -3629,7 +3629,10 @@ function injectImageSharing() {
               'cursor:' + (photo.viewUrl ? 'pointer' : 'default');
             if (photo.viewUrl) {
               cell.addEventListener('click', function() { window.open(photo.viewUrl); });
-              if (photo.ts) cell.title = new Date(photo.ts * 1000).toLocaleDateString();
+              if (photo.ts) {
+                var d = new Date(photo.ts);
+                cell.title = isNaN(d) ? '' : d.toLocaleDateString();
+              }
             }
             if (photo.thumbSrc) {
               var img = document.createElement('img');
