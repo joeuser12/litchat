@@ -15,4 +15,6 @@ contextBridge.exposeInMainWorld('litChat', {
                       ipcRenderer.invoke('picpub:viewerLink', token),
   photoContextMenu: (token, hash) =>
                       ipcRenderer.invoke('picpub:contextMenu', token, hash),
+  saveThumb:        (hash, dataUrl) =>
+                      ipcRenderer.invoke('thumbs:save', hash, dataUrl),
 });

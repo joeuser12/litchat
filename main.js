@@ -68,10 +68,12 @@ process.env.LIT_PROFILE  = ACTIVE_ID;
 const { extractMessages, writeMessages } = require('./logger');
 const { loadWatchList, saveWatchList } = require('./watch');
 
-const USER_CSS      = path.join(PROFILE_DIR, 'user.css');
-const USER_JS       = path.join(PROFILE_DIR, 'user.js');
-const SOURCE_DIR    = path.join(PROFILE_DIR, 'page-source');
-const SETTINGS_FILE = path.join(PROFILE_DIR, 'settings.json');
+const USER_CSS        = path.join(PROFILE_DIR, 'user.css');
+const USER_JS         = path.join(PROFILE_DIR, 'user.js');
+const SOURCE_DIR      = path.join(PROFILE_DIR, 'page-source');
+const SETTINGS_FILE   = path.join(PROFILE_DIR, 'settings.json');
+const THUMBS_DIR      = path.join(PROFILE_DIR, 'thumbs');
+const PHOTO_META_FILE = path.join(PROFILE_DIR, 'photo-meta.json');
 const THEMES_DIR    = path.join(__dirname, 'themes');
 
 function getThemeFile(theme) {
@@ -127,6 +129,13 @@ function saveSettings() {
 }
 
 const settings = loadSettings();
+
+// photo-meta: maps image hash → { nativeUrl } for linked images so thumbnails survive album expiry
+let photoMeta = {};
+try { photoMeta = JSON.parse(fs.readFileSync(PHOTO_META_FILE, 'utf8')); } catch {}
+function savePhotoMeta() {
+  try { fs.writeFileSync(PHOTO_META_FILE, JSON.stringify(photoMeta)); } catch {}
+}
 let cssKeys = []; // keys returned by insertCSS; needed to remove on theme change
 
 let watchList = loadWatchList();           // Set of lowercased nicks to watch
@@ -623,6 +632,37 @@ function createWindow() {
 
 
   win.webContents.on('did-finish-load', async () => {
+    // Detect server error pages (e.g. 500 Internal Server Error) and auto-reload
+    // instead of leaving the user staring at a blank or cryptic error screen.
+    const pageText = await win.webContents.executeJavaScript(
+      'document.body ? document.body.innerText.trim() : ""'
+    ).catch(() => '');
+    if (/^(internal server error|bad gateway|service unavailable|gateway timeout)$/i.test(pageText) ||
+        /^[45]\d\d\b/.test(pageText)) {
+      win.webContents.executeJavaScript(`
+        (function() {
+          document.head.innerHTML = '<style>' +
+            'body{margin:0;background:#181820;color:#ccc;font-family:sans-serif;' +
+            'display:flex;align-items:center;justify-content:center;height:100vh;text-align:center}' +
+            'button{background:#7c5cbf;border:none;color:#fff;padding:8px 22px;' +
+            'border-radius:6px;cursor:pointer;font-size:14px;margin-top:16px}' +
+            'button:hover{background:#9b7de0}</style>';
+          document.body.innerHTML =
+            '<div><div style="font-size:44px;margin-bottom:14px">⚠️</div>' +
+            '<div style="font-size:17px;margin-bottom:6px">Server error</div>' +
+            '<div style="color:#888;margin-bottom:4px">Reloading in <span id="_rc">5</span>s…</div>' +
+            '<button onclick="clearInterval(window._rt);location.reload()">Reload now</button></div>';
+          var n = 5;
+          window._rt = setInterval(function() {
+            var el = document.getElementById('_rc');
+            if (el) el.textContent = --n;
+            if (n <= 0) { clearInterval(window._rt); location.reload(); }
+          }, 1000);
+        })();
+      `).catch(() => {});
+      return;
+    }
+
     if (readyPoll) { clearInterval(readyPoll); readyPoll = null; }
     cssKeys = [];
     presenceNotifyReady = false;
@@ -981,7 +1021,11 @@ function injectDMHistory() {
             body = '<a href="' + nurl + '" target="_blank" style="display:inline-block">' +
                    '<img src="' + nurl + '" style="' + IMG_S + '" title="Click to view image"></a>';
           } else if (m._photoExpired) {
-            body = '<span style="color:#444;font-style:italic">📷 (photo expired)</span>';
+            var THUMB_S = 'max-width:96px;max-height:96px;object-fit:contain;border-radius:4px;' +
+              'opacity:0.55;display:block;margin:4px 0;cursor:default';
+            body = m._thumbSrc
+              ? '<img src="' + m._thumbSrc + '" style="' + THUMB_S + '" title="Expired photo">'
+              : '<span style="color:#444;font-style:italic">📷 (photo expired)</span>';
           } else {
             // Format B: uploaded — "📷 View photo: https://picpub.art/v/TOKEN#HASH"
             var photoM = /\u{1F4F7} View photo: (https:\\/\\/picpub\\.art\\/v\\/([a-f0-9]+)(?:\\?[^#]*)?)#([\\w.]+)/u.exec(m.body || '');
@@ -2448,9 +2492,10 @@ ipcMain.handle('logs:dmHistory', async (_e, username) => {
     }
   }
   const now = Date.now() / 1000;
-  const photoRe = /\u{1F4F7} View photo: https:\/\/picpub\.art\/v\/([a-f0-9]+)/u;
+  const photoRe = /\u{1F4F7} View photo: https:\/\/picpub\.art\/v\/([a-f0-9]+)(?:\?[^#]*)?#([\w.]+)/u;
+  const last30 = msgs.slice(-30);
   const toCheck = new Set();
-  for (const m of msgs.slice(-30)) {
+  for (const m of last30) {
     const match = photoRe.exec(m.body || '');
     if (!match) continue;
     const token = match[1];
@@ -2472,13 +2517,28 @@ ipcMain.handle('logs:dmHistory', async (_e, username) => {
       } catch { /* network error — assume still live */ }
     }));
     // Second pass: annotate now that we have results
-    for (const m of msgs) {
+    for (const m of last30) {
       if (m._photoExpired) continue;
       const match = photoRe.exec(m.body || '');
       if (match && picpubExpiredTokens.has(match[1])) m._photoExpired = true;
     }
   }
-  return msgs.slice(-30);
+  // Attach thumbnail source for expired photo messages
+  for (const m of last30) {
+    if (!m._photoExpired) continue;
+    const match = photoRe.exec(m.body || '');
+    if (!match) continue;
+    const hash = match[2];
+    const meta = photoMeta[hash];
+    if (meta?.nativeUrl) {
+      m._thumbSrc = `https://picpub.art/96x96/${hash}`;
+    } else {
+      const thumbFile = path.join(THUMBS_DIR, hash + '.jpg');
+      if (fs.existsSync(thumbFile))
+        m._thumbSrc = 'data:image/jpeg;base64,' + fs.readFileSync(thumbFile).toString('base64');
+    }
+  }
+  return last30;
 });
 
 ipcMain.handle('rooms:getFavourites', () => settings.favourites ?? {});
@@ -3155,6 +3215,10 @@ ipcMain.handle('picpub:link', async (_e, partnerUsername, picpubUrl) => {
     }
     if (!res.ok) throw new Error(`Link failed: ${res.status} ${await res.text()}`);
     const data = await res.json();
+    if (data.native_url && data.hash) {
+      photoMeta[data.hash] = { nativeUrl: data.native_url };
+      savePhotoMeta();
+    }
     const partnerViewUrl = await makeViewerLink(album.token, album.ownerToken, partnerUsername);
     return { ok: true, token: album.token, hash: data.hash, native_url: data.native_url || null, viewUrl: album.viewUrl, partnerViewUrl };
   } catch (e) {
@@ -3187,6 +3251,14 @@ ipcMain.handle('picpub:viewerLink', async (_e, token) => {
   const username = myLitUsername || album?.literoticaUser;
   if (!album?.ownerToken || !username) return null;
   return makeViewerLink(token, album.ownerToken, username);
+});
+
+ipcMain.handle('thumbs:save', (_e, hash, dataUrl) => {
+  try {
+    fs.mkdirSync(THUMBS_DIR, { recursive: true });
+    const b64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
+    fs.writeFileSync(path.join(THUMBS_DIR, hash + '.jpg'), Buffer.from(b64, 'base64'));
+  } catch (e) { console.warn('[thumbs:save]', e.message); }
 });
 
 ipcMain.handle('picpub:contextMenu', (_e, token, hash) => {
@@ -3232,6 +3304,21 @@ function injectImageSharing() {
       var IMG_STYLE = 'max-width:300px;max-height:300px;object-fit:contain;' +
         'border-radius:8px;cursor:pointer;display:block;margin:4px 0 2px';
 
+      function captureThumb(img, hash) {
+        if (!hash || !window.litChat || !window.litChat.saveThumb) return;
+        img.addEventListener('load', function() {
+          try {
+            var MAX = 96, w = img.naturalWidth, h = img.naturalHeight;
+            if (!w || !h) return;
+            var scale = Math.min(MAX / w, MAX / h, 1);
+            var c = document.createElement('canvas');
+            c.width = Math.round(w * scale); c.height = Math.round(h * scale);
+            c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+            window.litChat.saveThumb(hash, c.toDataURL('image/jpeg', 0.5));
+          } catch(e) {}
+        }, { once: true });
+      }
+
       function makeThumb(src, onclick, token, hash) {
         var img = document.createElement('img');
         img.src = src;
@@ -3245,6 +3332,7 @@ function injectImageSharing() {
             window.litChat.photoContextMenu(token, hash);
           });
         }
+        captureThumb(img, hash);
         return img;
       }
 
@@ -3383,6 +3471,7 @@ function injectImageSharing() {
               e.preventDefault();
               window.litChat.photoContextMenu(result.token, result.hash);
             });
+            captureThumb(img, result.hash);
             li.appendChild(img);
             msgPane.appendChild(li);
             var scroller = msgPane.closest('.message-pane-wrapper') || msgPane.parentElement;
