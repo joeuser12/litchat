@@ -3010,11 +3010,117 @@ function createAppMenu() {
         { label: 'ZoomReset', accelerator: 'CmdOrCtrl+shift+0', click: () => adjustZoom(0),    visible: false },
         { label: 'ZoomReset2',accelerator: 'CmdOrCtrl+0',       click: () => adjustZoom(0),    visible: false },
         { label: 'DevTools', click: () => win.webContents.openDevTools() },
+        { label: 'Group Chat Test', accelerator: 'CmdOrCtrl+Shift+G', click: () => runGroupChatTest() },
         { type: 'separator' },
         { label: 'Quit', accelerator: 'CmdOrCtrl+Q', click: () => app.quit() },
       ],
     },
   ]));
+}
+
+function runGroupChatTest() {
+  if (!win) return;
+  win.webContents.openDevTools();
+  win.webContents.executeJavaScript(`
+    (async function groupChatTest() {
+      console.group('%c[Group Chat Test]', 'color:#9b7de0;font-weight:bold');
+
+      // ── Step 1: check Candy is loaded ──────────────────────────────────────
+      if (typeof Candy === 'undefined' || !Candy.Core) {
+        console.error('Candy not loaded yet — wait for chat to connect first');
+        console.groupEnd();
+        return;
+      }
+      console.log('Candy:', typeof Candy.Core.getConnection());
+
+      // ── Step 2: get Strophe connection ─────────────────────────────────────
+      var conn = Candy.Core.getConnection();
+      if (!conn || conn.connected !== true) {
+        console.warn('Not connected (connected=%s)', conn && conn.connected);
+      }
+      var myJid = conn.jid || (Candy.Core.getUser && Candy.Core.getUser().getJid());
+      console.log('My JID:', myJid);
+
+      // ── Step 3: create a private test room ─────────────────────────────────
+      var roomName = 'litchat-test-' + Math.random().toString(36).slice(2, 7);
+      var roomJid  = roomName + '@conference.newchat.literotica.com';
+      var nick     = myJid ? myJid.split('@')[0] : 'test';
+      console.log('Creating room:', roomJid);
+
+      await new Promise(function(resolve) {
+        var presence = Strophe.xmlElement('presence', {to: roomJid + '/' + nick});
+        presence.appendChild(Strophe.xmlElement('x', {'xmlns': 'http://jabber.org/protocol/muc'}));
+        conn.send(presence);
+        console.log('Sent join presence');
+        resolve();
+      });
+
+      // ── Step 4: configure room (private / hidden / non-persistent) ─────────
+      await new Promise(function(resolve) {
+        var iqId = 'cfg-test-' + Date.now();
+        var iq = Strophe.xmlElement('iq', {type:'set', to: roomJid, id: iqId});
+        var query = Strophe.xmlElement('query', {'xmlns':'http://jabber.org/protocol/muc#owner'});
+        var x = Strophe.xmlElement('x', {'xmlns':'jabber:x:data', type:'submit'});
+        function field(v, val) {
+          var f = Strophe.xmlElement('field', {'var': v});
+          var value = Strophe.xmlElement('value');
+          value.textContent = val;
+          f.appendChild(value);
+          return f;
+        }
+        x.appendChild(field('FORM_TYPE',                     'http://jabber.org/protocol/muc#roomconfig'));
+        x.appendChild(field('muc#roomconfig_publicroom',     '0'));
+        x.appendChild(field('muc#roomconfig_membersonly',    '1'));
+        x.appendChild(field('muc#roomconfig_persistentroom', '0'));
+        x.appendChild(field('muc#roomconfig_whois',          'anyone'));
+        query.appendChild(x);
+        iq.appendChild(query);
+        conn.sendIQ(iq, function(result) {
+          console.log('Room config IQ result:', result.getAttribute('type'), Strophe.serialize(result).slice(0,200));
+          resolve();
+        }, function(err) {
+          console.warn('Room config IQ error:', Strophe.serialize(err).slice(0,300));
+          resolve();
+        });
+      });
+
+      // ── Step 5: send a mediated invite ────────────────────────────────────
+      // Uses the room's own address as the target JID for the demo (no real user needed).
+      // To invite a real user: change targetJid to e.g. 'Username@newchat.literotica.com'
+      console.log('Mediated invite (to self for demo)...');
+      var selfJid = myJid ? myJid.split('/')[0] : nick + '@newchat.literotica.com';
+      var invMsg = Strophe.xmlElement('message', {to: roomJid});
+      var invX   = Strophe.xmlElement('x', {'xmlns':'http://jabber.org/protocol/muc#user'});
+      var invite = Strophe.xmlElement('invite', {to: selfJid});
+      invite.appendChild(Strophe.xmlElement('reason')).textContent = 'group chat test';
+      invX.appendChild(invite);
+      invMsg.appendChild(invX);
+      conn.send(invMsg);
+      console.log('Sent mediated invite to', selfJid);
+
+      // ── Step 6: send a direct (jabber:x:conference) invite ────────────────
+      console.log('Direct invite (jabber:x:conference)...');
+      var dirMsg = Strophe.xmlElement('message', {to: selfJid});
+      var dirX   = Strophe.xmlElement('x', {'xmlns':'jabber:x:conference', jid: roomJid});
+      dirX.setAttribute('reason', 'group chat test (direct)');
+      dirMsg.appendChild(dirX);
+      conn.send(dirMsg);
+      console.log('Sent direct invite');
+
+      // ── Step 7: leave the test room ───────────────────────────────────────
+      await new Promise(function(resolve) {
+        setTimeout(function() {
+          var leave = Strophe.xmlElement('presence', {to: roomJid + '/' + nick, type: 'unavailable'});
+          conn.send(leave);
+          console.log('Left room');
+          resolve();
+        }, 1500);
+      });
+
+      console.log('%cAll steps completed. Check Network tab for BOSH stanzas.', 'color:#4caf50');
+      console.groupEnd();
+    })();
+  `).catch(function(e) { console.error('[Group Chat Test] JS error:', e); });
 }
 
 function updateTray() {
