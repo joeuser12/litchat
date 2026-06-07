@@ -2577,6 +2577,39 @@ ipcMain.handle('rooms:setNotifyMessage', (_e, jid, val) => {
   saveSettings();
 });
 
+ipcMain.handle('debug:probeApi', async () => {
+  if (!win) return { error: 'no window' };
+  const cookies = await win.webContents.session.cookies.get({ domain: 'literotica.com' });
+  const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+  const chatCookies = await win.webContents.session.cookies.get({ domain: 'chat.literotica.com' });
+  const chatCookieStr = chatCookies.map(c => `${c.name}=${c.value}`).join('; ');
+  const UA = 'Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0';
+
+  const endpoints = [
+    { url: 'https://literotica.com/api/netchat/rooms',     cookie: cookieStr },
+    { url: 'https://literotica.com/api/netchat/groupchat', cookie: cookieStr },
+    { url: 'https://literotica.com/api/chat/rooms',        cookie: cookieStr },
+    { url: 'https://literotica.com/api/chat/groupchat',    cookie: cookieStr },
+    { url: 'https://chat.literotica.com/api/rooms',        cookie: chatCookieStr },
+    { url: 'https://chat.literotica.com/chat/rooms',       cookie: chatCookieStr },
+  ];
+
+  const results = [];
+  for (const ep of endpoints) {
+    try {
+      const r = await fetch(ep.url, {
+        headers: { 'Cookie': ep.cookie, 'User-Agent': UA,
+                   'Referer': 'https://chat.literotica.com/chat/' }
+      });
+      const body = await r.text();
+      results.push({ url: ep.url, status: r.status, ct: r.headers.get('content-type'), body: body.slice(0, 400) });
+    } catch (e) {
+      results.push({ url: ep.url, error: e.message });
+    }
+  }
+  return results;
+});
+
 async function setTheme(theme) {
   settings.theme = theme;
   saveSettings();
@@ -3088,27 +3121,23 @@ function runGroupChatTest() {
       var testRoomJidEsc = escapeRoomJid(testRoomJid);
       console.log('Using test room:', testRoomJid, '→ escaped:', testRoomJidEsc);
 
-      // ── Step 4: probe Literotica's group-chat creation HTTP API ────────────
-      // When the web UI creates a group chat it must call a backend endpoint.
-      // Try the most likely candidates and log what comes back.
-      console.group('HTTP API probe for group-chat creation');
-      var apiCandidates = [
-        { method: 'GET',  url: 'https://literotica.com/api/netchat/rooms' },
-        { method: 'GET',  url: 'https://literotica.com/api/netchat/groupchat' },
-        { method: 'GET',  url: 'https://literotica.com/netchat/rooms' },
-        { method: 'GET',  url: 'https://literotica.com/netchat/groupchat' },
-        { method: 'GET',  url: 'https://chat.literotica.com/api/rooms' },
-        { method: 'GET',  url: 'https://chat.literotica.com/netchat/rooms' },
-      ];
-      for (var i = 0; i < apiCandidates.length; i++) {
-        var c = apiCandidates[i];
-        try {
-          var r2 = await fetch(c.url, {method: c.method, credentials: 'include'});
-          var body = await r2.text();
-          console.log(c.method, c.url, '→', r2.status, r2.headers.get('content-type'), body.slice(0,200));
-        } catch(e) {
-          console.log(c.method, c.url, '→ fetch error:', e.message);
+      // ── Step 4: probe Literotica HTTP API from main process (no CORS) ──────
+      console.group('HTTP API probe (main process, cookies forwarded)');
+      try {
+        var probeResults = await window.litChat.invoke('debug:probeApi');
+        if (probeResults && probeResults.error) {
+          console.warn('probe error:', probeResults.error);
+        } else {
+          (probeResults || []).forEach(function(r2) {
+            if (r2.error) {
+              console.log(r2.url, '→ error:', r2.error);
+            } else {
+              console.log(r2.url, '→', r2.status, r2.ct, r2.body);
+            }
+          });
         }
+      } catch(e) {
+        console.warn('invoke error:', e.message);
       }
       console.groupEnd();
 

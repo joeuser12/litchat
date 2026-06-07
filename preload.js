@@ -21,4 +21,5 @@ contextBridge.exposeInMainWorld('litChat', {
                       ipcRenderer.invoke('links:preview', url),
   dmPhotos:         (username) =>
                       ipcRenderer.invoke('logs:dmPhotos', username),
+  invoke:           (channel, ...args) => ipcRenderer.invoke(channel, ...args),
 });
