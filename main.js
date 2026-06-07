@@ -3046,6 +3046,19 @@ function runGroupChatTest() {
       var nick = myJid ? myJid.split('@')[0] : 'test';
       var selfJid = myJid ? myJid.split('/')[0] : nick + '@newchat.literotica.com';
 
+      // XEP-0106: escape spaces and other special chars in JID localpart
+      function xep106Escape(local) {
+        return local.replace(/\\/g,'\\5c').replace(/ /g,'\\20').replace(/"/g,'\\22')
+          .replace(/&/g,'\\26').replace(/'/g,'\\27').replace(/\//g,'\\2f')
+          .replace(/:/g,'\\3a').replace(/</g,'\\3c').replace(/>/g,'\\3e')
+          .replace(/@/g,'\\40');
+      }
+      function escapeRoomJid(jid) {
+        var at = jid.indexOf('@');
+        if (at < 0) return jid;
+        return xep106Escape(jid.slice(0, at)) + jid.slice(at);
+      }
+
       // ── Step 3: find "AI NSFW" room from Candy's known rooms ──────────────
       var rooms = {};
       try { rooms = Candy.Core.getRooms() || {}; } catch(e) { console.warn('getRooms error:', e); }
@@ -3054,7 +3067,7 @@ function runGroupChatTest() {
       roomJids.forEach(function(jid) {
         var r = rooms[jid];
         var name = (r && r.getName && r.getName()) || jid;
-        console.log(' •', jid, '→', name);
+        console.log(' •', jid, '→', name, '  (escaped:', escapeRoomJid(jid) + ')');
       });
 
       // Find AI NSFW by name or JID substring
@@ -3062,15 +3075,16 @@ function runGroupChatTest() {
       roomJids.forEach(function(jid) {
         var r = rooms[jid];
         var name = ((r && r.getName && r.getName()) || '').toLowerCase();
-        if (name.includes('nsfw') || name.includes('ai nsfw') || jid.toLowerCase().includes('nsfw')) {
+        if (name.includes('nsfw') || jid.toLowerCase().includes('nsfw')) {
           testRoomJid = jid;
         }
       });
       if (!testRoomJid) {
         console.warn('AI NSFW room not found in Candy rooms. Trying fallback JID...');
-        testRoomJid = 'ai_nsfw@conference.newchat.literotica.com';
+        testRoomJid = 'ai nsfw@conference.newchat.literotica.com';
       }
-      console.log('Using test room:', testRoomJid);
+      var testRoomJidEsc = escapeRoomJid(testRoomJid);
+      console.log('Using test room:', testRoomJid, '→ escaped:', testRoomJidEsc);
 
       // ── Step 4: probe Literotica's group-chat creation HTTP API ────────────
       // When the web UI creates a group chat it must call a backend endpoint.
@@ -3123,35 +3137,50 @@ function runGroupChatTest() {
         console.log('Network interceptor already armed from a previous run.');
       }
 
-      // ── Step 6: test mediated invite (room → target) ───────────────────────
-      // Sends an invite from inside the room — only works if we're a member/owner.
-      // For testing, invite ourselves so it doesn't bother anyone.
+      // ── Step 6: arm invite listener BEFORE sending ─────────────────────────
       console.group('Invite tests on ' + testRoomJid);
-      var invMsg = Strophe.xmlElement('message', {to: testRoomJid});
+      var inviteReceived = { mediated: false, direct: false };
+      var invListener = conn.addHandler(function(msg) {
+        var xml = Strophe.serialize(msg);
+        // mediated invite: <x xmlns='http://jabber.org/protocol/muc#user'><invite ...>
+        if (msg.querySelector('x[xmlns="http://jabber.org/protocol/muc#user"] invite')) {
+          inviteReceived.mediated = true;
+          console.log('%cMEDIATED INVITE RECEIVED:', 'color:#4caf50;font-weight:bold', xml.slice(0, 400));
+        }
+        // direct invite: <x xmlns='jabber:x:conference'>
+        if (msg.querySelector('x[xmlns="jabber:x:conference"]')) {
+          inviteReceived.direct = true;
+          console.log('%cDIRECT INVITE RECEIVED:', 'color:#4caf50;font-weight:bold', xml.slice(0, 400));
+        }
+        return true;
+      }, null, 'message');
+
+      // ── Step 7: send mediated invite (room → target) ───────────────────────
+      var invMsg = Strophe.xmlElement('message', {to: testRoomJidEsc});
       var invX   = Strophe.xmlElement('x', {'xmlns':'http://jabber.org/protocol/muc#user'});
       var invite = Strophe.xmlElement('invite', {to: selfJid});
       invite.appendChild(Strophe.xmlElement('reason')).textContent = 'group chat test (mediated)';
       invX.appendChild(invite);
       invMsg.appendChild(invX);
       conn.send(invMsg);
-      console.log('Sent mediated invite (room→self)');
+      console.log('Sent mediated invite (room→self) to', testRoomJidEsc);
 
-      // ── Step 7: test direct invite (user → target) ─────────────────────────
+      // ── Step 8: send direct invite (user → target) ─────────────────────────
       var dirMsg = Strophe.xmlElement('message', {to: selfJid});
-      var dirX   = Strophe.xmlElement('x', {'xmlns':'jabber:x:conference', jid: testRoomJid});
+      var dirX   = Strophe.xmlElement('x', {'xmlns':'jabber:x:conference', jid: testRoomJidEsc});
       dirX.setAttribute('reason', 'group chat test (direct)');
       dirMsg.appendChild(dirX);
       conn.send(dirMsg);
-      console.log('Sent direct invite (user→self, jabber:x:conference)');
+      console.log('Sent direct invite (user→self) jid:', testRoomJidEsc);
 
-      // ── Step 8: query room info to confirm we can read it ──────────────────
+      // ── Step 9: query room disco#info using escaped JID ────────────────────
       await new Promise(function(resolve) {
-        var iq = Strophe.xmlElement('iq', {type:'get', to: testRoomJid, id: 'disco-' + Date.now()});
+        var iq = Strophe.xmlElement('iq', {type:'get', to: testRoomJidEsc, id: 'disco-' + Date.now()});
         iq.appendChild(Strophe.xmlElement('query', {'xmlns':'http://jabber.org/protocol/disco#info'}));
         conn.sendIQ(iq, function(res) {
           var identity = res.querySelector('identity');
           var features = Array.from(res.querySelectorAll('feature')).map(function(f) { return f.getAttribute('var'); });
-          console.log('Room disco identity:', identity ? identity.getAttribute('name') + ' / ' + identity.getAttribute('type') : 'none');
+          console.log('Room identity:', identity ? identity.getAttribute('name') + ' (' + identity.getAttribute('type') + ')' : 'none');
           console.log('Room features:', features.join(', '));
           resolve();
         }, function(err) {
@@ -3159,6 +3188,12 @@ function runGroupChatTest() {
           resolve();
         });
       });
+
+      // ── Step 10: wait 3s to collect any incoming invite reflections ─────────
+      await new Promise(function(resolve) { setTimeout(resolve, 3000); });
+      conn.deleteHandler(invListener);
+      console.log('Invite delivery — mediated:', inviteReceived.mediated ? 'RECEIVED' : 'NOT received',
+        '| direct:', inviteReceived.direct ? 'RECEIVED' : 'NOT received');
       console.groupEnd();
 
       console.log('%cAll steps complete.', 'color:#4caf50');
