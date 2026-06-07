@@ -3121,24 +3121,41 @@ function runGroupChatTest() {
       var testRoomJidEsc = escapeRoomJid(testRoomJid);
       console.log('Using test room:', testRoomJid, '→ escaped:', testRoomJidEsc);
 
-      // ── Step 4: probe Literotica HTTP API from main process (no CORS) ──────
-      console.group('HTTP API probe (main process, cookies forwarded)');
-      try {
-        var probeResults = await window.litChat.invoke('debug:probeApi');
-        if (probeResults && probeResults.error) {
-          console.warn('probe error:', probeResults.error);
-        } else {
-          (probeResults || []).forEach(function(r2) {
-            if (r2.error) {
-              console.log(r2.url, '→ error:', r2.error);
-            } else {
-              console.log(r2.url, '→', r2.status, r2.ct, r2.body);
+      // ── Step 4: scan Candy/literotica JS for group-chat creation API ───────
+      console.group('Candy API scan');
+      // Look for any function in Candy that mentions "create", "room", "group"
+      function scanObj(obj, path, depth) {
+        if (depth > 4 || !obj || typeof obj !== 'object') return;
+        Object.keys(obj).forEach(function(k) {
+          var fullPath = path + '.' + k;
+          try {
+            var v = obj[k];
+            if (typeof v === 'function') {
+              var src = v.toString().slice(0, 120);
+              if (/create|group\s*chat|groupchat|newroom|makeroom/i.test(k + src)) {
+                console.log('FOUND:', fullPath, '→', src.slice(0, 80));
+              }
+            } else if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
+              scanObj(v, fullPath, depth + 1);
             }
-          });
-        }
-      } catch(e) {
-        console.warn('invoke error:', e.message);
+          } catch(e) {}
+        });
       }
+      scanObj(Candy, 'Candy', 0);
+      // Also check literotica-specific globals
+      ['LitChat','Chat','Lit','App','LiteroticaChat'].forEach(function(g) {
+        if (window[g]) { scanObj(window[g], g, 0); }
+      });
+
+      // Look for "group chat" or "create room" buttons in the DOM
+      var gcButtons = Array.from(document.querySelectorAll('button,a,[role=button]'))
+        .filter(function(el) {
+          return /group\s*chat|create\s*room|new\s*room|invite/i.test(el.textContent + el.title + el.getAttribute('data-action'));
+        });
+      console.log('UI elements matching "group chat/create room/invite":', gcButtons.length);
+      gcButtons.forEach(function(el) {
+        console.log(' •', el.tagName, el.id || el.className.slice(0,40), JSON.stringify(el.textContent.slice(0,40)));
+      });
       console.groupEnd();
 
       // ── Step 5: intercept next XHR/fetch to spot group-chat API calls ──────
