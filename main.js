@@ -143,9 +143,11 @@ let onlineWatched = new Set();             // currently-online watched nicks thi
 let presenceNotifyReady = false;           // false during startup roster flood
 let awayRepliedTo = new Set();             // JIDs already sent an away-reply this away session
 
-const ROOM_IDLE_MS     = 5 * 60 * 1000;   // 5-minute idle window for room notifications
-const roomLastJoin    = new Map();         // roomJid → timestamp of last join notification sent
-const roomLastMessage = new Map();         // roomJid → timestamp of last message notification sent
+const ROOM_IDLE_MS        = 5 * 60 * 1000;  // 5-minute idle window for room notifications
+const KEYWORD_COOLDOWN_MS = 60 * 1000;      // min gap between keyword alerts for the same room
+const roomLastJoin        = new Map();       // roomJid → timestamp of last join notification sent
+const roomLastMessage     = new Map();       // roomJid → timestamp of last message notification sent
+const roomLastKeyword     = new Map();       // roomJid → timestamp of last keyword notification sent
 let myLitUsername = settings.prefs?.litUsername || null;  // local-part of our own JID
 const picpubExpiredTokens = new Set();     // tokens confirmed dead via HEAD check this session
 
@@ -181,20 +183,40 @@ function nickOf(jid) {
 
 function notifyRoomMessages(messages) {
   if (!presenceNotifyReady) return;
+  const keywords = (settings.prefs?.keywords || []).map(k => k.toLowerCase()).filter(Boolean);
   for (const m of messages) {
     if (m.type !== 'groupchat' || m.direction !== 'received') continue;
     const slash = (m.from || '').indexOf('/');
     if (slash === -1) continue;
     const roomJid  = unescapeJid(m.from.slice(0, slash));
     const msgNick  = m.from.slice(slash + 1);
+    if (myLitUsername && msgNick === myLitUsername) continue;
+    const roomName = settings.favourites?.[roomJid]?.name || roomJid.split('@')[0];
+    const body     = m.body || '';
+    const bodyDisp = body.length > 80 ? body.slice(0, 80) + '…' : body;
+
+    // Per-room activity notification (5-min idle gate)
     const fav = settings.favourites?.[roomJid];
-    if (!fav?.notifyMessage) continue;
-    const last = roomLastMessage.get(roomJid) || 0;
-    if (Date.now() - last < ROOM_IDLE_MS) continue;
-    roomLastMessage.set(roomJid, Date.now());
-    const name = fav.name || roomJid.split('@')[0];
-    const body = m.body ? (m.body.length > 80 ? m.body.slice(0, 80) + '…' : m.body) : '';
-    sendNotification({ title: name, body: `${msgNick}: ${body}` });
+    if (fav?.notifyMessage) {
+      const last = roomLastMessage.get(roomJid) || 0;
+      roomLastMessage.set(roomJid, Date.now());
+      if (Date.now() - last >= ROOM_IDLE_MS) {
+        sendNotification({ title: roomName, body: `${msgNick}: ${bodyDisp}` });
+      }
+    }
+
+    // Keyword notification (fires regardless of favourites / idle window)
+    if (keywords.length && body) {
+      const lc = body.toLowerCase();
+      const hit = keywords.find(k => lc.includes(k));
+      if (hit) {
+        const lastKw = roomLastKeyword.get(roomJid) || 0;
+        if (Date.now() - lastKw >= KEYWORD_COOLDOWN_MS) {
+          roomLastKeyword.set(roomJid, Date.now());
+          sendNotification({ title: `Keyword "${hit}" — ${roomName}`, body: `${msgNick}: ${bodyDisp}` });
+        }
+      }
+    }
   }
 }
 
@@ -536,6 +558,17 @@ function handlePresence(presences) {
         onlineWatched.delete(nick);
         if (presenceNotifyReady)
           sendNotification({ title: 'Went offline', body: nick });
+      }
+    }
+
+    // Suppress notifications for message history delivered after we join a room.
+    // Stamp the idle timers so the post-join history flood doesn't trigger alerts.
+    if (type === 'available' && p.isSelf) {
+      const slash = (from || '').indexOf('/');
+      if (slash !== -1) {
+        const roomJid = unescapeJid(from.slice(0, slash));
+        roomLastMessage.set(roomJid, Date.now());
+        roomLastKeyword.set(roomJid, Date.now());
       }
     }
 
@@ -2921,6 +2954,57 @@ function createAppMenu() {
         settings.prefs.away = menuItem.checked;
         saveSettings();
         if (!menuItem.checked) { awayRepliedTo.clear(); awayConversations.clear(); }
+      },
+    },
+    {
+      label: 'Keyword Alerts…',
+      click: async () => {
+        const current = (settings.prefs?.keywords || []).join('\n');
+        const result = await win.webContents.executeJavaScript(`
+          new Promise(function(resolve) {
+            var overlay = document.createElement('div');
+            overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.72);z-index:999999;display:flex;align-items:center;justify-content:center;';
+            var box = document.createElement('div');
+            box.style.cssText = 'background:#1a1a2a;border:1px solid #3a3a4a;border-radius:10px;padding:20px 20px 16px;width:380px;font-family:system-ui,sans-serif;box-shadow:0 8px 32px rgba(0,0,0,0.6);';
+            var lbl = document.createElement('div');
+            lbl.textContent = 'Keyword alerts — one per line, case-insensitive';
+            lbl.style.cssText = 'color:#aaa;font-size:12px;margin-bottom:8px;letter-spacing:0.04em;text-transform:uppercase;';
+            var hint = document.createElement('div');
+            hint.textContent = 'Notifies whenever a room message contains any of these words (all rooms, 60s cooldown per room).';
+            hint.style.cssText = 'color:#666;font-size:11px;margin-bottom:10px;line-height:1.4;';
+            var ta = document.createElement('textarea');
+            ta.value = ${JSON.stringify(current)};
+            ta.rows = 6;
+            ta.placeholder = 'e.g.\\nai_joe\\nyour name\\nhello';
+            ta.style.cssText = 'width:100%;padding:8px 10px;background:#0f0f17;border:1px solid #3a3a4a;border-radius:6px;color:#e0e0e8;font-size:14px;outline:none;box-sizing:border-box;resize:vertical;font-family:inherit;';
+            ta.addEventListener('focus', function() { ta.style.borderColor='#7c5cbf'; });
+            ta.addEventListener('blur',  function() { ta.style.borderColor='#3a3a4a'; });
+            var btns = document.createElement('div');
+            btns.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:14px;';
+            var cancel = document.createElement('button');
+            cancel.textContent = 'Cancel';
+            cancel.style.cssText = 'padding:6px 16px;background:transparent;border:1px solid #3a3a4a;border-radius:6px;color:#aaa;cursor:pointer;font-size:13px;';
+            var save = document.createElement('button');
+            save.textContent = 'Save';
+            save.style.cssText = 'padding:6px 18px;background:#7c5cbf;border:none;border-radius:6px;color:#fff;cursor:pointer;font-size:13px;';
+            function done(v) { document.body.removeChild(overlay); resolve(v); }
+            cancel.onclick = function() { done(null); };
+            save.onclick   = function() { done(ta.value); };
+            ta.addEventListener('keydown', function(e) {
+              if (e.key === 'Escape') { e.preventDefault(); done(null); }
+            });
+            btns.appendChild(cancel); btns.appendChild(save);
+            box.appendChild(lbl); box.appendChild(hint); box.appendChild(ta); box.appendChild(btns);
+            overlay.appendChild(box);
+            document.body.appendChild(overlay);
+            setTimeout(function() { ta.focus(); }, 30);
+          })
+        `).catch(() => null);
+        if (result !== null && result !== undefined) {
+          if (!settings.prefs) settings.prefs = {};
+          settings.prefs.keywords = result.split('\n').map(k => k.trim()).filter(Boolean);
+          saveSettings();
+        }
       },
     },
     {
