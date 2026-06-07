@@ -3046,17 +3046,17 @@ function runGroupChatTest() {
       var nick = myJid ? myJid.split('@')[0] : 'test';
       var selfJid = myJid ? myJid.split('/')[0] : nick + '@newchat.literotica.com';
 
-      // XEP-0106: escape spaces and other special chars in JID localpart
-      function xep106Escape(local) {
-        return local.replace(/\\/g,'\\5c').replace(/ /g,'\\20').replace(/"/g,'\\22')
-          .replace(/&/g,'\\26').replace(/'/g,'\\27').replace(/\//g,'\\2f')
-          .replace(/:/g,'\\3a').replace(/</g,'\\3c').replace(/>/g,'\\3e')
-          .replace(/@/g,'\\40');
-      }
+      // XEP-0106: escape special chars in JID localpart (space is the only one seen in literotica rooms)
       function escapeRoomJid(jid) {
         var at = jid.indexOf('@');
         if (at < 0) return jid;
-        return xep106Escape(jid.slice(0, at)) + jid.slice(at);
+        var local = jid.slice(0, at)
+          .split(' ').join('\\20')
+          .split('"').join('\\22')
+          .split('&').join('\\26')
+          .split("'").join('\\27')
+          .split(':').join('\\3a');
+        return local + jid.slice(at);
       }
 
       // ── Step 3: find "AI NSFW" room from Candy's known rooms ──────────────
