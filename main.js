@@ -3047,39 +3047,66 @@ function runGroupChatTest() {
       var nick     = myJid ? myJid.split('@')[0] : 'test';
       console.log('Creating room:', roomJid);
 
+      // Wait for join confirmation (status 201 = room created, 110 = own presence)
       await new Promise(function(resolve) {
         var presence = Strophe.xmlElement('presence', {to: roomJid + '/' + nick});
         presence.appendChild(Strophe.xmlElement('x', {'xmlns': 'http://jabber.org/protocol/muc'}));
+        var joined = false;
+        var h = conn.addHandler(function(pres) {
+          if (joined) return false;
+          var statuses = Array.from(pres.querySelectorAll('status')).map(function(s) { return s.getAttribute('code'); });
+          console.log('Join presence received, status codes:', statuses.join(',') || '(none)');
+          if (statuses.includes('110') || statuses.includes('201')) {
+            joined = true;
+            resolve();
+            return false;
+          }
+          return true;
+        }, null, 'presence', null, null, roomJid + '/' + nick);
+        // Fallback: resolve after 3s even if we don't get a 201
+        setTimeout(function() { if (!joined) { joined = true; conn.deleteHandler(h); console.warn('Join timed out waiting for 201, proceeding anyway'); resolve(); } }, 3000);
         conn.send(presence);
-        console.log('Sent join presence');
-        resolve();
+        console.log('Sent join presence, waiting for server confirmation...');
       });
 
-      // ── Step 4: configure room (private / hidden / non-persistent) ─────────
+      // ── Step 4: fetch config form then submit (GET then SET) ───────────────
       await new Promise(function(resolve) {
-        var iqId = 'cfg-test-' + Date.now();
-        var iq = Strophe.xmlElement('iq', {type:'set', to: roomJid, id: iqId});
-        var query = Strophe.xmlElement('query', {'xmlns':'http://jabber.org/protocol/muc#owner'});
-        var x = Strophe.xmlElement('x', {'xmlns':'jabber:x:data', type:'submit'});
-        function field(v, val) {
-          var f = Strophe.xmlElement('field', {'var': v});
-          var value = Strophe.xmlElement('value');
-          value.textContent = val;
-          f.appendChild(value);
-          return f;
-        }
-        x.appendChild(field('FORM_TYPE',                     'http://jabber.org/protocol/muc#roomconfig'));
-        x.appendChild(field('muc#roomconfig_publicroom',     '0'));
-        x.appendChild(field('muc#roomconfig_membersonly',    '1'));
-        x.appendChild(field('muc#roomconfig_persistentroom', '0'));
-        x.appendChild(field('muc#roomconfig_whois',          'anyone'));
-        query.appendChild(x);
-        iq.appendChild(query);
-        conn.sendIQ(iq, function(result) {
-          console.log('Room config IQ result:', result.getAttribute('type'), Strophe.serialize(result).slice(0,200));
-          resolve();
+        // First GET the config form so we know what fields the server supports
+        var getIq = Strophe.xmlElement('iq', {type:'get', to: roomJid, id: 'cfg-get-' + Date.now()});
+        getIq.appendChild(Strophe.xmlElement('query', {'xmlns':'http://jabber.org/protocol/muc#owner'}));
+        conn.sendIQ(getIq, function(form) {
+          console.log('Config form received (fields):',
+            Array.from(form.querySelectorAll('field')).map(function(f) { return f.getAttribute('var'); }).join(', '));
+          // Now submit with our desired values
+          var setIq = Strophe.xmlElement('iq', {type:'set', to: roomJid, id: 'cfg-set-' + Date.now()});
+          var query = Strophe.xmlElement('query', {'xmlns':'http://jabber.org/protocol/muc#owner'});
+          var x = Strophe.xmlElement('x', {'xmlns':'jabber:x:data', type:'submit'});
+          function field(v, val, type) {
+            var f = Strophe.xmlElement('field', {'var': v});
+            if (type) f.setAttribute('type', type);
+            var value = Strophe.xmlElement('value');
+            value.textContent = val;
+            f.appendChild(value);
+            return f;
+          }
+          x.appendChild(field('FORM_TYPE',                     'http://jabber.org/protocol/muc#roomconfig', 'hidden'));
+          x.appendChild(field('muc#roomconfig_publicroom',     '0'));
+          x.appendChild(field('muc#roomconfig_membersonly',    '1'));
+          x.appendChild(field('muc#roomconfig_persistentroom', '0'));
+          x.appendChild(field('muc#roomconfig_whois',          'anyone'));
+          query.appendChild(x);
+          setIq.appendChild(query);
+          conn.sendIQ(setIq, function(result) {
+            console.log('Room config IQ result:', result.getAttribute('type'));
+            resolve();
+          }, function(err) {
+            var full = Strophe.serialize(err);
+            console.warn('Room config IQ error (full):', full);
+            resolve();
+          });
         }, function(err) {
-          console.warn('Room config IQ error:', Strophe.serialize(err).slice(0,300));
+          var full = Strophe.serialize(err);
+          console.warn('Config form GET error (full):', full);
           resolve();
         });
       });
