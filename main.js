@@ -3024,6 +3024,8 @@ function runGroupChatTest() {
   win.webContents.executeJavaScript(`
     (async function groupChatTest() {
       console.group('%c[Group Chat Test]', 'color:#9b7de0;font-weight:bold');
+      // NOTE: ejabberd access_create=deny — cannot create MUC rooms via XMPP.
+      // Group chat rooms must be created through Literotica's HTTP backend API.
 
       // ── Step 1: check Candy is loaded ──────────────────────────────────────
       if (typeof Candy === 'undefined' || !Candy.Core) {
@@ -3041,129 +3043,125 @@ function runGroupChatTest() {
       var myJid = conn.jid || (Candy.Core.getUser && Candy.Core.getUser().getJid());
       console.log('My JID:', myJid);
 
-      // ── Step 3: create a private test room ─────────────────────────────────
-      var roomName = 'litchat-test-' + Math.random().toString(36).slice(2, 7);
-      var roomJid  = roomName + '@conference.newchat.literotica.com';
-      var nick     = myJid ? myJid.split('@')[0] : 'test';
-      console.log('Creating room:', roomJid);
+      var nick = myJid ? myJid.split('@')[0] : 'test';
+      var selfJid = myJid ? myJid.split('/')[0] : nick + '@newchat.literotica.com';
 
-      // Wait for join confirmation (status 201 = room created, 110 = own presence)
-      var joinError = null;
-      await new Promise(function(resolve) {
-        var presence = Strophe.xmlElement('presence', {to: roomJid + '/' + nick});
-        presence.appendChild(Strophe.xmlElement('x', {'xmlns': 'http://jabber.org/protocol/muc'}));
-        var joined = false;
-        // Don't filter by from — catch all presences and filter manually so we see everything
-        var h = conn.addHandler(function(pres) {
-          if (joined) return false;
-          var from = pres.getAttribute('from') || '';
-          var type = pres.getAttribute('type') || '';
-          if (!from.toLowerCase().startsWith(roomJid.toLowerCase())) return true; // not our room
-          var statuses = Array.from(pres.querySelectorAll('status')).map(function(s) { return s.getAttribute('code'); });
-          var fullXml = Strophe.serialize(pres);
-          console.log('Join presence from server:', fullXml);
-          if (type === 'error') {
-            joinError = fullXml;
-            joined = true;
-            conn.deleteHandler(h);
-            resolve();
-            return false;
-          }
-          if (statuses.includes('110') || statuses.includes('201')) {
-            console.log('Join confirmed, status codes:', statuses.join(','));
-            joined = true;
-            conn.deleteHandler(h);
-            resolve();
-            return false;
-          }
-          return true;
-        }, null, 'presence');
-        setTimeout(function() { if (!joined) { joined = true; conn.deleteHandler(h); console.warn('Join timed out (no 201/error received)'); resolve(); } }, 4000);
-        conn.send(presence);
-        console.log('Sent join presence to', roomJid + '/' + nick);
+      // ── Step 3: find "AI NSFW" room from Candy's known rooms ──────────────
+      var rooms = {};
+      try { rooms = Candy.Core.getRooms() || {}; } catch(e) { console.warn('getRooms error:', e); }
+      var roomJids = Object.keys(rooms);
+      console.log('Known rooms (' + roomJids.length + '):');
+      roomJids.forEach(function(jid) {
+        var r = rooms[jid];
+        var name = (r && r.getName && r.getName()) || jid;
+        console.log(' •', jid, '→', name);
       });
-      if (joinError) {
-        console.error('Room join failed:', joinError);
-        console.groupEnd();
-        return;
+
+      // Find AI NSFW by name or JID substring
+      var testRoomJid = null;
+      roomJids.forEach(function(jid) {
+        var r = rooms[jid];
+        var name = ((r && r.getName && r.getName()) || '').toLowerCase();
+        if (name.includes('nsfw') || name.includes('ai nsfw') || jid.toLowerCase().includes('nsfw')) {
+          testRoomJid = jid;
+        }
+      });
+      if (!testRoomJid) {
+        console.warn('AI NSFW room not found in Candy rooms. Trying fallback JID...');
+        testRoomJid = 'ai_nsfw@conference.newchat.literotica.com';
+      }
+      console.log('Using test room:', testRoomJid);
+
+      // ── Step 4: probe Literotica's group-chat creation HTTP API ────────────
+      // When the web UI creates a group chat it must call a backend endpoint.
+      // Try the most likely candidates and log what comes back.
+      console.group('HTTP API probe for group-chat creation');
+      var apiCandidates = [
+        { method: 'GET',  url: 'https://literotica.com/api/netchat/rooms' },
+        { method: 'GET',  url: 'https://literotica.com/api/netchat/groupchat' },
+        { method: 'GET',  url: 'https://literotica.com/netchat/rooms' },
+        { method: 'GET',  url: 'https://literotica.com/netchat/groupchat' },
+        { method: 'GET',  url: 'https://chat.literotica.com/api/rooms' },
+        { method: 'GET',  url: 'https://chat.literotica.com/netchat/rooms' },
+      ];
+      for (var i = 0; i < apiCandidates.length; i++) {
+        var c = apiCandidates[i];
+        try {
+          var r2 = await fetch(c.url, {method: c.method, credentials: 'include'});
+          var body = await r2.text();
+          console.log(c.method, c.url, '→', r2.status, r2.headers.get('content-type'), body.slice(0,200));
+        } catch(e) {
+          console.log(c.method, c.url, '→ fetch error:', e.message);
+        }
+      }
+      console.groupEnd();
+
+      // ── Step 5: intercept next XHR/fetch to spot group-chat API calls ──────
+      // Install a one-time monkey-patch — then manually click "Create Group Chat"
+      // in the web UI and check the console for the intercepted request.
+      if (!window._gcPatchActive) {
+        window._gcPatchActive = true;
+        var _origFetch = window.fetch;
+        window.fetch = async function(input, init) {
+          var url = typeof input === 'string' ? input : (input && input.url) || String(input);
+          if (/room|group|chat|invite|muc/i.test(url)) {
+            console.warn('[FETCH INTERCEPT]', (init && init.method) || 'GET', url,
+              init && init.body ? 'body=' + String(init.body).slice(0,300) : '');
+          }
+          return _origFetch.apply(this, arguments);
+        };
+        var _origXHRopen = XMLHttpRequest.prototype.open;
+        XMLHttpRequest.prototype.open = function(method, url) {
+          if (/room|group|chat|invite|muc/i.test(url)) {
+            console.warn('[XHR INTERCEPT]', method, url);
+          }
+          return _origXHRopen.apply(this, arguments);
+        };
+        console.log('%cNetwork interceptor armed. Now use the web UI to create a Group Chat — any matching XHR/fetch will be logged here.', 'color:#ff9800;font-weight:bold');
+        console.log('(interceptor stays active until page reload)');
+      } else {
+        console.log('Network interceptor already armed from a previous run.');
       }
 
-      // ── Step 4: fetch config form then submit (GET then SET) ───────────────
-      await new Promise(function(resolve) {
-        // First GET the config form so we know what fields the server supports
-        var getIq = Strophe.xmlElement('iq', {type:'get', to: roomJid, id: 'cfg-get-' + Date.now()});
-        getIq.appendChild(Strophe.xmlElement('query', {'xmlns':'http://jabber.org/protocol/muc#owner'}));
-        conn.sendIQ(getIq, function(form) {
-          console.log('Config form received (fields):',
-            Array.from(form.querySelectorAll('field')).map(function(f) { return f.getAttribute('var'); }).join(', '));
-          // Now submit with our desired values
-          var setIq = Strophe.xmlElement('iq', {type:'set', to: roomJid, id: 'cfg-set-' + Date.now()});
-          var query = Strophe.xmlElement('query', {'xmlns':'http://jabber.org/protocol/muc#owner'});
-          var x = Strophe.xmlElement('x', {'xmlns':'jabber:x:data', type:'submit'});
-          function field(v, val, type) {
-            var f = Strophe.xmlElement('field', {'var': v});
-            if (type) f.setAttribute('type', type);
-            var value = Strophe.xmlElement('value');
-            value.textContent = val;
-            f.appendChild(value);
-            return f;
-          }
-          x.appendChild(field('FORM_TYPE',                     'http://jabber.org/protocol/muc#roomconfig', 'hidden'));
-          x.appendChild(field('muc#roomconfig_publicroom',     '0'));
-          x.appendChild(field('muc#roomconfig_membersonly',    '1'));
-          x.appendChild(field('muc#roomconfig_persistentroom', '0'));
-          x.appendChild(field('muc#roomconfig_whois',          'anyone'));
-          query.appendChild(x);
-          setIq.appendChild(query);
-          conn.sendIQ(setIq, function(result) {
-            console.log('Room config IQ result:', result.getAttribute('type'));
-            resolve();
-          }, function(err) {
-            var full = Strophe.serialize(err);
-            console.warn('Room config IQ error (full):', full);
-            resolve();
-          });
-        }, function(err) {
-          var full = Strophe.serialize(err);
-          console.warn('Config form GET error (full):', full);
-          resolve();
-        });
-      });
-
-      // ── Step 5: send a mediated invite ────────────────────────────────────
-      // Uses the room's own address as the target JID for the demo (no real user needed).
-      // To invite a real user: change targetJid to e.g. 'Username@newchat.literotica.com'
-      console.log('Mediated invite (to self for demo)...');
-      var selfJid = myJid ? myJid.split('/')[0] : nick + '@newchat.literotica.com';
-      var invMsg = Strophe.xmlElement('message', {to: roomJid});
+      // ── Step 6: test mediated invite (room → target) ───────────────────────
+      // Sends an invite from inside the room — only works if we're a member/owner.
+      // For testing, invite ourselves so it doesn't bother anyone.
+      console.group('Invite tests on ' + testRoomJid);
+      var invMsg = Strophe.xmlElement('message', {to: testRoomJid});
       var invX   = Strophe.xmlElement('x', {'xmlns':'http://jabber.org/protocol/muc#user'});
       var invite = Strophe.xmlElement('invite', {to: selfJid});
-      invite.appendChild(Strophe.xmlElement('reason')).textContent = 'group chat test';
+      invite.appendChild(Strophe.xmlElement('reason')).textContent = 'group chat test (mediated)';
       invX.appendChild(invite);
       invMsg.appendChild(invX);
       conn.send(invMsg);
-      console.log('Sent mediated invite to', selfJid);
+      console.log('Sent mediated invite (room→self)');
 
-      // ── Step 6: send a direct (jabber:x:conference) invite ────────────────
-      console.log('Direct invite (jabber:x:conference)...');
+      // ── Step 7: test direct invite (user → target) ─────────────────────────
       var dirMsg = Strophe.xmlElement('message', {to: selfJid});
-      var dirX   = Strophe.xmlElement('x', {'xmlns':'jabber:x:conference', jid: roomJid});
+      var dirX   = Strophe.xmlElement('x', {'xmlns':'jabber:x:conference', jid: testRoomJid});
       dirX.setAttribute('reason', 'group chat test (direct)');
       dirMsg.appendChild(dirX);
       conn.send(dirMsg);
-      console.log('Sent direct invite');
+      console.log('Sent direct invite (user→self, jabber:x:conference)');
 
-      // ── Step 7: leave the test room ───────────────────────────────────────
+      // ── Step 8: query room info to confirm we can read it ──────────────────
       await new Promise(function(resolve) {
-        setTimeout(function() {
-          var leave = Strophe.xmlElement('presence', {to: roomJid + '/' + nick, type: 'unavailable'});
-          conn.send(leave);
-          console.log('Left room');
+        var iq = Strophe.xmlElement('iq', {type:'get', to: testRoomJid, id: 'disco-' + Date.now()});
+        iq.appendChild(Strophe.xmlElement('query', {'xmlns':'http://jabber.org/protocol/disco#info'}));
+        conn.sendIQ(iq, function(res) {
+          var identity = res.querySelector('identity');
+          var features = Array.from(res.querySelectorAll('feature')).map(function(f) { return f.getAttribute('var'); });
+          console.log('Room disco identity:', identity ? identity.getAttribute('name') + ' / ' + identity.getAttribute('type') : 'none');
+          console.log('Room features:', features.join(', '));
           resolve();
-        }, 1500);
+        }, function(err) {
+          console.warn('disco#info error:', Strophe.serialize(err).slice(0, 300));
+          resolve();
+        });
       });
+      console.groupEnd();
 
-      console.log('%cAll steps completed. Check Network tab for BOSH stanzas.', 'color:#4caf50');
+      console.log('%cAll steps complete.', 'color:#4caf50');
       console.groupEnd();
     })();
   `).catch(function(e) { console.error('[Group Chat Test] JS error:', e); });
