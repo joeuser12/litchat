@@ -3046,16 +3046,18 @@ function runGroupChatTest() {
       var nick = myJid ? myJid.split('@')[0] : 'test';
       var selfJid = myJid ? myJid.split('/')[0] : nick + '@newchat.literotica.com';
 
-      // XEP-0106: escape special chars in JID localpart (space is the only one seen in literotica rooms)
+      // XEP-0106: escape special chars in JID localpart
+      // Use fromCharCode(92) for backslash to avoid template-literal double-processing
+      var BS = String.fromCharCode(92);
       function escapeRoomJid(jid) {
         var at = jid.indexOf('@');
         if (at < 0) return jid;
         var local = jid.slice(0, at)
-          .split(' ').join('\\20')
-          .split('"').join('\\22')
-          .split('&').join('\\26')
-          .split("'").join('\\27')
-          .split(':').join('\\3a');
+          .split(' ').join(BS + '20')
+          .split('"').join(BS + '22')
+          .split('&').join(BS + '26')
+          .split("'").join(BS + '27')
+          .split(':').join(BS + '3a');
         return local + jid.slice(at);
       }
 
