@@ -3048,26 +3048,45 @@ function runGroupChatTest() {
       console.log('Creating room:', roomJid);
 
       // Wait for join confirmation (status 201 = room created, 110 = own presence)
+      var joinError = null;
       await new Promise(function(resolve) {
         var presence = Strophe.xmlElement('presence', {to: roomJid + '/' + nick});
         presence.appendChild(Strophe.xmlElement('x', {'xmlns': 'http://jabber.org/protocol/muc'}));
         var joined = false;
+        // Don't filter by from — catch all presences and filter manually so we see everything
         var h = conn.addHandler(function(pres) {
           if (joined) return false;
+          var from = pres.getAttribute('from') || '';
+          var type = pres.getAttribute('type') || '';
+          if (!from.toLowerCase().startsWith(roomJid.toLowerCase())) return true; // not our room
           var statuses = Array.from(pres.querySelectorAll('status')).map(function(s) { return s.getAttribute('code'); });
-          console.log('Join presence received, status codes:', statuses.join(',') || '(none)');
-          if (statuses.includes('110') || statuses.includes('201')) {
+          var fullXml = Strophe.serialize(pres);
+          console.log('Join presence from server:', fullXml);
+          if (type === 'error') {
+            joinError = fullXml;
             joined = true;
+            conn.deleteHandler(h);
+            resolve();
+            return false;
+          }
+          if (statuses.includes('110') || statuses.includes('201')) {
+            console.log('Join confirmed, status codes:', statuses.join(','));
+            joined = true;
+            conn.deleteHandler(h);
             resolve();
             return false;
           }
           return true;
-        }, null, 'presence', null, null, roomJid + '/' + nick);
-        // Fallback: resolve after 3s even if we don't get a 201
-        setTimeout(function() { if (!joined) { joined = true; conn.deleteHandler(h); console.warn('Join timed out waiting for 201, proceeding anyway'); resolve(); } }, 3000);
+        }, null, 'presence');
+        setTimeout(function() { if (!joined) { joined = true; conn.deleteHandler(h); console.warn('Join timed out (no 201/error received)'); resolve(); } }, 4000);
         conn.send(presence);
-        console.log('Sent join presence, waiting for server confirmation...');
+        console.log('Sent join presence to', roomJid + '/' + nick);
       });
+      if (joinError) {
+        console.error('Room join failed:', joinError);
+        console.groupEnd();
+        return;
+      }
 
       // ── Step 4: fetch config form then submit (GET then SET) ───────────────
       await new Promise(function(resolve) {
