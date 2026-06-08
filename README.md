@@ -21,6 +21,12 @@ Built with [Electron](https://www.electronjs.org/) around the site's existing Ca
 - Photo album manager — track active albums, set expiry (1h–7d), enable IP watermarking, or delete albums from the **Photo Albums** menu
 - Right-click any sent photo thumbnail to remove that image from the album
 
+## Before you start
+
+**Close the Literotica chat tab in your browser before launching the app.**
+
+Literotica's chat server keeps your session alive for up to a minute after you close a browser tab. If the server still thinks you are connected, the app will be unable to establish its own connection. If the app appears to hang on startup, close any Literotica tabs in your browser, wait about a minute, then try again. The app will show a warning banner if it detects this situation.
+
 ## Installation
 
 - **Linux** — [download LitChat-linux.AppImage](../../releases/latest/download/LitChat-linux.AppImage), make it executable, and run it
