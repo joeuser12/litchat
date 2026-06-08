@@ -224,7 +224,7 @@ async function notifyDMs(messages) {
   // If the window is focused and the sender's DM pane is the active tab,
   // the user is already reading — skip the notification.
   let activePaneJid = null;
-  if (win.isFocused()) {
+  if (win && !win.isDestroyed() && win.isFocused()) {
     try {
       activePaneJid = await win.webContents.executeJavaScript(
         `(function(){ var t = document.querySelector('#chat-tabs li.active[data-roomjid]'); return t ? t.dataset.roomjid : null; })()`
@@ -238,7 +238,7 @@ async function notifyDMs(messages) {
     const nick = nickOf(m.from);
     sendNotification({
       title: `DM from ${nick}`,
-      body: m.body.length > 120 ? m.body.slice(0, 120) + '…' : m.body,
+      body: (m.body || '').length > 120 ? m.body.slice(0, 120) + '…' : (m.body || ''),
     });
     if (settings.prefs?.away && m.from && m.body) {
       const awayMsg = settings.prefs.awayMessage || "I'm currently away.";
@@ -782,7 +782,8 @@ function createWindow() {
     // Poll for the chat UI to be ready (login complete + Candy initialised).
     // #roomPanel-tab only exists once the user is logged in and the room bar has rendered.
     let tries = 0;
-    readyPoll = setInterval(async () => {
+    let thisPoll;
+    thisPoll = readyPoll = setInterval(async () => {
       let ready = false;
       try {
         ready = await win.webContents.executeJavaScript(
@@ -791,8 +792,8 @@ function createWindow() {
       } catch {}
       tries++;
       if (ready || tries > 240) { // give up after ~2 min
-        clearInterval(readyPoll);
-        readyPoll = null;
+        clearInterval(thisPoll);
+        if (readyPoll === thisPoll) readyPoll = null;
         if (!ready) return;
         const autoJoins = Object.entries(settings.favourites || {})
           .filter(([, v]) => v.autoJoin);
@@ -3004,6 +3005,10 @@ function createAppMenu() {
         settings.prefs.away = menuItem.checked;
         saveSettings();
         if (!menuItem.checked) { awayRepliedTo.clear(); awayConversations.clear(); }
+        createAppMenu();
+        updateTray();
+        if (win && !win.isDestroyed())
+          win.webContents.executeJavaScript(`if (window._litSetAway) window._litSetAway(${menuItem.checked});`).catch(() => {});
       },
     },
     {
@@ -3251,7 +3256,7 @@ function setupAutoUpdater() {
 
 function invalidateDMAlbum(partnerUsername) {
   const token = settings.dmAlbumsByPartner?.[partnerUsername];
-  if (token) delete settings.picpubAlbums[token];
+  if (token && settings.picpubAlbums) delete settings.picpubAlbums[token];
   if (settings.dmAlbumsByPartner) delete settings.dmAlbumsByPartner[partnerUsername];
   saveSettings();
 }
@@ -3433,10 +3438,12 @@ ipcMain.handle('picpub:contextMenu', (_e, token, hash) => {
 // ── Link previews ────────────────────────────────────────────────────────────
 
 const linkPreviewCache = new Map(); // url → { result, ts }
+const LINK_CACHE_MAX = 200;
 
 ipcMain.handle('links:preview', async (_e, url) => {
   const cached = linkPreviewCache.get(url);
   if (cached && Date.now() - cached.ts < 3_600_000) return cached.result;
+  if (linkPreviewCache.size >= LINK_CACHE_MAX) linkPreviewCache.delete(linkPreviewCache.keys().next().value);
   try {
     const res = await fetch(url, {
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LitChat/1.0)' },
@@ -4126,6 +4133,10 @@ function attachBOSHLogger() {
       }
     }
 
+    if (method === 'Network.loadingFailed') {
+      pendingRequests.delete(params.requestId);
+    }
+
     if (method === 'Network.responseReceived') {
       const { requestId, response } = params;
       const ct = response.mimeType || '';
@@ -4171,7 +4182,7 @@ function attachBOSHLogger() {
           : result.body;
         const received = extractMessages(body, 'received');
         writeMessages(received);
-        notifyDMs(received);
+        await notifyDMs(received);
         notifyRoomMessages(received);
         handlePresence(extractPresence(body));
       } catch (_) {}
