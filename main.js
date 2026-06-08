@@ -777,10 +777,31 @@ function createWindow() {
           `!!document.querySelector('#roomPanel-tab')`
         );
       } catch {}
-      if (ready || ++tries > 240) { // give up after ~2 min
+      tries++;
+      if (!ready && tries === 60) {
+        win.webContents.executeJavaScript(`
+          (function() {
+            if (!document.getElementById('candy')) return;
+            var id = 'lit-bosh-hint';
+            if (document.getElementById(id)) return;
+            var d = document.createElement('div');
+            d.id = id;
+            d.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:#b45309;color:#fff;padding:10px 44px 10px 14px;font-size:13px;font-family:sans-serif;box-shadow:0 2px 8px rgba(0,0,0,.4);line-height:1.5';
+            d.innerHTML = '<strong>⚠ Still connecting…</strong> If you have Literotica open in a browser tab, close it and wait up to a minute — the server may still think you are connected. The app will reconnect automatically.';
+            var x = document.createElement('button');
+            x.textContent = '✕';
+            x.style.cssText = 'position:absolute;top:50%;right:12px;transform:translateY(-50%);background:none;border:none;font-size:18px;cursor:pointer;color:#fff;padding:0;line-height:1';
+            x.onclick = function() { d.remove(); };
+            d.appendChild(x);
+            document.body.appendChild(d);
+          })()
+        `).catch(() => {});
+      }
+      if (ready || tries > 240) { // give up after ~2 min
         clearInterval(readyPoll);
         readyPoll = null;
         if (!ready) return;
+        win.webContents.executeJavaScript(`document.getElementById('lit-bosh-hint')?.remove()`).catch(() => {});
         const autoJoins = Object.entries(settings.favourites || {})
           .filter(([, v]) => v.autoJoin);
         (async () => {
