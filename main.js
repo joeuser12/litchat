@@ -778,30 +778,10 @@ function createWindow() {
         );
       } catch {}
       tries++;
-      if (!ready && tries === 60) {
-        win.webContents.executeJavaScript(`
-          (function() {
-            if (!document.getElementById('candy')) return;
-            var id = 'lit-bosh-hint';
-            if (document.getElementById(id)) return;
-            var d = document.createElement('div');
-            d.id = id;
-            d.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:#b45309;color:#fff;padding:10px 44px 10px 14px;font-size:13px;font-family:sans-serif;box-shadow:0 2px 8px rgba(0,0,0,.4);line-height:1.5';
-            d.innerHTML = '<strong>⚠ Still connecting…</strong> If you have Literotica open in a browser tab, close it and wait up to a minute — the server may still think you are connected. The app will reconnect automatically.';
-            var x = document.createElement('button');
-            x.textContent = '✕';
-            x.style.cssText = 'position:absolute;top:50%;right:12px;transform:translateY(-50%);background:none;border:none;font-size:18px;cursor:pointer;color:#fff;padding:0;line-height:1';
-            x.onclick = function() { d.remove(); };
-            d.appendChild(x);
-            document.body.appendChild(d);
-          })()
-        `).catch(() => {});
-      }
       if (ready || tries > 240) { // give up after ~2 min
         clearInterval(readyPoll);
         readyPoll = null;
         if (!ready) return;
-        win.webContents.executeJavaScript(`document.getElementById('lit-bosh-hint')?.remove()`).catch(() => {});
         const autoJoins = Object.entries(settings.favourites || {})
           .filter(([, v]) => v.autoJoin);
         (async () => {
@@ -844,6 +824,43 @@ function createWindow() {
         injectEmojiPicker();
         injectDMHistory();
         injectImageSharing();
+        // After readyPoll succeeds the BOSH connection may still be stalled (e.g.
+        // because an existing browser session holds the slot). Watch for rooms to
+        // appear; if none show up within 30 s, surface a dismissible hint.
+        win.webContents.executeJavaScript(`
+          (function() {
+            var id = 'lit-bosh-hint';
+            if (document.querySelector('#chat-tabs li[data-roomjid]')) return;
+            var timer = setTimeout(function() {
+              if (document.querySelector('#chat-tabs li[data-roomjid]')) return;
+              if (document.getElementById(id)) return;
+              var d = document.createElement('div');
+              d.id = id;
+              d.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:#b45309;color:#fff;padding:10px 130px 10px 14px;font-size:13px;font-family:sans-serif;box-shadow:0 2px 8px rgba(0,0,0,.4);line-height:1.5';
+              d.innerHTML = '<strong>⚠ Connection stuck…</strong> If you have Literotica open in a browser tab, close it and wait up to a minute — the server may still think you are connected.';
+              var reload = document.createElement('button');
+              reload.textContent = 'Reload';
+              reload.style.cssText = 'position:absolute;top:50%;right:48px;transform:translateY(-50%);background:#fff;border:none;font-size:12px;font-weight:bold;cursor:pointer;color:#b45309;padding:3px 10px;border-radius:3px;line-height:1.6';
+              reload.onclick = function() { window.location.reload(); };
+              d.appendChild(reload);
+              var x = document.createElement('button');
+              x.textContent = '✕';
+              x.style.cssText = 'position:absolute;top:50%;right:12px;transform:translateY(-50%);background:none;border:none;font-size:18px;cursor:pointer;color:#fff;padding:0;line-height:1';
+              x.onclick = function() { d.remove(); };
+              d.appendChild(x);
+              document.body.appendChild(d);
+            }, 30000);
+            var tabs = document.querySelector('#chat-tabs');
+            if (!tabs) return;
+            var obs = new MutationObserver(function() {
+              if (document.querySelector('#chat-tabs li[data-roomjid]')) {
+                clearTimeout(timer); obs.disconnect();
+                var el = document.getElementById(id); if (el) el.remove();
+              }
+            });
+            obs.observe(tabs, { childList: true, subtree: true });
+          })()
+        `).catch(() => {});
       }
     }, 500);
   });
