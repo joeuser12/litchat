@@ -220,9 +220,21 @@ function notifyRoomMessages(messages) {
   }
 }
 
-function notifyDMs(messages) {
+async function notifyDMs(messages) {
+  // If the window is focused and the sender's DM pane is the active tab,
+  // the user is already reading — skip the notification.
+  let activePaneJid = null;
+  if (win.isFocused()) {
+    try {
+      activePaneJid = await win.webContents.executeJavaScript(
+        `(function(){ var t = document.querySelector('#chat-tabs li.active[data-roomjid]'); return t ? t.dataset.roomjid : null; })()`
+      );
+    } catch {}
+  }
   for (const m of messages) {
     if (m.type !== 'chat' || m.direction !== 'received') continue;
+    const senderJid = (m.from || '').split('/')[0];
+    if (activePaneJid && senderJid === activePaneJid) continue;
     const nick = nickOf(m.from);
     sendNotification({
       title: `DM from ${nick}`,
