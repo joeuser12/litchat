@@ -2880,18 +2880,6 @@ function buildPhotoAlbumsSubmenu() {
 }
 
 function createAppMenu() {
-  const favs = Object.entries(settings.favourites ?? {});
-  const roomItems = favs.length
-    ? [
-        ...favs.map(([jid, { name }]) => ({
-          label: name,
-          click: () => { win.show(); win.focus(); joinRoom(jid); },
-        })),
-        { type: 'separator' },
-        { label: 'Manage Rooms…', click: () => openRoomManager() },
-      ]
-    : [{ label: 'Manage Rooms…', click: () => openRoomManager() }];
-
   const currentTheme = settings.theme || 'dark';
   const themeItems = THEMES.map(({ id, label }) => ({
     label,
@@ -2911,220 +2899,225 @@ function createAppMenu() {
     { label: 'New Profile…', click: () => createProfile() },
   ];
 
-  const prefsItems = [
-    {
-      label: 'Show Favourite Emoji Bar',
-      type: 'checkbox',
-      checked: settings.prefs?.showFavEmoji !== false,
-      click: (menuItem) => {
-        if (!settings.prefs) settings.prefs = {};
-        settings.prefs.showFavEmoji = menuItem.checked;
-        saveSettings();
-        const on = menuItem.checked;
-        win.webContents.executeJavaScript(`
-          localStorage.setItem('lit_emoji_favs_on', '${on ? '1' : '0'}');
-          var bar = document.getElementById('lit-emoji-favs');
-          if (bar) {
-            bar.style.display = '${on ? 'flex' : 'none'}';
-            if (${on} && window._litUpdateFavBar) window._litUpdateFavBar(bar);
-          }
-        `).catch(() => {});
-      },
-    },
-    {
-      label: 'Notifications',
-      type: 'checkbox',
-      checked: settings.prefs?.notifications !== false,
-      click: (menuItem) => {
-        if (!settings.prefs) settings.prefs = {};
-        settings.prefs.notifications = menuItem.checked;
-        saveSettings();
-      },
-    },
-    {
-      label: 'Notification Sound',
-      type: 'checkbox',
-      checked: settings.prefs?.notificationSound !== false,
-      click: (menuItem) => {
-        if (!settings.prefs) settings.prefs = {};
-        settings.prefs.notificationSound = menuItem.checked;
-        saveSettings();
-      },
-    },
-    {
-      label: 'Photo Link Duration',
-      submenu: [
-        { ttl: '1h', label: '1 hour' },
-        { ttl: '6h', label: '6 hours' },
-        { ttl: '24h', label: '24 hours' },
-        { ttl: '7d', label: '7 days' },
-      ].map(({ ttl, label }) => ({
-        label,
-        type: 'checkbox',
-        checked: (settings.prefs?.photoTtl ?? '1h') === ttl,
-        click: () => {
-          if (!settings.prefs) settings.prefs = {};
-          settings.prefs.photoTtl = ttl;
-          saveSettings();
-          createAppMenu();
-        },
-      })),
-    },
-    {
-      label: 'Text Size',
-      submenu: FONT_SIZES.map(({ px, label }) => ({
-        label,
-        type: 'checkbox',
-        checked: (settings.prefs?.fontSize ?? 15) === px,
-        click: async () => {
-          if (!settings.prefs) settings.prefs = {};
-          settings.prefs.fontSize = px;
-          saveSettings();
-          await setTheme(settings.theme || 'dark');
-        },
-      })),
-    },
-    { type: 'separator' },
-    {
-      label: 'Watermark IP on Shared Photos',
-      type: 'checkbox',
-      checked: settings.prefs?.watermarkIp ?? false,
-      click: (menuItem) => {
-        if (!settings.prefs) settings.prefs = {};
-        settings.prefs.watermarkIp = menuItem.checked;
-        saveSettings();
-      },
-    },
-    { type: 'separator' },
-    {
-      label: 'Away',
-      type: 'checkbox',
-      checked: settings.prefs?.away ?? false,
-      click: (menuItem) => {
-        if (!settings.prefs) settings.prefs = {};
-        settings.prefs.away = menuItem.checked;
-        saveSettings();
-        if (!menuItem.checked) { awayRepliedTo.clear(); awayConversations.clear(); }
-        createAppMenu();
-        updateTray();
-        if (win && !win.isDestroyed())
-          win.webContents.executeJavaScript(`if (window._litSetAway) window._litSetAway(${menuItem.checked});`).catch(() => {});
-      },
-    },
-    {
-      label: 'Keyword Alerts…',
-      click: async () => {
-        const current = (settings.prefs?.keywords || []).join('\n');
-        const result = await win.webContents.executeJavaScript(`
-          new Promise(function(resolve) {
-            var overlay = document.createElement('div');
-            overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.72);z-index:999999;display:flex;align-items:center;justify-content:center;';
-            var box = document.createElement('div');
-            box.style.cssText = 'background:#1a1a2a;border:1px solid #3a3a4a;border-radius:10px;padding:20px 20px 16px;width:380px;font-family:system-ui,sans-serif;box-shadow:0 8px 32px rgba(0,0,0,0.6);';
-            var lbl = document.createElement('div');
-            lbl.textContent = 'Keyword alerts — one per line, case-insensitive';
-            lbl.style.cssText = 'color:#aaa;font-size:12px;margin-bottom:8px;letter-spacing:0.04em;text-transform:uppercase;';
-            var hint = document.createElement('div');
-            hint.textContent = 'Notifies whenever a room message contains any of these words (all rooms, 60s cooldown per room).';
-            hint.style.cssText = 'color:#666;font-size:11px;margin-bottom:10px;line-height:1.4;';
-            var ta = document.createElement('textarea');
-            ta.value = ${JSON.stringify(current)};
-            ta.rows = 6;
-            ta.placeholder = 'e.g.\\nai_joe\\nyour name\\nhello';
-            ta.style.cssText = 'width:100%;padding:8px 10px;background:#0f0f17;border:1px solid #3a3a4a;border-radius:6px;color:#e0e0e8;font-size:14px;outline:none;box-sizing:border-box;resize:vertical;font-family:inherit;';
-            ta.addEventListener('focus', function() { ta.style.borderColor='#7c5cbf'; });
-            ta.addEventListener('blur',  function() { ta.style.borderColor='#3a3a4a'; });
-            var btns = document.createElement('div');
-            btns.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:14px;';
-            var cancel = document.createElement('button');
-            cancel.textContent = 'Cancel';
-            cancel.style.cssText = 'padding:6px 16px;background:transparent;border:1px solid #3a3a4a;border-radius:6px;color:#aaa;cursor:pointer;font-size:13px;';
-            var save = document.createElement('button');
-            save.textContent = 'Save';
-            save.style.cssText = 'padding:6px 18px;background:#7c5cbf;border:none;border-radius:6px;color:#fff;cursor:pointer;font-size:13px;';
-            function done(v) { document.body.removeChild(overlay); resolve(v); }
-            cancel.onclick = function() { done(null); };
-            save.onclick   = function() { done(ta.value); };
-            ta.addEventListener('keydown', function(e) {
-              if (e.key === 'Escape') { e.preventDefault(); done(null); }
-            });
-            btns.appendChild(cancel); btns.appendChild(save);
-            box.appendChild(lbl); box.appendChild(hint); box.appendChild(ta); box.appendChild(btns);
-            overlay.appendChild(box);
-            document.body.appendChild(overlay);
-            setTimeout(function() { ta.focus(); }, 30);
-          })
-        `).catch(() => null);
-        if (result !== null && result !== undefined) {
-          if (!settings.prefs) settings.prefs = {};
-          settings.prefs.keywords = result.split('\n').map(k => k.trim()).filter(Boolean);
-          saveSettings();
-        }
-      },
-    },
-    {
-      label: 'Set Away Message…',
-      click: async () => {
-        const current = settings.prefs?.awayMessage || "I'm currently away.";
-        const result = await win.webContents.executeJavaScript(`
-          new Promise(function(resolve) {
-            var overlay = document.createElement('div');
-            overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.72);z-index:999999;display:flex;align-items:center;justify-content:center;';
-            var box = document.createElement('div');
-            box.style.cssText = 'background:#1a1a2a;border:1px solid #3a3a4a;border-radius:10px;padding:20px 20px 16px;width:380px;font-family:system-ui,sans-serif;box-shadow:0 8px 32px rgba(0,0,0,0.6);';
-            var lbl = document.createElement('div');
-            lbl.textContent = 'Away message';
-            lbl.style.cssText = 'color:#aaa;font-size:12px;margin-bottom:8px;letter-spacing:0.04em;text-transform:uppercase;';
-            var inp = document.createElement('input');
-            inp.type = 'text';
-            inp.value = ${JSON.stringify(current)};
-            inp.style.cssText = 'width:100%;padding:8px 10px;background:#0f0f17;border:1px solid #3a3a4a;border-radius:6px;color:#e0e0e8;font-size:14px;outline:none;box-sizing:border-box;';
-            inp.addEventListener('focus', function() { inp.style.borderColor='#7c5cbf'; });
-            inp.addEventListener('blur',  function() { inp.style.borderColor='#3a3a4a'; });
-            var btns = document.createElement('div');
-            btns.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:14px;';
-            var cancel = document.createElement('button');
-            cancel.textContent = 'Cancel';
-            cancel.style.cssText = 'padding:6px 16px;background:transparent;border:1px solid #3a3a4a;border-radius:6px;color:#aaa;cursor:pointer;font-size:13px;';
-            var save = document.createElement('button');
-            save.textContent = 'Save';
-            save.style.cssText = 'padding:6px 18px;background:#7c5cbf;border:none;border-radius:6px;color:#fff;cursor:pointer;font-size:13px;';
-            function done(v) { document.body.removeChild(overlay); resolve(v); }
-            cancel.onclick = function() { done(null); };
-            save.onclick   = function() { done(inp.value); };
-            inp.addEventListener('keydown', function(e) {
-              if (e.key === 'Enter')  { e.preventDefault(); done(inp.value); }
-              if (e.key === 'Escape') { e.preventDefault(); done(null); }
-            });
-            btns.appendChild(cancel); btns.appendChild(save);
-            box.appendChild(lbl); box.appendChild(inp); box.appendChild(btns);
-            overlay.appendChild(box);
-            document.body.appendChild(overlay);
-            setTimeout(function() { inp.focus(); inp.select(); }, 30);
-          })
-        `).catch(() => null);
-        if (result !== null && result !== undefined) {
-          if (!settings.prefs) settings.prefs = {};
-          settings.prefs.awayMessage = result;
-          saveSettings();
-        }
-      },
-    },
-  ];
-
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     {
       label: 'Lit Chat',
       submenu: [
-        { label: 'View Logs',       click: () => openLogViewer() },
+        // ── Chat ────────────────────────────────────────────────────────────
+        { label: 'Manage Rooms…',    click: () => openRoomManager() },
+        { label: 'Photo Albums',     submenu: buildPhotoAlbumsSubmenu() },
+        { label: 'View Logs',        click: () => openLogViewer() },
         { label: 'Edit Lit Profile', click: () => openLinkWindow('https://www.literotica.com/my/#/user/profile') },
-        { label: 'Rooms', submenu: roomItems },
-        { label: 'Photo Albums', submenu: buildPhotoAlbumsSubmenu() },
         { type: 'separator' },
-        { label: 'Theme',   submenu: themeItems },
+        // ── Away / status ────────────────────────────────────────────────────
+        {
+          label: 'Away',
+          type: 'checkbox',
+          checked: settings.prefs?.away ?? false,
+          click: (menuItem) => {
+            if (!settings.prefs) settings.prefs = {};
+            settings.prefs.away = menuItem.checked;
+            saveSettings();
+            if (!menuItem.checked) { awayRepliedTo.clear(); awayConversations.clear(); }
+            createAppMenu();
+            updateTray();
+            if (win && !win.isDestroyed())
+              win.webContents.executeJavaScript(`if (window._litSetAway) window._litSetAway(${menuItem.checked});`).catch(() => {});
+          },
+        },
+        {
+          label: 'Set Away Message…',
+          click: async () => {
+            const current = settings.prefs?.awayMessage || "I'm currently away.";
+            const result = await win.webContents.executeJavaScript(`
+              new Promise(function(resolve) {
+                var overlay = document.createElement('div');
+                overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.72);z-index:999999;display:flex;align-items:center;justify-content:center;';
+                var box = document.createElement('div');
+                box.style.cssText = 'background:#1a1a2a;border:1px solid #3a3a4a;border-radius:10px;padding:20px 20px 16px;width:380px;font-family:system-ui,sans-serif;box-shadow:0 8px 32px rgba(0,0,0,0.6);';
+                var lbl = document.createElement('div');
+                lbl.textContent = 'Away message';
+                lbl.style.cssText = 'color:#aaa;font-size:12px;margin-bottom:8px;letter-spacing:0.04em;text-transform:uppercase;';
+                var inp = document.createElement('input');
+                inp.type = 'text';
+                inp.value = ${JSON.stringify(current)};
+                inp.style.cssText = 'width:100%;padding:8px 10px;background:#0f0f17;border:1px solid #3a3a4a;border-radius:6px;color:#e0e0e8;font-size:14px;outline:none;box-sizing:border-box;';
+                inp.addEventListener('focus', function() { inp.style.borderColor='#7c5cbf'; });
+                inp.addEventListener('blur',  function() { inp.style.borderColor='#3a3a4a'; });
+                var btns = document.createElement('div');
+                btns.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:14px;';
+                var cancel = document.createElement('button');
+                cancel.textContent = 'Cancel';
+                cancel.style.cssText = 'padding:6px 16px;background:transparent;border:1px solid #3a3a4a;border-radius:6px;color:#aaa;cursor:pointer;font-size:13px;';
+                var save = document.createElement('button');
+                save.textContent = 'Save';
+                save.style.cssText = 'padding:6px 18px;background:#7c5cbf;border:none;border-radius:6px;color:#fff;cursor:pointer;font-size:13px;';
+                function done(v) { document.body.removeChild(overlay); resolve(v); }
+                cancel.onclick = function() { done(null); };
+                save.onclick   = function() { done(inp.value); };
+                inp.addEventListener('keydown', function(e) {
+                  if (e.key === 'Enter')  { e.preventDefault(); done(inp.value); }
+                  if (e.key === 'Escape') { e.preventDefault(); done(null); }
+                });
+                btns.appendChild(cancel); btns.appendChild(save);
+                box.appendChild(lbl); box.appendChild(inp); box.appendChild(btns);
+                overlay.appendChild(box);
+                document.body.appendChild(overlay);
+                setTimeout(function() { inp.focus(); inp.select(); }, 30);
+              })
+            `).catch(() => null);
+            if (result !== null && result !== undefined) {
+              if (!settings.prefs) settings.prefs = {};
+              settings.prefs.awayMessage = result;
+              saveSettings();
+            }
+          },
+        },
+        { type: 'separator' },
+        // ── Notifications ────────────────────────────────────────────────────
+        {
+          label: 'Notifications',
+          type: 'checkbox',
+          checked: settings.prefs?.notifications !== false,
+          click: (menuItem) => {
+            if (!settings.prefs) settings.prefs = {};
+            settings.prefs.notifications = menuItem.checked;
+            saveSettings();
+          },
+        },
+        {
+          label: 'Notification Sound',
+          type: 'checkbox',
+          checked: settings.prefs?.notificationSound !== false,
+          click: (menuItem) => {
+            if (!settings.prefs) settings.prefs = {};
+            settings.prefs.notificationSound = menuItem.checked;
+            saveSettings();
+          },
+        },
+        {
+          label: 'Keyword Alerts…',
+          click: async () => {
+            const current = (settings.prefs?.keywords || []).join('\n');
+            const result = await win.webContents.executeJavaScript(`
+              new Promise(function(resolve) {
+                var overlay = document.createElement('div');
+                overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.72);z-index:999999;display:flex;align-items:center;justify-content:center;';
+                var box = document.createElement('div');
+                box.style.cssText = 'background:#1a1a2a;border:1px solid #3a3a4a;border-radius:10px;padding:20px 20px 16px;width:380px;font-family:system-ui,sans-serif;box-shadow:0 8px 32px rgba(0,0,0,0.6);';
+                var lbl = document.createElement('div');
+                lbl.textContent = 'Keyword alerts — one per line, case-insensitive';
+                lbl.style.cssText = 'color:#aaa;font-size:12px;margin-bottom:8px;letter-spacing:0.04em;text-transform:uppercase;';
+                var hint = document.createElement('div');
+                hint.textContent = 'Notifies whenever a room message contains any of these words (all rooms, 60s cooldown per room).';
+                hint.style.cssText = 'color:#666;font-size:11px;margin-bottom:10px;line-height:1.4;';
+                var ta = document.createElement('textarea');
+                ta.value = ${JSON.stringify(current)};
+                ta.rows = 6;
+                ta.placeholder = 'e.g.\\nai_joe\\nyour name\\nhello';
+                ta.style.cssText = 'width:100%;padding:8px 10px;background:#0f0f17;border:1px solid #3a3a4a;border-radius:6px;color:#e0e0e8;font-size:14px;outline:none;box-sizing:border-box;resize:vertical;font-family:inherit;';
+                ta.addEventListener('focus', function() { ta.style.borderColor='#7c5cbf'; });
+                ta.addEventListener('blur',  function() { ta.style.borderColor='#3a3a4a'; });
+                var btns = document.createElement('div');
+                btns.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:14px;';
+                var cancel = document.createElement('button');
+                cancel.textContent = 'Cancel';
+                cancel.style.cssText = 'padding:6px 16px;background:transparent;border:1px solid #3a3a4a;border-radius:6px;color:#aaa;cursor:pointer;font-size:13px;';
+                var save = document.createElement('button');
+                save.textContent = 'Save';
+                save.style.cssText = 'padding:6px 18px;background:#7c5cbf;border:none;border-radius:6px;color:#fff;cursor:pointer;font-size:13px;';
+                function done(v) { document.body.removeChild(overlay); resolve(v); }
+                cancel.onclick = function() { done(null); };
+                save.onclick   = function() { done(ta.value); };
+                ta.addEventListener('keydown', function(e) {
+                  if (e.key === 'Escape') { e.preventDefault(); done(null); }
+                });
+                btns.appendChild(cancel); btns.appendChild(save);
+                box.appendChild(lbl); box.appendChild(hint); box.appendChild(ta); box.appendChild(btns);
+                overlay.appendChild(box);
+                document.body.appendChild(overlay);
+                setTimeout(function() { ta.focus(); }, 30);
+              })
+            `).catch(() => null);
+            if (result !== null && result !== undefined) {
+              if (!settings.prefs) settings.prefs = {};
+              settings.prefs.keywords = result.split('\n').map(k => k.trim()).filter(Boolean);
+              saveSettings();
+            }
+          },
+        },
+        { type: 'separator' },
+        // ── Appearance ───────────────────────────────────────────────────────
+        { label: 'Theme',     submenu: themeItems },
+        {
+          label: 'Text Size',
+          submenu: FONT_SIZES.map(({ px, label }) => ({
+            label,
+            type: 'checkbox',
+            checked: (settings.prefs?.fontSize ?? 15) === px,
+            click: async () => {
+              if (!settings.prefs) settings.prefs = {};
+              settings.prefs.fontSize = px;
+              saveSettings();
+              await setTheme(settings.theme || 'dark');
+            },
+          })),
+        },
+        {
+          label: 'Show Favourite Emoji Bar',
+          type: 'checkbox',
+          checked: settings.prefs?.showFavEmoji !== false,
+          click: (menuItem) => {
+            if (!settings.prefs) settings.prefs = {};
+            settings.prefs.showFavEmoji = menuItem.checked;
+            saveSettings();
+            const on = menuItem.checked;
+            win.webContents.executeJavaScript(`
+              localStorage.setItem('lit_emoji_favs_on', '${on ? '1' : '0'}');
+              var bar = document.getElementById('lit-emoji-favs');
+              if (bar) {
+                bar.style.display = '${on ? 'flex' : 'none'}';
+                if (${on} && window._litUpdateFavBar) window._litUpdateFavBar(bar);
+              }
+            `).catch(() => {});
+          },
+        },
+        { type: 'separator' },
+        // ── Photos ───────────────────────────────────────────────────────────
+        {
+          label: 'Photo Link Duration',
+          submenu: [
+            { ttl: '1h', label: '1 hour' },
+            { ttl: '6h', label: '6 hours' },
+            { ttl: '24h', label: '24 hours' },
+            { ttl: '7d', label: '7 days' },
+          ].map(({ ttl, label }) => ({
+            label,
+            type: 'checkbox',
+            checked: (settings.prefs?.photoTtl ?? '1h') === ttl,
+            click: () => {
+              if (!settings.prefs) settings.prefs = {};
+              settings.prefs.photoTtl = ttl;
+              saveSettings();
+              createAppMenu();
+            },
+          })),
+        },
+        {
+          label: 'Watermark IP on Shared Photos',
+          type: 'checkbox',
+          checked: settings.prefs?.watermarkIp ?? false,
+          click: (menuItem) => {
+            if (!settings.prefs) settings.prefs = {};
+            settings.prefs.watermarkIp = menuItem.checked;
+            saveSettings();
+          },
+        },
+        { type: 'separator' },
+        // ── Account ──────────────────────────────────────────────────────────
         { label: 'Profile', submenu: profileItems },
-        { label: 'Preferences', submenu: prefsItems },
         { type: 'separator' },
+        // ── App ──────────────────────────────────────────────────────────────
         (() => {
           if (!app.isPackaged) return { label: 'Check for Updates (dev build)', enabled: false };
           if (updateState === 'ready')       return { label: `Install Update (${updateVersion})…`, click: () => _autoUpdater.quitAndInstall() };
@@ -3132,26 +3125,28 @@ function createAppMenu() {
           if (updateState === 'checking')    return { label: 'Checking for Updates…', enabled: false };
           return { label: 'Check for Updates', click: () => _autoUpdater?.checkForUpdates().catch(() => {}) };
         })(),
-        { label: 'About Lit Chat', click: () => {
-          const { dialog } = require('electron');
-          dialog.showMessageBox(win, {
-            type: 'info',
-            title: 'Lit Chat',
-            message: `Lit Chat v${app.getVersion()}`,
-            detail: 'An Electron wrapper for chat.literotica.com\nBy ai_joe',
-          });
-        }},
+        {
+          label: 'About Lit Chat',
+          click: () => {
+            const { dialog } = require('electron');
+            dialog.showMessageBox(win, {
+              type: 'info',
+              title: 'Lit Chat',
+              message: `Lit Chat v${app.getVersion()}`,
+              detail: 'An Electron wrapper for chat.literotica.com\nBy ai_joe',
+            });
+          },
+        },
         { type: 'separator' },
-        { label: 'Reload',    accelerator: 'CmdOrCtrl+R',      click: () => win.webContents.reload(), visible: false },
+        { label: 'Reload',    accelerator: 'CmdOrCtrl+R',       click: () => win.webContents.reload(), visible: false },
         { label: 'ZoomIn',    accelerator: 'CmdOrCtrl+shift+=', click: () => adjustZoom(+0.5), visible: false },
         { label: 'ZoomIn2',   accelerator: 'CmdOrCtrl+=',       click: () => adjustZoom(+0.5), visible: false },
         { label: 'ZoomOut',   accelerator: 'CmdOrCtrl+shift+-', click: () => adjustZoom(-0.5), visible: false },
         { label: 'ZoomOut2',  accelerator: 'CmdOrCtrl+-',       click: () => adjustZoom(-0.5), visible: false },
         { label: 'ZoomReset', accelerator: 'CmdOrCtrl+shift+0', click: () => adjustZoom(0),    visible: false },
         { label: 'ZoomReset2',accelerator: 'CmdOrCtrl+0',       click: () => adjustZoom(0),    visible: false },
-        { label: 'DevTools', click: () => win.webContents.openDevTools() },
-        { type: 'separator' },
-        { label: 'Quit', accelerator: 'CmdOrCtrl+Q', click: () => app.quit() },
+        { label: 'DevTools',  click: () => win.webContents.openDevTools() },
+        { label: 'Quit',      accelerator: 'CmdOrCtrl+Q', click: () => app.quit() },
       ],
     },
   ]));
