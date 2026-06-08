@@ -1128,9 +1128,19 @@ function injectDMHistory() {
                      'oncontextmenu="window.litChat&&window.litChat.photoContextMenu(this.dataset.lpToken,this.dataset.lpHash);return false;" ' +
                      'style="' + IMG_S + '" title="Click to open album"></a>';
             } else {
-              // linkify
-              body = body.replace(/(https?:\\/\\/[^\\s<>"']+)/g,
-                '<a href="$1" target="_blank" style="color:#818cf8;text-decoration:underline">$1</a>');
+              // Bare picpub album view URL — render as a styled link button
+              var albumHistM = /https?:\/\/picpub\.art\/v\/([a-f0-9]+)(?:\s|$)/.exec(m.body || '');
+              if (albumHistM) {
+                var aHref = 'https://picpub.art/v/' + albumHistM[1];
+                body = '<a href="' + aHref + '" target="_blank" ' +
+                  'style="display:inline-flex;align-items:center;gap:6px;padding:4px 10px;' +
+                  'background:rgba(124,92,191,0.18);border:1px solid rgba(124,92,191,0.45);' +
+                  'border-radius:6px;color:#b39ddb;text-decoration:none;font-size:13px;">📷 View album</a>';
+              } else {
+                // linkify
+                body = body.replace(/(https?:\\/\\/[^\\s<>"']+)/g,
+                  '<a href="$1" target="_blank" style="color:#818cf8;text-decoration:underline">$1</a>');
+              }
             }
           }
           return '<li style="padding:3px 8px;border-bottom:1px solid rgba(255,255,255,0.04);list-style:none">' +
@@ -3677,7 +3687,29 @@ function injectImageSharing() {
           return;
         }
 
-        // Format C: direct image URL from any host (jpg/jpeg/png/gif/webp)
+        // Format C: bare album view URL — picpub.art/v/TOKEN (no hash)
+        // Sent as plain text; app users see a styled link, others click the URL.
+        var albumM = /(https?:\\/\\/picpub\\.art\\/v\\/([a-f0-9]+))(\\s|$)/.exec(text);
+        if (albumM) {
+          li._litPhotoRendered = true;
+          var aUrl = albumM[1], aToken = albumM[2];
+          var link = document.createElement('a');
+          link.href = aUrl;
+          link.target = '_blank';
+          link.textContent = '\\uD83D\\uDCF7 View album';
+          link.style.cssText = 'display:inline-flex;align-items:center;gap:6px;padding:5px 12px;' +
+            'background:rgba(124,92,191,0.18);border:1px solid rgba(124,92,191,0.45);' +
+            'border-radius:6px;color:#b39ddb;text-decoration:none;font-size:13px;margin:4px 0;';
+          li._litPhotoRendered = true;
+          var existingLinks = li.querySelectorAll('a');
+          existingLinks.forEach(function(a) {
+            if ((a.href || '').includes(aToken)) a.style.display = 'none';
+          });
+          li.appendChild(link);
+          return;
+        }
+
+        // Format D: direct image URL from any host (jpg/jpeg/png/gif/webp)
         var imgM = /(https?:\\/\\/[^\\s<>"']+\\.(?:jpg|jpeg|png|gif|webp)(?:\\?[^\\s<>"']*)?)/i.exec(text);
         if (!imgM) return;
         var iurl = imgM[1];
@@ -4049,10 +4081,18 @@ function injectImageSharing() {
             var val = textInput.value.trim();
             var urlM = /(https?:\\/\\/picpub\\.art\\/\\S+)/.exec(val);
             if (!urlM) return;
+            var picpubUrl = urlM[1];
+            // Only intercept URLs that reference a specific image:
+            //   direct file:  picpub.art/HASH.ext
+            //   album photo:  picpub.art/v/TOKEN#HASH
+            // Plain album view URLs (picpub.art/v/TOKEN with no fragment) are
+            // sent as normal text so the user can share album links freely.
+            var isImageRef = /picpub\\.art\\/[a-z0-9]+\\.[a-z]+$/.test(picpubUrl) ||
+                             picpubUrl.includes('#');
+            if (!isImageRef) return;
             e.preventDefault();
             e.stopImmediatePropagation();
             textInput.value = '';
-            var picpubUrl = urlM[1];
             var context = val === picpubUrl ? null : val;
             handlePicpubLink(jid, picpubUrl, context);
           }, true);
