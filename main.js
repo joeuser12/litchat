@@ -647,7 +647,6 @@ function createWindow() {
     ...savedWindowBounds(),
     title: multiProfile ? `Lit Chat — ${profileName}` : 'Lit Chat',
     icon: path.join(__dirname, 'build', 'icon.png'),
-    autoHideMenuBar: true,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
