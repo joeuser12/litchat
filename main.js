@@ -2463,7 +2463,6 @@ function openLinkWindow(url) {
       partition: PARTITION, // same session = already logged in
     },
   });
-  w.setMenu(null);
   w.loadURL(url);
   // Links inside the child window also open in new child windows
   w.webContents.setWindowOpenHandler(({ url: u }) => {
