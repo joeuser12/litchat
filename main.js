@@ -2901,7 +2901,7 @@ function createAppMenu() {
 
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     {
-      label: 'Lit Chat',
+      label: '☰ Lit Chat',
       submenu: [
         // ── Chat ────────────────────────────────────────────────────────────
         { label: 'Manage Rooms…',    click: () => openRoomManager() },
