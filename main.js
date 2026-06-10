@@ -2728,7 +2728,7 @@ function switchProfile(id) {
       saveProfiles(profiles);
       app.relaunch();
     }
-    app.exit();
+    app.quit();
   });
 }
 
