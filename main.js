@@ -3655,6 +3655,11 @@ function injectImageSharing() {
           li._litPhotoRendered = true;
           var nurl = nativeM[1];
           var thumb = makeThumb(nurl, function() { window.open(nurl); });
+          thumb.addEventListener('load', function() {
+            var ul = li.closest('ul');
+            var s = ul && (ul.closest('.message-pane-wrapper') || ul.parentElement);
+            if (s) s.scrollTop = s.scrollHeight;
+          }, { once: true });
           li.appendChild(thumb);
           hidePhotoText(li, thumb);
           return;
@@ -3671,6 +3676,11 @@ function injectImageSharing() {
           var thumb = makeThumb(litpicSrc, function() {
             openAlbum(token, hash, signedBase + '#' + hash);
           }, token, hash);
+          thumb.addEventListener('load', function() {
+            var ul = li.closest('ul');
+            var s = ul && (ul.closest('.message-pane-wrapper') || ul.parentElement);
+            if (s) s.scrollTop = s.scrollHeight;
+          }, { once: true });
           li.appendChild(thumb);
           hidePhotoText(li, thumb);
           return;
@@ -3682,6 +3692,11 @@ function injectImageSharing() {
         var iurl = imgM[1];
         li._litPhotoRendered = true;
         var imgThumb = makeThumb(iurl, function() { window.open(iurl); });
+        imgThumb.addEventListener('load', function() {
+          var ul = li.closest('ul');
+          var s = ul && (ul.closest('.message-pane-wrapper') || ul.parentElement);
+          if (s) s.scrollTop = s.scrollHeight;
+        }, { once: true });
         li.appendChild(imgThumb);
         hideImgUrl(li, iurl);
       }
