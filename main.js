@@ -3894,34 +3894,7 @@ function injectImageSharing() {
           if (indLi) indLi.remove();
           if (!result.ok) throw new Error(result.error || 'upload failed');
 
-          // Show preview immediately using a local blob URL
-          if (msgPane) {
-            var li = document.createElement('li');
-            li._litPhotoRendered = true;
-            li.style.cssText = 'list-style:none;padding:4px 8px;border-bottom:1px solid rgba(255,255,255,0.04)';
-            var img = document.createElement('img');
-            img.src = URL.createObjectURL(file);
-            img.style.cssText = 'max-width:300px;max-height:300px;object-fit:contain;border-radius:8px;cursor:pointer;display:block;margin:4px 0';
-            img.title = 'Click to open album';
-            img.dataset.lpToken = result.token;
-            img.dataset.lpHash = result.hash;
-            img.addEventListener('click', function() { openAlbum(result.token, result.hash); });
-            img.addEventListener('contextmenu', function(e) {
-              e.preventDefault();
-              window.litChat.photoContextMenu(result.token, result.hash);
-            });
-            captureThumb(img, result.hash);
-            img.addEventListener('load', function() {
-              var s = msgPane.closest('.message-pane-wrapper') || msgPane.parentElement;
-              if (s) s.scrollTop = s.scrollHeight;
-            }, { once: true });
-            li.appendChild(img);
-            msgPane.appendChild(li);
-            var scroller = msgPane.closest('.message-pane-wrapper') || msgPane.parentElement;
-            if (scroller) scroller.scrollTop = scroller.scrollHeight;
-          }
-
-          // Send the XMPP DM with album link
+          // Send the XMPP DM — Candy will render the echo via renderPhotoMsg
           try {
             var conn = Candy.Core.getConnection();
             var viewBase = result.partnerViewUrl || ('https://picpub.art/v/' + result.token);
@@ -3932,14 +3905,7 @@ function injectImageSharing() {
             console.warn('[picpub] send failed:', sendErr.message);
           }
         } catch (err) {
-          if (indLi) indLi.remove();
-          if (msgPane) {
-            var errLi = document.createElement('li');
-            errLi.style.cssText = 'list-style:none;padding:4px 8px;color:#e05050;font-size:12px';
-            errLi.textContent = 'Upload failed: ' + err.message;
-            msgPane.appendChild(errLi);
-            setTimeout(function() { errLi.remove(); }, 5000);
-          }
+          if (indLi) { ind.textContent = 'Upload failed: ' + err.message; ind.style.color = '#e05050'; setTimeout(function() { indLi.remove(); }, 5000); }
         }
       }
 
@@ -3967,31 +3933,7 @@ function injectImageSharing() {
           if (indLi) indLi.remove();
           if (!result.ok) throw new Error(result.error || 'link failed');
 
-          if (msgPane) {
-            var li = document.createElement('li');
-            li._litPhotoRendered = true;
-            li.style.cssText = 'list-style:none;padding:4px 8px;border-bottom:1px solid rgba(255,255,255,0.04)';
-            if (context) {
-              var surroundText = context.replace(url, '').replace(/\\s+/g, ' ').trim();
-              if (surroundText) {
-                var textEl = document.createElement('span');
-                textEl.style.cssText = 'display:block;font-size:13px;margin-bottom:4px';
-                textEl.textContent = surroundText;
-                li.appendChild(textEl);
-              }
-            }
-            var thumbSrc = result.native_url || ('litpic://' + result.token + '/' + result.hash);
-            var thumb = makeThumb(thumbSrc, function() { openAlbum(result.token, result.hash); }, result.token, result.hash);
-            thumb.addEventListener('load', function() {
-              var s = msgPane.closest('.message-pane-wrapper') || msgPane.parentElement;
-              if (s) s.scrollTop = s.scrollHeight;
-            }, { once: true });
-            li.appendChild(thumb);
-            msgPane.appendChild(li);
-            var scroller = msgPane.closest('.message-pane-wrapper') || msgPane.parentElement;
-            if (scroller) scroller.scrollTop = scroller.scrollHeight;
-          }
-
+          // Send the XMPP DM — Candy will render the echo via renderPhotoMsg
           try {
             var conn = Candy.Core.getConnection();
             var viewBase = result.partnerViewUrl || ('https://picpub.art/v/' + result.token);
@@ -4003,14 +3945,7 @@ function injectImageSharing() {
             console.warn('[picpub] send failed:', sendErr.message);
           }
         } catch (err) {
-          if (indLi) indLi.remove();
-          if (msgPane) {
-            var errLi = document.createElement('li');
-            errLi.style.cssText = 'list-style:none;padding:4px 8px;color:#e05050;font-size:12px';
-            errLi.textContent = 'Link failed: ' + err.message;
-            msgPane.appendChild(errLi);
-            setTimeout(function() { errLi.remove(); }, 5000);
-          }
+          if (indLi) { ind.textContent = 'Link failed: ' + err.message; ind.style.color = '#e05050'; setTimeout(function() { indLi.remove(); }, 5000); }
         }
       }
 
