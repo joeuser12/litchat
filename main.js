@@ -945,6 +945,24 @@ function injectDialogTheme(wc) {
   if (isLightTheme()) wc.insertCSS(DIALOG_LIGHT_CSS).catch(() => {});
 }
 
+function disconnectAndReload() {
+  if (!win || win.isDestroyed()) return;
+  // Ask Strophe/Candy to send a proper BOSH terminate before reloading so the
+  // server closes the session immediately instead of making us wait for timeout.
+  win.webContents.executeJavaScript(`
+    new Promise(function(resolve) {
+      try {
+        var conn = Candy && Candy.Core && Candy.Core.getConnection && Candy.Core.getConnection();
+        if (conn && conn.connected) {
+          conn.options.sync = true; // send terminate synchronously if possible
+          conn.disconnect('reload');
+          setTimeout(resolve, 800);
+        } else { resolve(); }
+      } catch(e) { resolve(); }
+    })
+  `).catch(() => {}).finally(() => win.webContents.reload());
+}
+
 function openLogViewer() {
   if (logWin && !logWin.isDestroyed()) {
     logWin.focus();
@@ -3137,7 +3155,7 @@ function createAppMenu() {
           },
         },
         { type: 'separator' },
-        { label: 'Reload',    accelerator: 'CmdOrCtrl+R',       click: () => win.webContents.reload(), visible: false },
+        { label: 'Reload',    accelerator: 'CmdOrCtrl+R',       click: () => disconnectAndReload(), visible: false },
         { label: 'ZoomIn',    accelerator: 'CmdOrCtrl+shift+=', click: () => adjustZoom(+0.5), visible: false },
         { label: 'ZoomIn2',   accelerator: 'CmdOrCtrl+=',       click: () => adjustZoom(+0.5), visible: false },
         { label: 'ZoomOut',   accelerator: 'CmdOrCtrl+shift+-', click: () => adjustZoom(-0.5), visible: false },
