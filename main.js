@@ -3912,15 +3912,38 @@ function injectImageSharing() {
           if (indLi) indLi.remove();
           if (!result.ok) throw new Error(result.error || 'upload failed');
 
-          // Send the XMPP DM — Candy will render the echo via renderPhotoMsg
+          var viewBase = result.partnerViewUrl || ('https://picpub.art/v/' + result.token);
+          var msgBody = '\\u{1F4F7} View photo: ' + viewBase + '#' + result.hash;
+
+          // Send the XMPP DM
           try {
             var conn = Candy.Core.getConnection();
-            var viewBase = result.partnerViewUrl || ('https://picpub.art/v/' + result.token);
-            var msgBody = '\\u{1F4F7} View photo: ' + viewBase + '#' + result.hash;
             var stanza = $msg({ to: jid, type: 'chat' }).c('body').t(msgBody);
             conn.send(stanza.tree ? stanza.tree() : stanza);
           } catch (sendErr) {
             console.warn('[picpub] send failed:', sendErr.message);
+          }
+
+          // Inject synthetic sent LI — ejabberd doesn't echo sent messages to sender
+          if (msgPane) {
+            var sentLi = document.createElement('li');
+            sentLi.className = 'own';
+            var sentSpan = document.createElement('span');
+            sentSpan.textContent = msgBody;
+            sentLi.appendChild(sentSpan);
+            renderPhotoMsg(sentLi);
+            var preloadImg = sentLi.querySelector('img');
+            if (preloadImg) {
+              preloadImg.style.height = '300px';
+              preloadImg.addEventListener('load', function() {
+                preloadImg.style.height = '';
+                var s = msgPane.closest('.message-pane-wrapper') || msgPane.parentElement;
+                if (s) s.scrollTop = s.scrollHeight;
+              }, { once: true });
+            }
+            msgPane.appendChild(sentLi);
+            var snd = msgPane.closest('.message-pane-wrapper') || msgPane.parentElement;
+            if (snd) snd.scrollTop = snd.scrollHeight;
           }
         } catch (err) {
           if (indLi) { ind.textContent = 'Upload failed: ' + err.message; ind.style.color = '#e05050'; setTimeout(function() { indLi.remove(); }, 5000); }
@@ -3951,16 +3974,39 @@ function injectImageSharing() {
           if (indLi) indLi.remove();
           if (!result.ok) throw new Error(result.error || 'link failed');
 
-          // Send the XMPP DM — Candy will render the echo via renderPhotoMsg
+          var viewBase = result.partnerViewUrl || ('https://picpub.art/v/' + result.token);
+          var photoFmt = '\\u{1F4F7} View photo: ' + viewBase + '#' + result.hash;
+          var msgBody = context ? context.replace(url, photoFmt) : photoFmt;
+
+          // Send the XMPP DM
           try {
             var conn = Candy.Core.getConnection();
-            var viewBase = result.partnerViewUrl || ('https://picpub.art/v/' + result.token);
-            var photoFmt = '\\u{1F4F7} View photo: ' + viewBase + '#' + result.hash;
-            var msgBody = context ? context.replace(url, photoFmt) : photoFmt;
             var stanza = $msg({ to: jid, type: 'chat' }).c('body').t(msgBody);
             conn.send(stanza.tree ? stanza.tree() : stanza);
           } catch (sendErr) {
             console.warn('[picpub] send failed:', sendErr.message);
+          }
+
+          // Inject synthetic sent LI — ejabberd doesn't echo sent messages to sender
+          if (msgPane) {
+            var sentLi = document.createElement('li');
+            sentLi.className = 'own';
+            var sentSpan = document.createElement('span');
+            sentSpan.textContent = photoFmt;
+            sentLi.appendChild(sentSpan);
+            renderPhotoMsg(sentLi);
+            var preloadImg = sentLi.querySelector('img');
+            if (preloadImg) {
+              preloadImg.style.height = '300px';
+              preloadImg.addEventListener('load', function() {
+                preloadImg.style.height = '';
+                var s = msgPane.closest('.message-pane-wrapper') || msgPane.parentElement;
+                if (s) s.scrollTop = s.scrollHeight;
+              }, { once: true });
+            }
+            msgPane.appendChild(sentLi);
+            var snd = msgPane.closest('.message-pane-wrapper') || msgPane.parentElement;
+            if (snd) snd.scrollTop = snd.scrollHeight;
           }
         } catch (err) {
           if (indLi) { ind.textContent = 'Link failed: ' + err.message; ind.style.color = '#e05050'; setTimeout(function() { indLi.remove(); }, 5000); }
