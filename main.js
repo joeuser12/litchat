@@ -3586,9 +3586,9 @@ function injectImageSharing() {
           el.style.cssText = IMG_STYLE;
         } else {
           el = document.createElement('img');
-          el.src = src;
           el.style.cssText = IMG_STYLE;
           el.addEventListener('click', onclick);
+          el.src = src;
           captureThumb(el, hash);
         }
         if (token && hash) {
@@ -3896,6 +3896,28 @@ function injectImageSharing() {
 
       // ── Upload logic (shared by button) ─────────────────────────────────────
 
+      // Send a DM by driving Candy's own message form, so the stanza is addressed
+      // and routed exactly like a message the user typed. Hand-building a stanza and
+      // calling conn.send(to: roomjid) does NOT reach the recipient's app session
+      // (wrong/stale resource on the roomjid), so we must go through Candy.
+      // The _litBypass flag tells our picpub submit-interceptor to ignore this one.
+      function sendViaCandyForm(jid, text) {
+        var pane = document.querySelector('.room-pane[data-roomjid=' + JSON.stringify(jid) + ']');
+        var form = pane && pane.querySelector('.message-form');
+        var input = form && form.querySelector('input[type="text"], textarea');
+        var submitBtn = form && form.querySelector('input[type="submit"], button[type="submit"]');
+        if (!form || !input) {
+          console.warn('[picpub] sendViaCandyForm: no message form/input for', jid);
+          return false;
+        }
+        form._litBypass = true;
+        input.value = text;
+        if (submitBtn) submitBtn.click();
+        else if (typeof form.requestSubmit === 'function') form.requestSubmit();
+        else form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+        return true;
+      }
+
       async function handlePhotoUpload(jid, file) {
         var pane = document.querySelector('.room-pane[data-roomjid=' + JSON.stringify(jid) + ']');
         var msgPane = pane ? pane.querySelector('ul.message-pane, ul[class*="message"]') : null;
@@ -3929,36 +3951,10 @@ function injectImageSharing() {
           var viewBase = result.partnerViewUrl || ('https://picpub.art/v/' + result.token);
           var msgBody = '\\u{1F4F7} View photo: ' + viewBase + '#' + result.hash;
 
-          // Send the XMPP DM
-          try {
-            var conn = Candy.Core.getConnection();
-            var stanza = $msg({ to: jid, type: 'chat' }).c('body').t(msgBody);
-            conn.send(stanza.tree ? stanza.tree() : stanza);
-          } catch (sendErr) {
-            console.warn('[picpub] send failed:', sendErr.message);
-          }
-
-          // Inject synthetic sent LI — ejabberd doesn't echo sent messages to sender
-          if (msgPane) {
-            var sentLi = document.createElement('li');
-            sentLi.className = 'own';
-            var sentSpan = document.createElement('span');
-            sentSpan.textContent = msgBody;
-            sentLi.appendChild(sentSpan);
-            renderPhotoMsg(sentLi);
-            var preloadImg = sentLi.querySelector('img');
-            if (preloadImg) {
-              preloadImg.style.height = '300px';
-              preloadImg.addEventListener('load', function() {
-                preloadImg.style.height = '';
-                var s = msgPane.closest('.message-pane-wrapper') || msgPane.parentElement;
-                if (s) s.scrollTop = s.scrollHeight;
-              }, { once: true });
-            }
-            msgPane.appendChild(sentLi);
-            var snd = msgPane.closest('.message-pane-wrapper') || msgPane.parentElement;
-            if (snd) snd.scrollTop = snd.scrollHeight;
-          }
+          // Send through Candy's form so it's routed/rendered like a normal DM.
+          // Candy renders the sent message locally, which our observer turns into a thumbnail.
+          if (!sendViaCandyForm(jid, msgBody))
+            throw new Error('could not send (message form not found)');
         } catch (err) {
           if (indLi) { ind.textContent = 'Upload failed: ' + err.message; ind.style.color = '#e05050'; setTimeout(function() { indLi.remove(); }, 5000); }
         }
@@ -3992,36 +3988,9 @@ function injectImageSharing() {
           var photoFmt = '\\u{1F4F7} View photo: ' + viewBase + '#' + result.hash;
           var msgBody = context ? context.replace(url, photoFmt) : photoFmt;
 
-          // Send the XMPP DM
-          try {
-            var conn = Candy.Core.getConnection();
-            var stanza = $msg({ to: jid, type: 'chat' }).c('body').t(msgBody);
-            conn.send(stanza.tree ? stanza.tree() : stanza);
-          } catch (sendErr) {
-            console.warn('[picpub] send failed:', sendErr.message);
-          }
-
-          // Inject synthetic sent LI — ejabberd doesn't echo sent messages to sender
-          if (msgPane) {
-            var sentLi = document.createElement('li');
-            sentLi.className = 'own';
-            var sentSpan = document.createElement('span');
-            sentSpan.textContent = photoFmt;
-            sentLi.appendChild(sentSpan);
-            renderPhotoMsg(sentLi);
-            var preloadImg = sentLi.querySelector('img');
-            if (preloadImg) {
-              preloadImg.style.height = '300px';
-              preloadImg.addEventListener('load', function() {
-                preloadImg.style.height = '';
-                var s = msgPane.closest('.message-pane-wrapper') || msgPane.parentElement;
-                if (s) s.scrollTop = s.scrollHeight;
-              }, { once: true });
-            }
-            msgPane.appendChild(sentLi);
-            var snd = msgPane.closest('.message-pane-wrapper') || msgPane.parentElement;
-            if (snd) snd.scrollTop = snd.scrollHeight;
-          }
+          // Send through Candy's form so it's routed/rendered like a normal DM.
+          if (!sendViaCandyForm(jid, msgBody))
+            throw new Error('could not send (message form not found)');
         } catch (err) {
           if (indLi) { ind.textContent = 'Link failed: ' + err.message; ind.style.color = '#e05050'; setTimeout(function() { indLi.remove(); }, 5000); }
         }
@@ -4073,6 +4042,8 @@ function injectImageSharing() {
         var textInput = form.querySelector('input[type="text"], textarea');
         if (textInput) {
           form.addEventListener('submit', function(e) {
+            // Programmatic submit from sendViaCandyForm — let Candy handle it normally
+            if (form._litBypass) { form._litBypass = false; return; }
             var val = textInput.value.trim();
             var urlM = /(https?:\\/\\/picpub\\.art\\/\\S+)/.exec(val);
             if (!urlM) return;
