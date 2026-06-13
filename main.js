@@ -3677,15 +3677,24 @@ function injectImageSharing() {
             var ul = li.closest('ul');
             var s = ul && (ul.closest('.message-pane-wrapper') || ul.parentElement);
             if (s) s.scrollTop = s.scrollHeight;
+            hidePhotoText(li, thumb);
           }, { once: true });
           li.appendChild(thumb);
-          hidePhotoText(li, thumb);
           return;
         }
 
         // Format B: uploaded image — proxied via litpic://
         // Message body: "📷 View photo: https://picpub.art/v/TOKEN#HASH"
         var m = /\u{1F4F7} View photo: (https:\\/\\/picpub\\.art\\/v\\/([a-f0-9]+)(?:\\?[^#]*)?)#([\\w.]+)/u.exec(text);
+        if (!m) {
+          // Fallback: Candy may linkify the URL — check anchor hrefs directly
+          li.querySelectorAll('a[href*="picpub.art/v/"]').forEach(function(a) {
+            if (m) return;
+            var href = a.getAttribute('href') || '';
+            var hm = /picpub\\.art\\/v\\/([a-f0-9]+)(\\?[^#]*)?#([\\w.]+)/.exec(href);
+            if (hm) m = [hm[0], 'https://picpub.art/v/' + hm[1] + (hm[2] || ''), hm[1], hm[3]];
+          });
+        }
         if (m) {
           li._litPhotoRendered = true;
           var signedBase = m[1], token = m[2], hash = m[3];
@@ -3698,9 +3707,9 @@ function injectImageSharing() {
             var ul = li.closest('ul');
             var s = ul && (ul.closest('.message-pane-wrapper') || ul.parentElement);
             if (s) s.scrollTop = s.scrollHeight;
+            hidePhotoText(li, thumb);
           }, { once: true });
           li.appendChild(thumb);
-          hidePhotoText(li, thumb);
           return;
         }
 
@@ -3714,9 +3723,9 @@ function injectImageSharing() {
           var ul = li.closest('ul');
           var s = ul && (ul.closest('.message-pane-wrapper') || ul.parentElement);
           if (s) s.scrollTop = s.scrollHeight;
+          hideImgUrl(li, iurl);
         }, { once: true });
         li.appendChild(imgThumb);
-        hideImgUrl(li, iurl);
       }
 
       function observePane(ul) {
@@ -3728,7 +3737,12 @@ function injectImageSharing() {
             mut.addedNodes.forEach(function(n) {
               if (n.nodeType === 1) {
                 if (n.tagName === 'LI') { renderPhotoMsg(n); renderLinkPreview(n); }
-                else n.querySelectorAll('li').forEach(function(li) { renderPhotoMsg(li); renderLinkPreview(li); });
+                else {
+                  // Content added inside an existing LI (e.g. Candy populating asynchronously)
+                  var parentLi = n.closest ? n.closest('li') : null;
+                  if (parentLi && !parentLi._litPhotoRendered) { renderPhotoMsg(parentLi); renderLinkPreview(parentLi); }
+                  n.querySelectorAll('li').forEach(function(li) { renderPhotoMsg(li); renderLinkPreview(li); });
+                }
               }
             });
           });
@@ -4220,18 +4234,17 @@ app.whenReady().then(() => {
     const hash  = after.slice(slash + 1);
     const vtCode = new URLSearchParams(query).get('vt');
     const album = settings.picpubAlbums?.[token];
-    const authHeader = album?.ownerToken
-      ? { 'X-Owner-Token': album.ownerToken }
-      : vtCode
-        ? { 'X-Viewer-Token': vtCode }
-        : myLitUsername
-          ? { 'X-Viewer': myLitUsername }
-          : null;
-    if (!authHeader) return new Response('No auth available', { status: 401 });
+    const fetchHeaders = {};
+    if (album?.ownerToken) {
+      fetchHeaders['X-Owner-Token'] = album.ownerToken;
+    } else if (vtCode) {
+      fetchHeaders['X-Viewer-Token'] = vtCode;
+    } else if (myLitUsername) {
+      fetchHeaders['X-Viewer'] = myLitUsername;
+    }
+    const rangeHeader = request.headers.get('Range');
+    if (rangeHeader) fetchHeaders['Range'] = rangeHeader;
     try {
-      const fetchHeaders = Object.assign({}, authHeader);
-      const rangeHeader = request.headers.get('Range');
-      if (rangeHeader) fetchHeaders['Range'] = rangeHeader;
       return await fetch(`https://picpub.art/v/api/albums/${token}/images/${hash}`, {
         headers: fetchHeaders,
       });
