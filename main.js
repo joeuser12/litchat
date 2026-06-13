@@ -608,6 +608,8 @@ let win;
 let logWin  = null;
 let roomWin = null;
 let readyPoll = null;
+let loginRaceRetried = false; // one-shot guard: auto-reload once if the logged-out
+                              // login form shows despite having session cookies
 
 function savedWindowBounds() {
   const ws = settings.windowState;
@@ -673,7 +675,15 @@ function createWindow() {
     }
   });
 
-  win.loadURL(CHAT_URL);
+  loginRaceRetried = false;
+  // Ensure the partition's cookie store is fully loaded from disk BEFORE the first
+  // navigation. Otherwise the initial request can race ahead of the lazy cookie-store
+  // load and Literotica serves the logged-out login form. Awaiting a cookies.get()
+  // forces the store into the network service's memory so the navigation sends our
+  // session cookies. (did-finish-load also keeps a one-shot reload as a safety net.)
+  session.fromPartition(PARTITION).cookies.get({}).catch(() => {}).finally(() => {
+    if (win && !win.isDestroyed()) win.loadURL(CHAT_URL);
+  });
 
 
   win.webContents.on('did-finish-load', async () => {
@@ -706,6 +716,27 @@ function createWindow() {
         })();
       `).catch(() => {});
       return;
+    }
+
+    // Cookie/session race: on the first navigation the request can fire before the
+    // partition's cookie store has finished loading from disk, so Literotica serves
+    // the logged-out login form even though we have a valid session. A reload sends
+    // the now-loaded cookies. Detect the login form (it has a password field, which
+    // the logged-in landing page does not) and reload once — but only if we actually
+    // have cookies, so a genuinely logged-out user isn't reloaded in a loop.
+    if (!loginRaceRetried) {
+      const loggedOut = await win.webContents.executeJavaScript(
+        `!!document.querySelector('input[type=password]')`
+      ).catch(() => false);
+      if (loggedOut) {
+        const cookies = await session.fromPartition(PARTITION)
+          .cookies.get({ url: CHAT_URL }).catch(() => []);
+        if (cookies.length > 0) {
+          loginRaceRetried = true;
+          win.webContents.reload();
+          return;
+        }
+      }
     }
 
     if (readyPoll) { clearInterval(readyPoll); readyPoll = null; }
