@@ -21,6 +21,23 @@ Built with [Electron](https://www.electronjs.org/) around the site's existing Ca
 - Photo album manager — track active albums, set expiry (1h–7d), enable IP watermarking, or delete albums from the **Photo Albums** menu
 - Right-click any sent photo thumbnail to remove that image from the album
 
+## Why a regular browser session feels unstable
+
+Literotica chat is built on **BOSH** (XMPP tunnelled over HTTP long-polling). The client has to keep a steady stream of HTTP requests flowing to the server; if that heartbeat stalls for too long, the server decides you have disconnected and drops your session.
+
+Modern browsers actively work against that heartbeat:
+
+- **Desktop background-tab throttling.** When the chat tab isn't the one you're looking at, the browser throttles its timers and network activity to save power. Leave chat in a background tab (or another window) for a while and the BOSH heartbeat slows enough that the server times you out — so you come back to a dead, disconnected chat.
+- **Mobile is much worse.** Phone browsers — **Safari/WebKit on iOS especially** — aggressively suspend tabs to save battery the moment you switch apps or lock the screen. A suspended tab can't poll at all, so the BOSH connection drops almost immediately in the background. Even in the foreground, mobile power management causes frequent reconnects, which is why chat on a phone browser feels flaky and keeps logging you out.
+
+These are deliberate browser power-saving features, not bugs in Literotica — but they make a long-lived chat connection hard to maintain from an ordinary tab.
+
+## How this app helps
+
+This app runs the same Literotica chat interface in its own dedicated window rather than a browser tab, so the BOSH heartbeat **runs unthrottled** and keeps ticking even when the window is in the background or minimized to the tray. The connection stays warm, so you stop getting silently booted and don't have to keep reloading.
+
+> **Note:** this only addresses desktop. Because it is an Electron desktop app, it does not run on phones — mobile browsers would need a different approach (a server-side proxy that holds the BOSH session for you), which this project does not currently provide.
+
 ## Before you start
 
 **Close the Literotica chat tab in your browser before launching the app.**
