@@ -2897,12 +2897,17 @@ function buildPhotoAlbumsSubmenu() {
   if (!entries.length) return [{ label: 'No active albums', enabled: false }];
 
   return entries.map(({ partner, token, album }) => {
-    const secs = album.expiresAt - now;
-    const h = Math.floor(secs / 3600);
-    const m = Math.floor((secs % 3600) / 60);
-    const expiry = h > 0 ? `${h}h ${m}m` : `${m}m`;
+    let expiry;
+    if (album.singleUse) {
+      expiry = 'single use';
+    } else {
+      const secs = album.expiresAt - now;
+      const h = Math.floor(secs / 3600);
+      const m = Math.floor((secs % 3600) / 60);
+      expiry = h > 0 ? `${h}h ${m}m` : `${m}m`;
+    }
     return {
-      label: `${partner} — expires in ${expiry}`,
+      label: `${partner} — ${album.singleUse ? expiry : `expires in ${expiry}`}`,
       submenu: [
         { label: 'Delete Album', click: async () => {
           const { response } = await require('electron').dialog.showMessageBox(win, {
@@ -3135,6 +3140,10 @@ function createAppMenu() {
         {
           label: 'Photo Link Duration',
           submenu: [
+            { ttl: 'single_use', label: 'Single use (expires after recipient views)' },
+            { ttl: '1m', label: '1 minute' },
+            { ttl: '5m', label: '5 minutes' },
+            { ttl: '30m', label: '30 minutes' },
             { ttl: '1h', label: '1 hour' },
             { ttl: '6h', label: '6 hours' },
             { ttl: '24h', label: '24 hours' },
@@ -3326,7 +3335,7 @@ async function getOrCreateDMAlbum(partnerUsername) {
   const data = await res.json();
   if (!settings.picpubAlbums) settings.picpubAlbums = {};
   if (!settings.dmAlbumsByPartner) settings.dmAlbumsByPartner = {};
-  settings.picpubAlbums[data.token] = { ownerToken: data.owner_token, expiresAt: data.expires_at, literoticaUser: myLitUsername || 'user' };
+  settings.picpubAlbums[data.token] = { ownerToken: data.owner_token, expiresAt: data.expires_at, literoticaUser: myLitUsername || 'user', ...(data.single_use ? { singleUse: true } : {}) };
   settings.dmAlbumsByPartner[partnerUsername] = data.token;
   saveSettings();
   createAppMenu();
