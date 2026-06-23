@@ -88,6 +88,26 @@ To add your own CSS overrides on top of the active theme, edit `user.css` in you
 
 You can also place a `user.js` file in the same folder — it will be injected into the page on every load.
 
+## Verifying the binaries
+
+Every release binary is built exclusively by GitHub Actions — no one uploads binaries by hand. You can verify this in two ways:
+
+**1. Check the release page.**
+Each release on [the Releases page](../../releases) was created by the [`Build & Release` workflow](.github/workflows/release.yml). GitHub records which workflow run produced the release; the run log shows the exact commit that was checked out and built.
+
+**2. Cryptographic provenance (SLSA attestation).**
+Each binary is signed with a provenance attestation at build time using [GitHub's artifact attestation](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations/using-artifact-attestations-to-establish-provenance-for-builds). The attestation is published to the public [Sigstore](https://www.sigstore.dev/) transparency log and tied to the specific workflow run, repository, and commit — it cannot be forged or back-dated.
+
+To verify a downloaded binary (requires the [GitHub CLI](https://cli.github.com/)):
+
+```
+gh attestation verify LitChat-linux.AppImage --repo joeuser12/litchat
+gh attestation verify LitChat-windows.exe    --repo joeuser12/litchat
+gh attestation verify LitChat-mac.dmg        --repo joeuser12/litchat
+```
+
+A passing verification confirms the file you downloaded matches the artifact produced by the Actions run for this repo — it was not tampered with or substituted after the fact. If you want to go further, the verification output includes the exact commit SHA, which you can check against the source in this repo.
+
 ## Building from source
 
 ```
