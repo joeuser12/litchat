@@ -2549,18 +2549,27 @@ function openLinkWindow(url) {
       template.push({ role: 'copy' }, { role: 'selectAll' });
     }
 
-    // Watch a user — pre-fill from a selected username, else a username-shaped
-    // segment of the link/page URL (Literotica's exact profile URL may vary).
+    // Watch a user — only offer this when we can actually identify a user:
+    // a username-shaped text selection, or a Literotica profile URL, which look
+    // like https://www.literotica.com/authors/<username>. Otherwise it would
+    // clutter every link/page.
     let watchGuess = '';
     const selTrim = (params.selectionText || '').trim();
-    if (/^[A-Za-z0-9_.-]{1,30}$/.test(selTrim)) {
+    if (/^[A-Za-z0-9_.-]{2,30}$/.test(selTrim)) {
       watchGuess = selTrim;
     } else {
-      const m = /\/(?:authors|members|p|u|user)\/([A-Za-z0-9_.-]+)/i.exec(params.linkURL || w.webContents.getURL());
-      if (m) watchGuess = m[1];
+      const candidate = params.linkURL || w.webContents.getURL();
+      let host = '';
+      try { host = new URL(candidate).hostname; } catch { /* not a URL */ }
+      if (/(?:^|\.)literotica\.com$/i.test(host)) {
+        const m = /\/authors\/([A-Za-z0-9_.-]+)/i.exec(candidate);
+        if (m) watchGuess = m[1];
+      }
     }
-    sep();
-    template.push({ label: 'Watch User…', click: () => addWatchedUserViaPrompt(w, watchGuess) });
+    if (watchGuess) {
+      sep();
+      template.push({ label: `Watch "${watchGuess}"`, click: () => addWatchedUserViaPrompt(w, watchGuess) });
+    }
 
     sep();
     template.push(
