@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Tray, nativeImage, shell, Notification, ipcMain, protocol, session } = require('electron');
+const { app, BrowserWindow, Menu, Tray, nativeImage, shell, Notification, ipcMain, protocol, session, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -2513,6 +2513,53 @@ function openLinkWindow(url) {
     },
   });
   w.loadURL(url);
+  // Electron provides no context menu by default — build one so right-click works
+  // (copy text/links/images, navigation, paste into form fields, etc.).
+  w.webContents.on('context-menu', (_e, params) => {
+    const template = [];
+    const sep = () => { if (template.length && template[template.length - 1].type !== 'separator') template.push({ type: 'separator' }); };
+
+    if (params.linkURL) {
+      template.push(
+        { label: 'Open Link in New Window', click: () => openLinkWindow(params.linkURL) },
+        { label: 'Open Link in Browser', click: () => shell.openExternal(params.linkURL) },
+        { label: 'Copy Link Address', click: () => clipboard.writeText(params.linkURL) },
+      );
+    }
+
+    if (params.mediaType === 'image' && params.srcURL) {
+      sep();
+      template.push(
+        { label: 'Copy Image', click: () => w.webContents.copyImageAt(params.x, params.y) },
+        { label: 'Copy Image Address', click: () => clipboard.writeText(params.srcURL) },
+        { label: 'Save Image As…', click: () => w.webContents.downloadURL(params.srcURL) },
+      );
+    }
+
+    if (params.isEditable) {
+      sep();
+      template.push(
+        { role: 'cut', enabled: params.editFlags.canCut },
+        { role: 'copy', enabled: params.editFlags.canCopy },
+        { role: 'paste', enabled: params.editFlags.canPaste },
+        { role: 'selectAll' },
+      );
+    } else if (params.selectionText) {
+      sep();
+      template.push({ role: 'copy' }, { role: 'selectAll' });
+    }
+
+    sep();
+    template.push(
+      { label: 'Back', enabled: w.webContents.canGoBack(), click: () => w.webContents.goBack() },
+      { label: 'Forward', enabled: w.webContents.canGoForward(), click: () => w.webContents.goForward() },
+      { label: 'Reload', click: () => w.webContents.reload() },
+    );
+    sep();
+    template.push({ label: 'Inspect Element', click: () => w.webContents.inspectElement(params.x, params.y) });
+
+    Menu.buildFromTemplate(template).popup({ window: w });
+  });
   // Links inside the child window also open in new child windows
   w.webContents.setWindowOpenHandler(({ url: u }) => {
     openLinkWindow(u);
