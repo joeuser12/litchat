@@ -2549,11 +2549,25 @@ function openLinkWindow(url) {
       template.push({ role: 'copy' }, { role: 'selectAll' });
     }
 
+    // Watch a user — pre-fill from a selected username, else a username-shaped
+    // segment of the link/page URL (Literotica's exact profile URL may vary).
+    let watchGuess = '';
+    const selTrim = (params.selectionText || '').trim();
+    if (/^[A-Za-z0-9_.-]{1,30}$/.test(selTrim)) {
+      watchGuess = selTrim;
+    } else {
+      const m = /\/(?:authors|members|p|u|user)\/([A-Za-z0-9_.-]+)/i.exec(params.linkURL || w.webContents.getURL());
+      if (m) watchGuess = m[1];
+    }
+    sep();
+    template.push({ label: 'Watch User…', click: () => addWatchedUserViaPrompt(w, watchGuess) });
+
     sep();
     template.push(
       { label: 'Back', enabled: w.webContents.canGoBack(), click: () => w.webContents.goBack() },
       { label: 'Forward', enabled: w.webContents.canGoForward(), click: () => w.webContents.goForward() },
       { label: 'Reload', click: () => w.webContents.reload() },
+      { label: 'Open This Page in Browser', click: () => shell.openExternal(w.webContents.getURL()) },
     );
     sep();
     template.push({ label: 'Inspect Element', click: () => w.webContents.inspectElement(params.x, params.y) });
@@ -2979,6 +2993,92 @@ function buildPhotoAlbumsSubmenu() {
   });
 }
 
+// Reusable single-field prompt rendered as an overlay inside the given window's page.
+// Resolves to the entered string, or null if cancelled.
+function promptDialog(targetWin, label, defaultValue = '') {
+  if (!targetWin || targetWin.isDestroyed()) return Promise.resolve(null);
+  return targetWin.webContents.executeJavaScript(`
+    new Promise(function(resolve) {
+      var overlay = document.createElement('div');
+      overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.72);z-index:2147483647;display:flex;align-items:center;justify-content:center;';
+      var box = document.createElement('div');
+      box.style.cssText = 'background:#1a1a2a;border:1px solid #3a3a4a;border-radius:10px;padding:20px 20px 16px;width:380px;font-family:system-ui,sans-serif;box-shadow:0 8px 32px rgba(0,0,0,0.6);';
+      var lbl = document.createElement('div');
+      lbl.textContent = ${JSON.stringify(label)};
+      lbl.style.cssText = 'color:#aaa;font-size:12px;margin-bottom:8px;letter-spacing:0.04em;text-transform:uppercase;';
+      var inp = document.createElement('input');
+      inp.type = 'text';
+      inp.value = ${JSON.stringify(defaultValue)};
+      inp.style.cssText = 'width:100%;padding:8px 10px;background:#0f0f17;border:1px solid #3a3a4a;border-radius:6px;color:#e0e0e8;font-size:14px;outline:none;box-sizing:border-box;';
+      inp.addEventListener('focus', function() { inp.style.borderColor='#7c5cbf'; });
+      inp.addEventListener('blur',  function() { inp.style.borderColor='#3a3a4a'; });
+      var btns = document.createElement('div');
+      btns.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:14px;';
+      var cancel = document.createElement('button');
+      cancel.textContent = 'Cancel';
+      cancel.style.cssText = 'padding:6px 16px;background:transparent;border:1px solid #3a3a4a;border-radius:6px;color:#aaa;cursor:pointer;font-size:13px;';
+      var save = document.createElement('button');
+      save.textContent = 'Save';
+      save.style.cssText = 'padding:6px 18px;background:#7c5cbf;border:none;border-radius:6px;color:#fff;cursor:pointer;font-size:13px;';
+      function done(v) { try { document.body.removeChild(overlay); } catch(e){} resolve(v); }
+      cancel.onclick = function() { done(null); };
+      save.onclick   = function() { done(inp.value); };
+      inp.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter')  { e.preventDefault(); done(inp.value); }
+        if (e.key === 'Escape') { e.preventDefault(); done(null); }
+      });
+      btns.appendChild(cancel); btns.appendChild(save);
+      box.appendChild(lbl); box.appendChild(inp); box.appendChild(btns);
+      overlay.appendChild(box);
+      document.body.appendChild(overlay);
+      setTimeout(function() { inp.focus(); inp.select(); }, 30);
+    })
+  `).catch(() => null);
+}
+
+// ── Watched users ────────────────────────────────────────────────────────────
+function watchUser(name) {
+  const u = (name || '').trim().toLowerCase();
+  if (!u) return false;
+  const set = loadWatchList();
+  if (set.has(u)) return false;
+  set.add(u);
+  saveWatchList(set);
+  watchList = set;
+  createAppMenu();
+  return true;
+}
+
+function unwatchUser(name) {
+  const u = (name || '').trim().toLowerCase();
+  const set = loadWatchList();
+  if (!set.delete(u)) return;
+  saveWatchList(set);
+  watchList = set;
+  onlineWatched.delete(u);
+  createAppMenu();
+}
+
+// Prompt for a username (pre-filled with a best guess) and add it to the watch list.
+async function addWatchedUserViaPrompt(targetWin, prefill = '') {
+  const name = await promptDialog(targetWin || win, 'Watch user (presence notifications)', prefill);
+  if (name && name.trim()) watchUser(name);
+}
+
+function buildWatchedUsersSubmenu() {
+  const users = [...loadWatchList()].sort();
+  const items = users.length
+    ? users.map((u) => ({
+        label: u,
+        type: 'checkbox',
+        checked: true,
+        click: () => unwatchUser(u), // unchecking removes the watch
+      }))
+    : [{ label: '(no watched users)', enabled: false }];
+  items.push({ type: 'separator' }, { label: 'Add User…', click: () => addWatchedUserViaPrompt(win) });
+  return items;
+}
+
 function createAppMenu() {
   const currentTheme = settings.theme || 'dark';
   const themeItems = THEMES.map(({ id, label }) => ({
@@ -3146,6 +3246,7 @@ function createAppMenu() {
             }
           },
         },
+        { label: 'Watched Users', submenu: buildWatchedUsersSubmenu() },
         { type: 'separator' },
         // ── Appearance ───────────────────────────────────────────────────────
         { label: 'Theme',     submenu: themeItems },
