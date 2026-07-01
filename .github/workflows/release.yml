@@ -19,7 +19,7 @@ jobs:
             artifact: dist/LitChat-windows.exe
           - os: macos-latest
             build: npm run build:mac -- --publish never
-            artifact: dist/LitChat-mac.dmg
+            artifact: dist/LitChat-mac.*
 
     runs-on: ${{ matrix.os }}
 

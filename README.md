@@ -48,9 +48,31 @@ Literotica's chat server keeps your session alive for up to a minute after you c
 
 - **Linux** — [download LitChat-linux.AppImage](../../releases/latest/download/LitChat-linux.AppImage), make it executable, and run it
 - **Windows** — [download LitChat-windows.exe](../../releases/latest/download/LitChat-windows.exe) and run the installer
-- **macOS** — [download LitChat-mac.dmg](../../releases/latest/download/LitChat-mac.dmg), open it and drag to Applications
+- **macOS** — [download LitChat-mac.dmg](../../releases/latest/download/LitChat-mac.dmg), open it, drag to Applications — then follow the extra step below 👇
 
 All releases: [Releases page](../../releases)
+
+### macOS: "Lit Chat is damaged and can't be opened"
+
+This message is **normal and expected** the first time you open the app — nothing is actually damaged. Here's why it appears and how to get past it.
+
+Apple charges developers $99/year to have their apps "notarized" (approved by Apple). This is a free hobby project, so it isn't notarized — and when macOS sees a downloaded app that Apple hasn't approved, it refuses to open it and shows the misleading "damaged" message. (If you'd rather not take the app's word for what's in the download, see [Verifying the binaries](#verifying-the-binaries) below.)
+
+The fix is one command that tells macOS "I trust this app". You only need to do this once:
+
+1. Make sure you've dragged **Lit Chat** into your **Applications** folder first
+2. Open the **Terminal** app (press `Cmd + Space`, type `terminal`, press Enter)
+3. Copy the line below, paste it into the Terminal window, and press Enter:
+
+   ```
+   xattr -cr "/Applications/Lit Chat.app"
+   ```
+
+4. That's it — no output means it worked. Open Lit Chat normally (it's in Applications / Launchpad)
+
+> **Note:** the old trick of right-click → Open no longer works on recent versions of macOS — the Terminal command above is the way.
+
+**Heads up about updates:** automatic in-app updates also require Apple's approval, so they don't work on macOS. When a new version comes out, download the new DMG, drag it to Applications again, and repeat the Terminal command above.
 
 ## Profiles
 

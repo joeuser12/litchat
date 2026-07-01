@@ -3334,6 +3334,13 @@ function createAppMenu() {
         // ── App ──────────────────────────────────────────────────────────────
         (() => {
           if (!app.isPackaged) return { label: 'Check for Updates (dev build)', enabled: false };
+          if (process.platform === 'darwin') {
+            // No auto-update on macOS (requires a signed app) — link to releases instead.
+            return {
+              label: 'Get Updates on GitHub…',
+              click: () => require('electron').shell.openExternal('https://github.com/joeuser12/litchat/releases/latest'),
+            };
+          }
           if (updateState === 'ready')       return { label: `Install Update (${updateVersion})…`, click: () => _autoUpdater.quitAndInstall() };
           if (updateState === 'downloading') return { label: `Downloading ${updateVersion}…`, enabled: false };
           if (updateState === 'checking')    return { label: 'Checking for Updates…', enabled: false };
@@ -3406,6 +3413,9 @@ function setupTray() {
 
 function setupAutoUpdater() {
   if (!app.isPackaged) return;
+  // electron-updater refuses to update unsigned apps on macOS; the menu links
+  // to the GitHub releases page instead (see createAppMenu).
+  if (process.platform === 'darwin') return;
 
   const { autoUpdater } = require('electron-updater');
   _autoUpdater = autoUpdater;
