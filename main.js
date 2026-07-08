@@ -2696,9 +2696,9 @@ ipcMain.handle('logs:dmHistory', async (_e, username) => {
   }
   const now = Date.now() / 1000;
   const photoRe = /\u{1F4F7} View photo: https:\/\/picpub\.art\/v\/([a-f0-9]+)(?:\?[^#]*)?#([\w.]+)/u;
-  const last30 = msgs.slice(-30);
+  const recent = msgs.slice(-100);
   const toCheck = new Set();
-  for (const m of last30) {
+  for (const m of recent) {
     const match = photoRe.exec(m.body || '');
     if (!match) continue;
     const token = match[1];
@@ -2720,14 +2720,14 @@ ipcMain.handle('logs:dmHistory', async (_e, username) => {
       } catch { /* network error — assume still live */ }
     }));
     // Second pass: annotate now that we have results
-    for (const m of last30) {
+    for (const m of recent) {
       if (m._photoExpired) continue;
       const match = photoRe.exec(m.body || '');
       if (match && picpubExpiredTokens.has(match[1])) m._photoExpired = true;
     }
   }
   // Attach thumbnail source for expired photo messages
-  for (const m of last30) {
+  for (const m of recent) {
     if (!m._photoExpired) continue;
     const match = photoRe.exec(m.body || '');
     if (!match) continue;
@@ -2742,7 +2742,7 @@ ipcMain.handle('logs:dmHistory', async (_e, username) => {
         m._thumbSrc = 'data:image/jpeg;base64,' + fs.readFileSync(thumbFile).toString('base64');
     }
   }
-  return last30;
+  return recent;
 });
 
 ipcMain.handle('rooms:getFavourites', () => settings.favourites ?? {});
@@ -4251,7 +4251,8 @@ function injectImageSharing() {
           form.addEventListener('submit', function(e) {
             // Programmatic submit from sendViaCandyForm — let Candy handle it normally
             if (form._litBypass) { form._litBypass = false; return; }
-            var val = textInput.value.trim();
+            var raw = textInput.value;
+            var val = raw.trim();
             var urlM = /(https?:\\/\\/picpub\\.art\\/\\S+)/.exec(val);
             if (!urlM) return;
             var picpubUrl = urlM[1];
@@ -4263,6 +4264,12 @@ function injectImageSharing() {
             var isImageRef = /picpub\\.art\\/[a-z0-9]+\\.[a-z]+$/.test(picpubUrl) ||
                              picpubUrl.includes('#');
             if (!isImageRef) return;
+            // Escape hatch: a "!" immediately before the URL sends the raw
+            // link through unmodified instead of converting it to an album link.
+            if (urlM.index > 0 && val[urlM.index - 1] === '!') {
+              textInput.value = raw.replace('!' + picpubUrl, picpubUrl);
+              return;
+            }
             e.preventDefault();
             e.stopImmediatePropagation();
             textInput.value = '';
@@ -4323,15 +4330,50 @@ function injectImageSharing() {
 
 function attachBOSHLogger() {
   const dbg = win.webContents.debugger;
-  try {
-    dbg.attach('1.3');
-  } catch (e) {
-    // already attached (e.g. DevTools open)
+
+  // (Re)attach the CDP debugger and enable network tracking. Returns false if
+  // attach fails (e.g. DevTools currently holds the single per-webContents CDP
+  // slot); we retry from the 'devtools-closed' handler below.
+  function attach() {
+    try {
+      dbg.attach('1.3');
+    } catch (e) {
+      return false;
+    }
+    dbg.sendCommand('Network.enable');
+    return true;
   }
-  dbg.sendCommand('Network.enable');
 
   // Track requestIds so we can fetch POST bodies for outgoing messages
   const pendingRequests = new Map();
+  // Response requestIds awaiting their body. We fetch the body on
+  // loadingFinished, not responseReceived: getResponseBody races the buffer and
+  // fails intermittently if called before the response is fully loaded, and a
+  // silent failure there was dropping whole batches of received messages.
+  const pendingBodies = new Set();
+
+  // Fetch a completed response body and log any messages in it. getResponseBody
+  // can still transiently fail (buffer not ready / evicted), so retry briefly
+  // before giving up rather than silently losing the batch.
+  async function logReceivedBody(requestId, attempt = 0) {
+    try {
+      const result = await dbg.sendCommand('Network.getResponseBody', { requestId });
+      const body = result.base64Encoded
+        ? Buffer.from(result.body, 'base64').toString('utf8')
+        : result.body;
+      const received = extractMessages(body, 'received');
+      writeMessages(received);
+      await notifyDMs(received);
+      notifyRoomMessages(received);
+      handlePresence(extractPresence(body));
+    } catch (e) {
+      if (attempt < 3) {
+        await new Promise(r => setTimeout(r, 100));
+        return logReceivedBody(requestId, attempt + 1);
+      }
+      console.error('[logger] dropped response body after retries:', e.message);
+    }
+  }
 
   dbg.on('message', async (_e, method, params) => {
     if (method === 'Network.requestWillBeSent') {
@@ -4343,6 +4385,7 @@ function attachBOSHLogger() {
 
     if (method === 'Network.loadingFailed') {
       pendingRequests.delete(params.requestId);
+      pendingBodies.delete(params.requestId);
     }
 
     if (method === 'Network.responseReceived') {
@@ -4353,7 +4396,7 @@ function attachBOSHLogger() {
         return;
       }
 
-      // Log sent messages from the request body
+      // Log sent messages from the request body (postData is already in hand — no race)
       const sent = pendingRequests.get(requestId);
       if (sent) {
         const sentMsgs = extractMessages(sent, 'sent');
@@ -4382,20 +4425,33 @@ function attachBOSHLogger() {
         pendingRequests.delete(requestId);
       }
 
-      // Log received messages from the response body
-      try {
-        const result = await dbg.sendCommand('Network.getResponseBody', { requestId });
-        const body = result.base64Encoded
-          ? Buffer.from(result.body, 'base64').toString('utf8')
-          : result.body;
-        const received = extractMessages(body, 'received');
-        writeMessages(received);
-        await notifyDMs(received);
-        notifyRoomMessages(received);
-        handlePresence(extractPresence(body));
-      } catch (_) {}
+      // Defer the received-body fetch until the response is fully loaded.
+      pendingBodies.add(requestId);
+    }
+
+    if (method === 'Network.loadingFinished') {
+      if (!pendingBodies.delete(params.requestId)) return;
+      await logReceivedBody(params.requestId);
     }
   });
+
+  // Opening the built-in DevTools steals the single CDP slot and detaches us,
+  // which silently stopped all logging for the rest of the session. Clear
+  // in-flight state, warn, and reattach once DevTools closes so we resume.
+  dbg.on('detach', (_e, reason) => {
+    pendingRequests.clear();
+    pendingBodies.clear();
+    console.warn('[logger] debugger detached (' + reason + ') — message logging paused until reattached');
+  });
+
+  win.webContents.on('devtools-closed', () => {
+    if (!dbg.isAttached()) {
+      console.log('[logger] DevTools closed — reattaching message logger');
+      attach();
+    }
+  });
+
+  attach();
 }
 
 app.whenReady().then(() => {
