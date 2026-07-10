@@ -3509,9 +3509,7 @@ async function getOrCreateDMAlbum(partnerUsername) {
   return { token: data.token, ownerToken: data.owner_token, viewUrl: data.view_url };
 }
 
-async function uploadToAlbum(album, filePath, mimeType) {
-  const buf = fs.readFileSync(filePath);
-  const filename = path.basename(filePath);
+async function uploadToAlbum(album, buf, filename, mimeType) {
   const ct = mimeType || 'application/octet-stream';
   const boundary = '----LitPicBoundary' + Date.now().toString(16);
   const CRLF = '\r\n';
@@ -3534,22 +3532,33 @@ async function uploadToAlbum(album, filePath, mimeType) {
   });
 }
 
-ipcMain.handle('picpub:upload', async (_e, partnerUsername, filePath, mimeType) => {
+// `data` is the file's bytes (Uint8Array read in the renderer via File.arrayBuffer()).
+// We deliberately never read from file.path: drags materialised into temp files
+// (screenshot tools, browsers) can leave a stale/reused path whose on-disk content
+// is the *previous* drag, which then dedupes server-side to an older album image.
+ipcMain.handle('picpub:upload', async (_e, partnerUsername, fileName, mimeType, data) => {
   try {
+    const buf = Buffer.from(data);
+    if (!buf.length) throw new Error('Dropped file is empty');
+    const filename = path.basename(String(fileName || 'image'));
     let album = await getOrCreateDMAlbum(partnerUsername);
-    let res = await uploadToAlbum(album, filePath, mimeType);
+    let res = await uploadToAlbum(album, buf, filename, mimeType);
     // Album was deleted server-side while our cache still considered it valid — retry once
     if (res.status === 404 || res.status === 410) {
       invalidateDMAlbum(partnerUsername);
       album = await getOrCreateDMAlbum(partnerUsername);
-      res = await uploadToAlbum(album, filePath, mimeType);
+      res = await uploadToAlbum(album, buf, filename, mimeType);
     }
     if (!res.ok) throw new Error(`Upload failed: ${res.status} ${await res.text()}`);
-    const data = await res.json();
-    const added = data.added?.[0];
+    const data2 = await res.json();
+    const added = data2.added?.[0];
     if (!added) throw new Error('No file returned from upload');
+    // 200 (not 201) means the server deduplicated: these bytes already exist in
+    // the album and `added` is the pre-existing entry, not a new image.
+    const deduped = res.status === 200;
+    if (deduped) console.warn('[picpub:upload] deduplicated to existing album image', added.hash);
     const partnerViewUrl = await makeViewerLink(album.token, album.ownerToken, partnerUsername);
-    return { ok: true, token: album.token, hash: added.hash, viewUrl: album.viewUrl, partnerViewUrl };
+    return { ok: true, token: album.token, hash: added.hash, viewUrl: album.viewUrl, partnerViewUrl, deduped };
   } catch (e) {
     return { ok: false, error: e.message };
   }
@@ -4143,15 +4152,18 @@ function injectImageSharing() {
         }
 
         try {
-          var filePath = file.path;
-          if (!filePath) throw new Error('File path not available');
           if (typeof window.litChat === 'undefined')
             throw new Error('preload bridge not loaded — try fully restarting the app');
           if (typeof window.litChat.uploadPhoto !== 'function')
             throw new Error('uploadPhoto missing from bridge (bridge keys: ' + Object.keys(window.litChat).join(', ') + ')');
+          // Read the dropped file's bytes directly — never via file.path. Drags from
+          // screenshot tools/browsers land in reused temp files, so the path can hold
+          // the PREVIOUS drag's image even though the File object has the right data.
+          var bytes = new Uint8Array(await file.arrayBuffer());
+          if (!bytes.length) throw new Error('dropped file is empty');
           var slash = jid.indexOf('/');
           var partner = slash !== -1 ? jid.slice(slash + 1) : jid.split('@')[0];
-          var result = await window.litChat.uploadPhoto(partner, filePath, file.type);
+          var result = await window.litChat.uploadPhoto(partner, file.name || 'image', file.type, bytes);
           if (indLi) indLi.remove();
           if (!result.ok) throw new Error(result.error || 'upload failed');
 
@@ -4162,6 +4174,16 @@ function injectImageSharing() {
           // Candy renders the sent message locally, which our observer turns into a thumbnail.
           if (!sendViaCandyForm(jid, msgBody))
             throw new Error('could not send (message form not found)');
+          if (result.deduped && msgPane) {
+            var dupLi = document.createElement('li');
+            dupLi.style.cssText = 'list-style:none;padding:2px 8px';
+            var dup = document.createElement('span');
+            dup.style.cssText = 'color:#7c5cbf;font-size:12px;font-style:italic';
+            dup.textContent = 'Note: identical to a photo already in this album — existing image reused.';
+            dupLi.appendChild(dup);
+            msgPane.appendChild(dupLi);
+            setTimeout(function() { dupLi.remove(); }, 8000);
+          }
         } catch (err) {
           if (indLi) { ind.textContent = 'Upload failed: ' + err.message; ind.style.color = '#e05050'; setTimeout(function() { indLi.remove(); }, 5000); }
         }

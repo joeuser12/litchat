@@ -7,8 +7,8 @@ contextBridge.exposeInMainWorld('litChat', {
   dmHistory:        (username) => ipcRenderer.invoke('logs:dmHistory', username),
   openLitProfile:   () => ipcRenderer.send('ui:openLitProfile'),
   toggleAway:       () => ipcRenderer.invoke('prefs:toggleAway'),
-  uploadPhoto:      (partnerUser, filePath, mimeType) =>
-                      ipcRenderer.invoke('picpub:upload', partnerUser, filePath, mimeType),
+  uploadPhoto:      (partnerUser, fileName, mimeType, data) =>
+                      ipcRenderer.invoke('picpub:upload', partnerUser, fileName, mimeType, data),
   linkPhoto:        (partnerUser, url) =>
                       ipcRenderer.invoke('picpub:link', partnerUser, url),
   getViewerLink:    (token) =>
