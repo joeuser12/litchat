@@ -1,6 +1,6 @@
 {
   "name": "lit-chat",
-  "version": "0.9.8",
+  "version": "0.9.9",
   "description": "Electron wrapper for chat.literotica.com",
   "homepage": "https://chat.literotica.com",
   "author": {
@@ -16,8 +16,8 @@
     "build:all": "electron-builder --linux --win"
   },
   "devDependencies": {
-    "electron": "^31.0.0",
-    "electron-builder": "^24.13.3"
+    "electron": "^43.1.0",
+    "electron-builder": "^26.15.3"
   },
   "build": {
     "appId": "com.literotica.chat",
