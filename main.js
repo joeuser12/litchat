@@ -1,6 +1,7 @@
 const { app, BrowserWindow, Menu, Tray, nativeImage, shell, Notification, ipcMain, protocol, session, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 
 // ── Profile system ─────────────────────────────────────────────────────────
 // Must run before any other requires so logger/watch/notes inherit LIT_USERDATA.
@@ -170,6 +171,22 @@ let trayMinimizeHintShown = false;
 app.commandLine.appendSwitch('disable-background-timer-throttling');
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
 app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+
+// Low Memory Mode — auto-enable the first time this profile ever runs on a machine at or
+// below the threshold, but never touch it again afterward so an explicit user choice (either
+// way) always sticks. lowMemoryModeAutoDetected is a one-shot flag consumed after app-ready
+// to show a single explanatory notification.
+const LOW_MEM_THRESHOLD_BYTES = 4 * 1024 * 1024 * 1024; // matches the 4GB report that prompted this feature
+if (settings.prefs?.lowMemoryMode === undefined && os.totalmem() <= LOW_MEM_THRESHOLD_BYTES) {
+  if (!settings.prefs) settings.prefs = {};
+  settings.prefs.lowMemoryMode = true;
+  settings.prefs.lowMemoryModeAutoDetected = true;
+  saveSettings();
+}
+
+// Low Memory Mode — must also be applied before app is ready (disableHardwareAcceleration
+// has no effect once the GPU process has already spun up).
+if (settings.prefs?.lowMemoryMode) app.disableHardwareAcceleration();
 
 const CHAT_URL = 'https://chat.literotica.com';
 
@@ -654,7 +671,7 @@ function createWindow() {
       contextIsolation: true,
       preload: path.join(__dirname, 'preload.js'),
       partition: PARTITION,
-      spellcheck: true,
+      spellcheck: !settings.prefs?.lowMemoryMode,
     },
   });
 
@@ -3328,6 +3345,33 @@ function createAppMenu() {
           },
         },
         { type: 'separator' },
+        // ── Performance ──────────────────────────────────────────────────────
+        {
+          label: 'Low Memory Mode',
+          type: 'checkbox',
+          checked: settings.prefs?.lowMemoryMode ?? false,
+          click: (menuItem) => {
+            const { dialog } = require('electron');
+            const enabling = menuItem.checked;
+            dialog.showMessageBox(win, {
+              type: 'question',
+              buttons: ['Restart Now', 'Cancel'],
+              defaultId: 0,
+              cancelId: 1,
+              title: 'Low Memory Mode',
+              message: `${enabling ? 'Enable' : 'Disable'} Low Memory Mode?`,
+              detail: 'Turns off GPU-accelerated rendering and spellcheck to reduce RAM usage. Best for machines with 4GB of RAM or less. The app needs to restart to apply this.',
+            }).then(({ response }) => {
+              if (response !== 0) { createAppMenu(); return; } // revert checkbox visual state
+              if (!settings.prefs) settings.prefs = {};
+              settings.prefs.lowMemoryMode = enabling;
+              saveSettings();
+              app.relaunch();
+              app.quit();
+            });
+          },
+        },
+        { type: 'separator' },
         // ── Account ──────────────────────────────────────────────────────────
         { label: 'Profile', submenu: profileItems },
         { type: 'separator' },
@@ -4514,6 +4558,17 @@ app.whenReady().then(() => {
   attachBOSHLogger();
   setupTray();
   setupAutoUpdater();
+
+  if (settings.prefs?.lowMemoryModeAutoDetected) {
+    delete settings.prefs.lowMemoryModeAutoDetected;
+    saveSettings();
+    if (Notification.isSupported()) {
+      new Notification({
+        title: 'Low Memory Mode enabled',
+        body: 'This machine has 4GB of RAM or less, so Lit Chat turned on Low Memory Mode automatically. Change this anytime from the ☰ menu.',
+      }).show();
+    }
+  }
 
   const sess = session.fromPartition(PARTITION);
 
