@@ -4161,6 +4161,16 @@ function injectImageSharing() {
       // calling conn.send(to: roomjid) does NOT reach the recipient's app session
       // (wrong/stale resource on the roomjid), so we must go through Candy.
       // The _litBypass flag tells our picpub submit-interceptor to ignore this one.
+      //
+      // Candy's own Message.submit handler (src/view/pane/message.js) addresses and
+      // renders every send using Candy.View.getCurrent().roomJid — the tab currently
+      // on screen — not the pane the submitted form belongs to (upstream even has a
+      // "roomJid might be slightly incorrect in this case" FIXME on it). Since photo
+      // uploads/link-fetches are async, the user can switch DM tabs before this runs;
+      // without correcting for that, the message gets addressed to whatever tab is
+      // active at submit time instead of the one the photo was dropped/linked into.
+      // Force Candy's active room to the target for the moment of submit, then
+      // restore whatever tab the user is actually looking at.
       function sendViaCandyForm(jid, text) {
         var pane = document.querySelector('.room-pane[data-roomjid=' + JSON.stringify(jid) + ']');
         var form = pane && pane.querySelector('.message-form');
@@ -4170,11 +4180,21 @@ function injectImageSharing() {
           console.warn('[picpub] sendViaCandyForm: no message form/input for', jid);
           return false;
         }
+
+        var canSwitch = typeof Candy !== 'undefined' && Candy.View && Candy.View.getCurrent &&
+          Candy.View.Pane && Candy.View.Pane.Room && typeof Candy.View.Pane.Room.show === 'function' &&
+          Candy.View.Pane.Chat && Candy.View.Pane.Chat.rooms;
+        var prevJid = canSwitch ? Candy.View.getCurrent().roomJid : null;
+        var needsSwitch = canSwitch && prevJid !== jid && Candy.View.Pane.Chat.rooms[jid];
+        if (needsSwitch) Candy.View.Pane.Room.show(jid);
+
         form._litBypass = true;
         input.value = text;
         if (submitBtn) submitBtn.click();
         else if (typeof form.requestSubmit === 'function') form.requestSubmit();
         else form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+
+        if (needsSwitch && prevJid && Candy.View.Pane.Chat.rooms[prevJid]) Candy.View.Pane.Room.show(prevJid);
         return true;
       }
 
