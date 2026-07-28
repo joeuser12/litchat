@@ -1189,14 +1189,23 @@ function injectDMHistory() {
               var pFull = escHtml(pBase + '#' + pHash);
               var pVtM = /[?&]vt=([^&#]+)/.exec(pBase);
               var pLitpic = 'litpic://' + pToken + '/' + pHash + (pVtM ? '?vt=' + pVtM[1] : '');
-              body = '<a href="' + pFull + '" target="_blank" ' +
-                     'data-pt="' + pToken + '" data-ph="' + pHash + '" data-pu="' + pFull + '" ' +
-                     'onclick="var t=this.dataset.pt,h=this.dataset.ph,u=this.dataset.pu;if(window._litOpenAlbum){window._litOpenAlbum(t,h,u);return false;}" ' +
-                     'style="display:inline-block">' +
-                     '<img src="' + pLitpic + '" ' +
-                     'data-lp-token="' + pToken + '" data-lp-hash="' + pHash + '" ' +
-                     'oncontextmenu="window.litChat&&window.litChat.photoContextMenu(this.dataset.lpToken,this.dataset.lpHash);return false;" ' +
-                     'style="' + IMG_S + '" title="Click to open album"></a>';
+              var pIsVideo = /\.(?:mp4|webm|mov|mkv|avi)$/i.test(pHash);
+              if (pIsVideo) {
+                // <img> can't decode video — render a real player instead of a broken thumbnail.
+                body = '<video src="' + pLitpic + '" controls preload="metadata" ' +
+                       'data-lp-token="' + pToken + '" data-lp-hash="' + pHash + '" ' +
+                       'oncontextmenu="window.litChat&&window.litChat.photoContextMenu(this.dataset.lpToken,this.dataset.lpHash);return false;" ' +
+                       'style="' + IMG_S + '"></video>';
+              } else {
+                body = '<a href="' + pFull + '" target="_blank" ' +
+                       'data-pt="' + pToken + '" data-ph="' + pHash + '" data-pu="' + pFull + '" ' +
+                       'onclick="var t=this.dataset.pt,h=this.dataset.ph,u=this.dataset.pu;if(window._litOpenAlbum){window._litOpenAlbum(t,h,u);return false;}" ' +
+                       'style="display:inline-block">' +
+                       '<img src="' + pLitpic + '" ' +
+                       'data-lp-token="' + pToken + '" data-lp-hash="' + pHash + '" ' +
+                       'oncontextmenu="window.litChat&&window.litChat.photoContextMenu(this.dataset.lpToken,this.dataset.lpHash);return false;" ' +
+                       'style="' + IMG_S + '" title="Click to open album"></a>';
+              }
             } else {
               // linkify
               body = body.replace(/(https?:\\/\\/[^\\s<>"']+)/g,
@@ -3863,6 +3872,11 @@ function injectImageSharing() {
           el.controls = true;
           el.preload = 'metadata';
           el.style.cssText = IMG_STYLE;
+          // Callers listen for 'load' to know when the thumb is ready (e.g. to
+          // strip the raw message text) — <video> never fires that event, only
+          // 'loadedmetadata'/'loadeddata', so without this the text never gets
+          // hidden and stays stuck next to the player.
+          el.addEventListener('loadedmetadata', function() { el.dispatchEvent(new Event('load')); }, { once: true });
         } else {
           el = document.createElement('img');
           el.style.cssText = IMG_STYLE;
@@ -4475,9 +4489,8 @@ function attachBOSHLogger() {
       const body = result.base64Encoded
         ? Buffer.from(result.body, 'base64').toString('utf8')
         : result.body;
-      const received = extractMessages(body, 'received');
       const arrivalTs = responseArrival.get(requestId);
-      if (arrivalTs) for (const m of received) m.ts = arrivalTs;
+      const received = extractMessages(body, 'received', arrivalTs);
       writeMessages(received);
       await notifyDMs(received);
       notifyRoomMessages(received);
