@@ -39,7 +39,7 @@ function peerName(m) {
 
 function readAllMessages() {
   if (!fs.existsSync(LOG_DIR)) return [];
-  return fs.readdirSync(LOG_DIR)
+  const msgs = fs.readdirSync(LOG_DIR)
     .filter(f => f.endsWith('.jsonl'))
     .sort()
     .flatMap(file => {
@@ -48,6 +48,11 @@ function readAllMessages() {
         try { return [JSON.parse(line)]; } catch { return []; }
       });
     });
+  // Log-file append order isn't guaranteed to match true chronological order
+  // (received messages are logged asynchronously and can land late), so sort
+  // by timestamp rather than trusting file/line order.
+  msgs.sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
+  return msgs;
 }
 
 function msgSig(m) {

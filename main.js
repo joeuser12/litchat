@@ -504,6 +504,10 @@ function loadDMHistory(toJid) {
       } catch { /* skip malformed */ }
     }
   }
+  // Log-file append order isn't guaranteed to match true chronological order
+  // (received messages are logged asynchronously and can land late), so sort
+  // by timestamp rather than trusting file/line order.
+  msgs.sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
   return msgs.slice(-10).map(m => ({
     role: m.direction === 'sent' ? 'assistant' : 'user',
     content: m.body || '',
@@ -2711,6 +2715,11 @@ ipcMain.handle('logs:dmHistory', async (_e, username) => {
       } catch { /* skip malformed lines */ }
     }
   }
+  // Log-file append order isn't guaranteed to match true chronological order
+  // (received messages are logged asynchronously and can land late — this is
+  // what previously made links/images appear out of place in DM history), so
+  // sort by timestamp rather than trusting file/line order.
+  msgs.sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
   const now = Date.now() / 1000;
   const photoRe = /\u{1F4F7} View photo: https:\/\/picpub\.art\/v\/([a-f0-9]+)(?:\?[^#]*)?#([\w.]+)/u;
   const recent = msgs.slice(-100);
@@ -3766,6 +3775,7 @@ ipcMain.handle('logs:dmPhotos', (_e, username) => {
   const fmtB = /\u{1F4F7} View photo: https:\/\/picpub\.art\/v\/([a-f0-9]+)(?:\?[^#]*)?#([\w.]+)/u;
   const seen = new Set();
   const photos = [];
+  const msgs = [];
   for (const file of fs.readdirSync(logDir).filter(f => f.endsWith('.jsonl')).sort()) {
     const lines = fs.readFileSync(path.join(logDir, file), 'utf8').split('\n');
     for (const line of lines) {
@@ -3774,33 +3784,42 @@ ipcMain.handle('logs:dmPhotos', (_e, username) => {
         if (m.type !== 'chat') continue;
         const peer = nickOf(m.direction === 'sent' ? (m.to || '') : (m.from || ''));
         if (peer !== target) continue;
-        let hash, token, viewUrl;
-        const mA = fmtA.exec(m.body || '');
-        const mB = !mA && fmtB.exec(m.body || '');
-        if (mA) {
-          hash = mA[2]; viewUrl = mA[1]; token = null;
-        } else if (mB) {
-          token = mB[1]; hash = mB[2];
-          const album = settings.picpubAlbums?.[token];
-          const expired = album ? album.expiresAt < Date.now() / 1000 : false;
-          viewUrl = expired ? null : `https://picpub.art/v/${token}#${hash}`;
-        } else continue;
-        if (!hash || seen.has(hash)) continue;
-        seen.add(hash);
-        const meta = photoMeta[hash];
-        const isVideo = /\.(mp4|webm|mov|mkv|avi)$/i.test(hash);
-        let thumbSrc = null;
-        if (!isVideo && meta?.nativeUrl) {
-          thumbSrc = `https://picpub.art/96x96/${hash}`;
-        } else if (!isVideo) {
-          const tf = path.join(THUMBS_DIR, hash + '.jpg');
-          if (fs.existsSync(tf))
-            thumbSrc = 'data:image/jpeg;base64,' + fs.readFileSync(tf).toString('base64');
-        }
-        if (!viewUrl && meta?.nativeUrl) viewUrl = meta.nativeUrl;
-        photos.push({ hash, thumbSrc, viewUrl, ts: m.ts, direction: m.direction, isVideo });
+        msgs.push(m);
       } catch {}
     }
+  }
+  // Log-file append order isn't guaranteed to match true chronological order
+  // (received messages are logged asynchronously and can land late), so sort
+  // by timestamp rather than trusting file/line order.
+  msgs.sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
+  for (const m of msgs) {
+    try {
+      let hash, token, viewUrl;
+      const mA = fmtA.exec(m.body || '');
+      const mB = !mA && fmtB.exec(m.body || '');
+      if (mA) {
+        hash = mA[2]; viewUrl = mA[1]; token = null;
+      } else if (mB) {
+        token = mB[1]; hash = mB[2];
+        const album = settings.picpubAlbums?.[token];
+        const expired = album ? album.expiresAt < Date.now() / 1000 : false;
+        viewUrl = expired ? null : `https://picpub.art/v/${token}#${hash}`;
+      } else continue;
+      if (!hash || seen.has(hash)) continue;
+      seen.add(hash);
+      const meta = photoMeta[hash];
+      const isVideo = /\.(mp4|webm|mov|mkv|avi)$/i.test(hash);
+      let thumbSrc = null;
+      if (!isVideo && meta?.nativeUrl) {
+        thumbSrc = `https://picpub.art/96x96/${hash}`;
+      } else if (!isVideo) {
+        const tf = path.join(THUMBS_DIR, hash + '.jpg');
+        if (fs.existsSync(tf))
+          thumbSrc = 'data:image/jpeg;base64,' + fs.readFileSync(tf).toString('base64');
+      }
+      if (!viewUrl && meta?.nativeUrl) viewUrl = meta.nativeUrl;
+      photos.push({ hash, thumbSrc, viewUrl, ts: m.ts, direction: m.direction, isVideo });
+    } catch {}
   }
   return photos.reverse();
 });
@@ -4208,7 +4227,7 @@ function injectImageSharing() {
           indLi.style.cssText = 'list-style:none;padding:2px 8px';
           var ind = document.createElement('span');
           ind.style.cssText = 'color:#7c5cbf;font-size:12px;font-style:italic';
-          ind.textContent = 'Uploading image…';
+          ind.textContent = file.type.startsWith('video/') ? 'Uploading video…' : 'Uploading image…';
           indLi.appendChild(ind);
           msgPane.appendChild(indLi);
           var indScroller = msgPane.closest('.message-pane-wrapper') || msgPane.parentElement;
@@ -4313,7 +4332,7 @@ function injectImageSharing() {
 
         // Hidden file input
         var fileInput = document.createElement('input');
-        fileInput.type = 'file'; fileInput.accept = 'image/*'; fileInput.style.cssText = 'display:none';
+        fileInput.type = 'file'; fileInput.accept = 'image/*,video/*'; fileInput.style.cssText = 'display:none';
         fileInput.addEventListener('change', function() {
           var f = fileInput.files[0]; fileInput.value = '';
           if (f) handlePhotoUpload(jid, f);
@@ -4382,7 +4401,7 @@ function injectImageSharing() {
           e.preventDefault();
           pane.style.outline = ''; dragDepth = 0;
           var file = Array.from(e.dataTransfer.files).find(function(f) {
-            return f.type.startsWith('image/');
+            return f.type.startsWith('image/') || f.type.startsWith('video/');
           });
           if (file) handlePhotoUpload(jid, file);
         });
@@ -4437,6 +4456,15 @@ function attachBOSHLogger() {
   // fails intermittently if called before the response is fully loaded, and a
   // silent failure there was dropping whole batches of received messages.
   const pendingBodies = new Set();
+  // Wall-clock time each response actually arrived (captured synchronously in
+  // responseReceived), keyed by requestId. getResponseBody's retry loop below
+  // can delay the eventual log write by up to ~300ms, and larger response
+  // bodies (batched history, messages carrying links/images) are the ones
+  // most likely to still be buffering and need a retry — so stamping messages
+  // with the time the write happened to finish, instead of when the response
+  // actually arrived, skews exactly the messages this bug report is about
+  // later than their true position in the conversation.
+  const responseArrival = new Map();
 
   // Fetch a completed response body and log any messages in it. getResponseBody
   // can still transiently fail (buffer not ready / evicted), so retry briefly
@@ -4448,6 +4476,8 @@ function attachBOSHLogger() {
         ? Buffer.from(result.body, 'base64').toString('utf8')
         : result.body;
       const received = extractMessages(body, 'received');
+      const arrivalTs = responseArrival.get(requestId);
+      if (arrivalTs) for (const m of received) m.ts = arrivalTs;
       writeMessages(received);
       await notifyDMs(received);
       notifyRoomMessages(received);
@@ -4458,6 +4488,8 @@ function attachBOSHLogger() {
         return logReceivedBody(requestId, attempt + 1);
       }
       console.error('[logger] dropped response body after retries:', e.message);
+    } finally {
+      responseArrival.delete(requestId);
     }
   }
 
@@ -4472,6 +4504,7 @@ function attachBOSHLogger() {
     if (method === 'Network.loadingFailed') {
       pendingRequests.delete(params.requestId);
       pendingBodies.delete(params.requestId);
+      responseArrival.delete(params.requestId);
     }
 
     if (method === 'Network.responseReceived') {
@@ -4511,8 +4544,12 @@ function attachBOSHLogger() {
         pendingRequests.delete(requestId);
       }
 
-      // Defer the received-body fetch until the response is fully loaded.
+      // Defer the received-body fetch until the response is fully loaded, but
+      // remember the moment the response actually arrived so the eventual log
+      // entry reflects true arrival order rather than whenever the async
+      // fetch/retry loop happens to finish.
       pendingBodies.add(requestId);
+      responseArrival.set(requestId, new Date().toISOString());
     }
 
     if (method === 'Network.loadingFinished') {
@@ -4527,6 +4564,7 @@ function attachBOSHLogger() {
   dbg.on('detach', (_e, reason) => {
     pendingRequests.clear();
     pendingBodies.clear();
+    responseArrival.clear();
     console.warn('[logger] debugger detached (' + reason + ') — message logging paused until reattached');
   });
 
