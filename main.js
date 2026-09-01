@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Tray, nativeImage, shell, Notification, ipcMain, protocol, session, clipboard } = require('electron');
+const { app, BrowserWindow, Menu, Tray, nativeImage, shell, Notification, ipcMain, protocol, session, clipboard, net } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -67,6 +67,7 @@ process.env.LIT_PROFILE  = ACTIVE_ID;
 // ── End profile system ─────────────────────────────────────────────────────
 
 const { extractMessages, writeMessages } = require('./logger');
+const { messagesWithPeer } = require('./logstore');
 const { loadWatchList, saveWatchList } = require('./watch');
 
 const USER_CSS        = path.join(PROFILE_DIR, 'user.css');
@@ -482,33 +483,9 @@ async function sendOpenRouterReply(toJid, userText) {
 }
 
 function loadDMHistory(toJid) {
-  const logDir = path.join(PROFILE_DIR, 'logs');
-  if (!fs.existsSync(logDir)) return [];
   const slash = toJid.indexOf('/');
-  const target = (slash !== -1 ? toJid.slice(slash + 1) : toJid.split('@')[0]).toLowerCase();
-  const nickOf = jid => {
-    const s = jid.indexOf('/');
-    if (s !== -1) return jid.slice(s + 1).toLowerCase();
-    const at = jid.indexOf('@');
-    return (at !== -1 ? jid.slice(0, at) : jid).toLowerCase();
-  };
-  const msgs = [];
-  for (const file of fs.readdirSync(logDir).filter(f => f.endsWith('.jsonl')).sort()) {
-    const lines = fs.readFileSync(path.join(logDir, file), 'utf8').split('\n');
-    for (const line of lines) {
-      try {
-        const m = JSON.parse(line);
-        if (m.type !== 'chat') continue;
-        const peer = nickOf(m.direction === 'sent' ? (m.to || '') : (m.from || ''));
-        if (peer === target) msgs.push(m);
-      } catch { /* skip malformed */ }
-    }
-  }
-  // Log-file append order isn't guaranteed to match true chronological order
-  // (received messages are logged asynchronously and can land late), so sort
-  // by timestamp rather than trusting file/line order.
-  msgs.sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
-  return msgs.slice(-10).map(m => ({
+  const target = slash !== -1 ? toJid.slice(slash + 1) : toJid.split('@')[0];
+  return messagesWithPeer(target).slice(-10).map(m => ({
     role: m.direction === 'sent' ? 'assistant' : 'user',
     content: m.body || '',
   }));
@@ -1148,8 +1125,16 @@ function injectDMHistory() {
       window._litDMHistoryActive = true;
 
       function escHtml(s) {
-        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        // Quotes must be escaped too: this output is spliced into attribute values
+        // (href="…", data-pu="…"), and a partner-controlled URL containing a quote
+        // would otherwise break out of the attribute and inject event handlers.
+        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+                        .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
       }
+      // Logs written before 2026-05-27 (commit 251b985) stored bodies with XML
+      // entities intact; logger.js has unescaped at write time since. This
+      // display-time pass is kept for those older lines. Cost: a message in
+      // which someone literally typed "&amp;" shows as "&" — accepted.
       function unescXml(s) {
         return s.replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&apos;/g,"'").replace(/&amp;/g,'&');
       }
@@ -1173,7 +1158,7 @@ function injectDMHistory() {
           if (nativeM) {
             var nurl = escHtml(nativeM[1]);
             body = '<a href="' + nurl + '" target="_blank" style="display:inline-block">' +
-                   '<img src="' + nurl + '" style="' + IMG_S + '" title="Click to view image"></a>';
+                   '<img src="' + nurl + '" loading="lazy" decoding="async" style="' + IMG_S + '" title="Click to view image"></a>';
           } else if (m._photoExpired) {
             var THUMB_S = 'max-width:96px;max-height:96px;object-fit:contain;border-radius:4px;' +
               'opacity:0.55;display:block;margin:4px 0;cursor:default';
@@ -1183,7 +1168,7 @@ function injectDMHistory() {
               : '<span style="color:#444;font-style:italic">' + (isExpiredVideo ? '📹 (video expired)' : '📷 (photo expired)') + '</span>';
           } else {
             // Format B: uploaded — "📷 View photo: https://picpub.art/v/TOKEN#HASH"
-            var photoM = /\u{1F4F7} View photo: (https:\\/\\/picpub\\.art\\/v\\/([a-f0-9]+)(?:\\?[^#]*)?)#([\\w.]+)/u.exec(m.body || '');
+            var photoM = /\u{1F4F7} View photo: (https:\\/\\/picpub\\.art\\/v\\/([a-f0-9]+)(?:\\?[^#\\s"'<>]*)?)#([\\w.]+)/u.exec(m.body || '');
             if (photoM) {
               var pBase = photoM[1], pToken = photoM[2], pHash = photoM[3];
               var pFull = escHtml(pBase + '#' + pHash);
@@ -1192,7 +1177,9 @@ function injectDMHistory() {
               var pIsVideo = /\.(?:mp4|webm|mov|mkv|avi)$/i.test(pHash);
               if (pIsVideo) {
                 // <img> can't decode video — render a real player instead of a broken thumbnail.
-                body = '<video src="' + pLitpic + '" controls preload="metadata" ' +
+                // preload="none": up to 100 of these render at once; fetching even
+                // metadata for each is a burst of range requests through the proxy.
+                body = '<video src="' + pLitpic + '" controls preload="none" ' +
                        'data-lp-token="' + pToken + '" data-lp-hash="' + pHash + '" ' +
                        'oncontextmenu="window.litChat&&window.litChat.photoContextMenu(this.dataset.lpToken,this.dataset.lpHash);return false;" ' +
                        'style="' + IMG_S + '"></video>';
@@ -1201,7 +1188,7 @@ function injectDMHistory() {
                        'data-pt="' + pToken + '" data-ph="' + pHash + '" data-pu="' + pFull + '" ' +
                        'onclick="var t=this.dataset.pt,h=this.dataset.ph,u=this.dataset.pu;if(window._litOpenAlbum){window._litOpenAlbum(t,h,u);return false;}" ' +
                        'style="display:inline-block">' +
-                       '<img src="' + pLitpic + '" ' +
+                       '<img src="' + pLitpic + '" loading="lazy" decoding="async" ' +
                        'data-lp-token="' + pToken + '" data-lp-hash="' + pHash + '" ' +
                        'oncontextmenu="window.litChat&&window.litChat.photoContextMenu(this.dataset.lpToken,this.dataset.lpHash);return false;" ' +
                        'style="' + IMG_S + '" title="Click to open album"></a>';
@@ -1232,8 +1219,7 @@ function injectDMHistory() {
       }
 
       async function populatePane(pane) {
-        if (pane._litHistoryDone) return;
-        pane._litHistoryDone = true;
+        if (pane._litHistoryDone || pane._litHistoryPending) return;
 
         var jid = pane.dataset.roomjid || '';
         // DMs from group chat rooms use the format room@server/Nick
@@ -1245,8 +1231,20 @@ function injectDMHistory() {
         if (slash === -1 && jid.indexOf('@conference.') !== -1) return;
         if (!username) return;
 
+        // _litHistoryDone is only set once history is actually in the DOM (or
+        // there is none); an earlier version set it up front, so a pane whose
+        // message list wasn't built yet silently never got its history.
+        pane._litHistoryPending = true;
+        try {
+          await populatePaneInner(pane, username);
+        } finally {
+          pane._litHistoryPending = false;
+        }
+      }
+
+      async function populatePaneInner(pane, username) {
         var messages = await window.litChat.dmHistory(username).catch(function() { return []; });
-        if (!messages.length) return;
+        if (!messages.length) { pane._litHistoryDone = true; return; }
 
         // My own nick — the sender of 'sent' messages
         function nickOf(jid) {
@@ -1263,8 +1261,8 @@ function injectDMHistory() {
         }
 
         var msgPane = pane.querySelector('ul.message-pane, ul[class*="message"]');
-        // Candy may not have finished building the pane — retry briefly
-        if (!msgPane) {
+        // Candy may not have finished building the pane — retry for a few seconds
+        for (var tries = 0; !msgPane && tries < 10; tries++) {
           await new Promise(function(r) { setTimeout(r, 300); });
           msgPane = pane.querySelector('ul.message-pane, ul[class*="message"]');
         }
@@ -1272,6 +1270,18 @@ function injectDMHistory() {
 
         var html = buildHistory(messages, myNick);
         msgPane.insertAdjacentHTML('afterbegin', html);
+        pane._litHistoryDone = true;
+        // A proxied thumbnail that fails to load (album expired since the last
+        // check, PicPub down) becomes a placeholder instead of a broken image.
+        msgPane.querySelectorAll('.lit-dm-history img[data-lp-token]').forEach(function(img) {
+          img.addEventListener('error', function() {
+            var wrap = img.closest('a') || img;
+            var ph = document.createElement('span');
+            ph.style.cssText = 'color:#444;font-style:italic';
+            ph.textContent = '\u{1F4F7} (photo unavailable)';
+            wrap.replaceWith(ph);
+          }, { once: true });
+        });
         // Scroll the containing pane to the bottom so live messages are visible
         var scroller = msgPane.closest('.message-pane-wrapper') || msgPane.parentElement;
         if (scroller) scroller.scrollTop = scroller.scrollHeight;
@@ -2702,36 +2712,19 @@ ipcMain.handle('status:setHidden', (_e, jid, hidden) => {
   saveSettings();
 });
 
+// Partner-owned album tokens confirmed live by a HEAD check, with the time of
+// that check. Without this every DM pane open re-HEAD-checked every live token
+// in the last 100 messages before history could render.
+const picpubLiveTokens = new Map();   // token → ms timestamp of last confirmation
+const PICPUB_LIVE_TTL_MS = 10 * 60 * 1000;
+const PICPUB_CHECK_BUDGET_MS = 3000;  // max total wait before history renders regardless
+
 ipcMain.handle('logs:dmHistory', async (_e, username) => {
-  const logDir = path.join(PROFILE_DIR, 'logs');
-  if (!fs.existsSync(logDir)) return [];
-  const target = username.toLowerCase();
-  const nickOf = jid => {
-    const slash = jid.indexOf('/');
-    if (slash !== -1) return jid.slice(slash + 1).toLowerCase();
-    const at = jid.indexOf('@');
-    return (at !== -1 ? jid.slice(0, at) : jid).toLowerCase();
-  };
-  const msgs = [];
-  for (const file of fs.readdirSync(logDir).filter(f => f.endsWith('.jsonl')).sort()) {
-    const lines = fs.readFileSync(path.join(logDir, file), 'utf8').split('\n');
-    for (const line of lines) {
-      try {
-        const m = JSON.parse(line);
-        if (m.type !== 'chat') continue;
-        const peer = nickOf(m.direction === 'sent' ? (m.to || '') : (m.from || ''));
-        if (peer === target) msgs.push(m);
-      } catch { /* skip malformed lines */ }
-    }
-  }
-  // Log-file append order isn't guaranteed to match true chronological order
-  // (received messages are logged asynchronously and can land late — this is
-  // what previously made links/images appear out of place in DM history), so
-  // sort by timestamp rather than trusting file/line order.
-  msgs.sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
+  const msgs = messagesWithPeer(username);
   const now = Date.now() / 1000;
-  const photoRe = /\u{1F4F7} View photo: https:\/\/picpub\.art\/v\/([a-f0-9]+)(?:\?[^#]*)?#([\w.]+)/u;
-  const recent = msgs.slice(-100);
+  const photoRe = /\u{1F4F7} View photo: https:\/\/picpub\.art\/v\/([a-f0-9]+)(?:\?[^#\s"'<>]*)?#([\w.]+)/u;
+  // Copy before annotating: the log store hands out its cached objects.
+  const recent = msgs.slice(-100).map(m => ({ ...m }));
   const toCheck = new Set();
   for (const m of recent) {
     const match = photoRe.exec(m.body || '');
@@ -2742,18 +2735,25 @@ ipcMain.handle('logs:dmHistory', async (_e, username) => {
       if (album.expiresAt < now) m._photoExpired = true;
     } else if (picpubExpiredTokens.has(token)) {
       m._photoExpired = true;
+    } else if ((picpubLiveTokens.get(token) || 0) > Date.now() - PICPUB_LIVE_TTL_MS) {
+      // recently confirmed live — nothing to do
     } else {
       toCheck.add(token);
     }
   }
-  // HEAD-check tokens we don't own (partner's uploads) in parallel
+  // HEAD-check tokens we don't own (partner's uploads) in parallel, but never
+  // let PicPub being slow hold up the history: whatever hasn't answered within
+  // the budget is treated as live (the history <img> swaps to a placeholder on
+  // load error anyway), and the check keeps running to warm the caches.
   if (toCheck.size) {
-    await Promise.all([...toCheck].map(async token => {
+    const checks = Promise.all([...toCheck].map(async token => {
       try {
-        const res = await fetch(`https://picpub.art/v/${token}`, { method: 'HEAD' });
+        const res = await picpubFetch(`https://picpub.art/v/${token}`, { method: 'HEAD' }, 5_000);
         if (res.status === 404 || res.status === 410) picpubExpiredTokens.add(token);
-      } catch { /* network error — assume still live */ }
+        else picpubLiveTokens.set(token, Date.now());
+      } catch { /* network error — assume still live, re-check next time */ }
     }));
+    await Promise.race([checks, new Promise(r => setTimeout(r, PICPUB_CHECK_BUDGET_MS))]);
     // Second pass: annotate now that we have results
     for (const m of recent) {
       if (m._photoExpired) continue;
@@ -3024,7 +3024,7 @@ function buildPhotoAlbumsSubmenu() {
           });
           if (response !== 0) return;
           try {
-            await fetch(`https://picpub.art/v/api/albums/${token}`, {
+            await picpubFetch(`https://picpub.art/v/api/albums/${token}`, {
               method: 'DELETE',
               headers: { 'X-Owner-Token': album.ownerToken },
             });
@@ -3535,6 +3535,20 @@ function setupAutoUpdater() {
 
 // ── PicPub photo sharing ─────────────────────────────────────────────────────
 
+// Every PicPub API call goes through here so a stalled connection surfaces as
+// an error instead of leaving "Uploading image…" on screen forever. These
+// bodies are small JSON, so a whole-request deadline is fine. (The litpic://
+// proxy in app.whenReady is the exception: it streams images/video, so it only
+// bounds the wait for response headers.)
+const PICPUB_TIMEOUT_MS = 15_000;
+function picpubFetch(url, opts = {}, timeoutMs = PICPUB_TIMEOUT_MS) {
+  return fetch(url, { ...opts, signal: opts.signal || AbortSignal.timeout(timeoutMs) });
+}
+function friendlyFetchError(e) {
+  if (e && e.name === 'TimeoutError') return 'PicPub did not respond in time — check your connection and try again';
+  return (e && e.message) || String(e);
+}
+
 function invalidateDMAlbum(partnerUsername) {
   const token = settings.dmAlbumsByPartner?.[partnerUsername];
   if (token && settings.picpubAlbums) delete settings.picpubAlbums[token];
@@ -3542,13 +3556,26 @@ function invalidateDMAlbum(partnerUsername) {
   saveSettings();
 }
 
+const albumCreates = new Map();   // partner → in-flight createDMAlbum() promise
+
 async function getOrCreateDMAlbum(partnerUsername) {
   const token = settings.dmAlbumsByPartner?.[partnerUsername];
   const existing = token && settings.picpubAlbums?.[token];
   if (existing && existing.expiresAt > Date.now() / 1000 + 120) {
     return { token, ownerToken: existing.ownerToken, viewUrl: `https://picpub.art/v/${token}` };
   }
-  const res = await fetch('https://picpub.art/v/api/albums', {
+  // Two quick drops to a new partner must not each create an album (the second
+  // would silently orphan the first): share a single in-flight creation.
+  let inflight = albumCreates.get(partnerUsername);
+  if (!inflight) {
+    inflight = createDMAlbum(partnerUsername).finally(() => albumCreates.delete(partnerUsername));
+    albumCreates.set(partnerUsername, inflight);
+  }
+  return inflight;
+}
+
+async function createDMAlbum(partnerUsername) {
+  const res = await picpubFetch('https://picpub.art/v/api/albums', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -3571,45 +3598,84 @@ async function getOrCreateDMAlbum(partnerUsername) {
   return { token: data.token, ownerToken: data.owner_token, viewUrl: data.view_url };
 }
 
-async function uploadToAlbum(album, buf, filename, mimeType) {
+async function uploadToAlbum(album, chunks, filename, mimeType) {
   const ct = mimeType || 'application/octet-stream';
   const boundary = '----LitPicBoundary' + Date.now().toString(16);
   const CRLF = '\r\n';
+  // One concat straight from the received chunks into the wire body — this is
+  // the only whole-file copy the main process makes.
   const bodyBuf = Buffer.concat([
     Buffer.from(
       `--${boundary}${CRLF}` +
       `Content-Disposition: form-data; name="files[]"; filename="${filename}"${CRLF}` +
       `Content-Type: ${ct}${CRLF}${CRLF}`
     ),
-    buf,
+    ...chunks,
     Buffer.from(`${CRLF}--${boundary}--${CRLF}`),
   ]);
-  return fetch(`https://picpub.art/v/api/albums/${album.token}/upload`, {
+  // 30s plus ~1s per 100KB (a 100KB/s floor) so large videos on slow links still get through
+  const timeoutMs = 30_000 + Math.ceil(bodyBuf.length / 100_000) * 1000;
+  return picpubFetch(`https://picpub.art/v/api/albums/${album.token}/upload`, {
     method: 'POST',
     headers: {
       'X-Owner-Token': album.ownerToken,
       'Content-Type': `multipart/form-data; boundary=${boundary}`,
     },
     body: bodyBuf,
-  });
+  }, timeoutMs);
 }
 
-// `data` is the file's bytes (Uint8Array read in the renderer via File.arrayBuffer()).
+// Uploads arrive from the renderer in chunks (picpub:uploadChunk) and are then
+// committed by picpub:upload. Earlier versions shipped the whole file as one
+// Uint8Array in a single invoke(): the renderer serialised the entire file in one
+// IPC message (a UI freeze for the duration) and the main process deserialised it,
+// copied it again with Buffer.from(), then again with Buffer.concat() — 4–5 full
+// copies alive at once, which on 4GB machines was enough to swap and read as a
+// hang. Chunking keeps the renderer's footprint at one chunk and the main
+// process at one assembled copy.
+//
 // We deliberately never read from file.path: drags materialised into temp files
 // (screenshot tools, browsers) can leave a stale/reused path whose on-disk content
 // is the *previous* drag, which then dedupes server-side to an older album image.
-ipcMain.handle('picpub:upload', async (_e, partnerUsername, fileName, mimeType, data) => {
+const pendingUploads = new Map();   // uploadId → { chunks: Buffer[], bytes, startedAt }
+const UPLOAD_STALE_MS = 15 * 60 * 1000;
+function sweepStaleUploads() {
+  const cutoff = Date.now() - UPLOAD_STALE_MS;
+  for (const [id, u] of pendingUploads) if (u.startedAt < cutoff) pendingUploads.delete(id);
+}
+
+ipcMain.handle('picpub:uploadChunk', (_e, uploadId, chunk) => {
+  if (typeof uploadId !== 'string' || !uploadId || !chunk) return false;
+  let u = pendingUploads.get(uploadId);
+  if (!u) {
+    sweepStaleUploads();   // drop leftovers from renderers that died mid-transfer
+    u = { chunks: [], bytes: 0, startedAt: Date.now() };
+    pendingUploads.set(uploadId, u);
+  }
+  // Wrap the deserialised bytes in place — Buffer.from(typedArray) would copy them
+  const buf = ArrayBuffer.isView(chunk)
+    ? Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength)
+    : Buffer.from(chunk);
+  u.chunks.push(buf);
+  u.bytes += buf.length;
+  return true;
+});
+
+ipcMain.handle('picpub:uploadAbort', (_e, uploadId) => { pendingUploads.delete(uploadId); });
+
+ipcMain.handle('picpub:upload', async (_e, partnerUsername, fileName, mimeType, uploadId) => {
+  const pending = pendingUploads.get(uploadId);
+  pendingUploads.delete(uploadId);
   try {
-    const buf = Buffer.from(data);
-    if (!buf.length) throw new Error('Dropped file is empty');
+    if (!pending || !pending.bytes) throw new Error('Dropped file is empty');
     const filename = path.basename(String(fileName || 'image'));
     let album = await getOrCreateDMAlbum(partnerUsername);
-    let res = await uploadToAlbum(album, buf, filename, mimeType);
+    let res = await uploadToAlbum(album, pending.chunks, filename, mimeType);
     // Album was deleted server-side while our cache still considered it valid — retry once
     if (res.status === 404 || res.status === 410) {
       invalidateDMAlbum(partnerUsername);
       album = await getOrCreateDMAlbum(partnerUsername);
-      res = await uploadToAlbum(album, buf, filename, mimeType);
+      res = await uploadToAlbum(album, pending.chunks, filename, mimeType);
     }
     if (!res.ok) throw new Error(`Upload failed: ${res.status} ${await res.text()}`);
     const data2 = await res.json();
@@ -3622,12 +3688,12 @@ ipcMain.handle('picpub:upload', async (_e, partnerUsername, fileName, mimeType, 
     const partnerViewUrl = await makeViewerLink(album.token, album.ownerToken, partnerUsername);
     return { ok: true, token: album.token, hash: added.hash, viewUrl: album.viewUrl, partnerViewUrl, deduped };
   } catch (e) {
-    return { ok: false, error: e.message };
+    return { ok: false, error: friendlyFetchError(e) };
   }
 });
 
 async function linkToAlbum(album, picpubUrl) {
-  return fetch(`https://picpub.art/v/api/albums/${album.token}/link`, {
+  return picpubFetch(`https://picpub.art/v/api/albums/${album.token}/link`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Owner-Token': album.ownerToken },
     body: JSON.stringify({ url: picpubUrl }),
@@ -3654,14 +3720,14 @@ ipcMain.handle('picpub:link', async (_e, partnerUsername, picpubUrl) => {
     const partnerViewUrl = await makeViewerLink(album.token, album.ownerToken, partnerUsername);
     return { ok: true, token: album.token, hash: data.hash, native_url: data.native_url || null, viewUrl: album.viewUrl, partnerViewUrl };
   } catch (e) {
-    return { ok: false, error: e.message };
+    return { ok: false, error: friendlyFetchError(e) };
   }
 });
 
 async function makeViewerLink(token, ownerToken, username) {
   if (!ownerToken || !username) return null;
   try {
-    const res = await fetch(`https://picpub.art/v/api/albums/${token}/viewer-link`, {
+    const res = await picpubFetch(`https://picpub.art/v/api/albums/${token}/viewer-link`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Owner-Token': ownerToken },
       body: JSON.stringify({ username }),
@@ -3685,8 +3751,12 @@ ipcMain.handle('picpub:viewerLink', async (_e, token) => {
   return makeViewerLink(token, album.ownerToken, username);
 });
 
+const HASH_RE  = /^[\w.]+$/;        // picpub image hash (regex-derived in the renderer, but never trust it for a path)
+const TOKEN_RE = /^[a-f0-9]+$/;      // picpub album token
+
 ipcMain.handle('thumbs:save', (_e, hash, dataUrl) => {
   try {
+    if (typeof hash !== 'string' || !HASH_RE.test(hash) || typeof dataUrl !== 'string') return;
     fs.mkdirSync(THUMBS_DIR, { recursive: true });
     const b64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
     fs.writeFileSync(path.join(THUMBS_DIR, hash + '.jpg'), Buffer.from(b64, 'base64'));
@@ -3694,13 +3764,15 @@ ipcMain.handle('thumbs:save', (_e, hash, dataUrl) => {
 });
 
 ipcMain.handle('picpub:contextMenu', (_e, token, hash) => {
+  // token/hash are interpolated into an executeJavaScript() string below
+  if (typeof token !== 'string' || !TOKEN_RE.test(token) || typeof hash !== 'string' || !HASH_RE.test(hash)) return null;
   const album = settings.picpubAlbums?.[token];
   if (!album?.ownerToken) return null;  // not our album — no menu
   const menu = Menu.buildFromTemplate([{
     label: 'Remove image from album',
     click: async () => {
       try {
-        const res = await fetch(`https://picpub.art/v/api/albums/${token}/images/${hash}`, {
+        const res = await picpubFetch(`https://picpub.art/v/api/albums/${token}/images/${hash}`, {
           method: 'DELETE',
           headers: { 'X-Owner-Token': album.ownerToken },
         });
@@ -3730,18 +3802,62 @@ ipcMain.handle('picpub:contextMenu', (_e, token, hash) => {
 const linkPreviewCache = new Map(); // url → { result, ts }
 const LINK_CACHE_MAX = 200;
 
+const PREVIEW_MAX_BYTES = 256 * 1024;   // og:/title tags live in <head>; never slurp a whole page
+
+// Only preview public http(s) URLs. A chat partner controls these links, so the
+// main process must not be talked into fetching loopback/LAN addresses.
+function isPreviewableUrl(u) {
+  let x;
+  try { x = new URL(u); } catch { return false; }
+  if (x.protocol !== 'http:' && x.protocol !== 'https:') return false;
+  const h = x.hostname.toLowerCase();
+  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal')) return false;
+  if (/^(127\.|10\.|0\.|169\.254\.|192\.168\.)/.test(h) || /^172\.(1[6-9]|2\d|3[01])\./.test(h)) return false;
+  if (h === '[::1]' || h === '[::]' || /^\[f[cd]/i.test(h) || /^\[fe[89ab]/i.test(h)) return false;
+  return true;
+}
+
+// Read at most `maxBytes` of a response body, then cancel the rest.
+async function readCapped(res, maxBytes) {
+  if (!res.body) return '';
+  const reader = res.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (total < maxBytes) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      total += value.length;
+    }
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
 ipcMain.handle('links:preview', async (_e, url) => {
+  if (typeof url !== 'string' || !isPreviewableUrl(url)) return null;
   const cached = linkPreviewCache.get(url);
   if (cached && Date.now() - cached.ts < 3_600_000) return cached.result;
   if (linkPreviewCache.size >= LINK_CACHE_MAX) linkPreviewCache.delete(linkPreviewCache.keys().next().value);
   try {
     const res = await fetch(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LitChat/1.0)' },
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LitChat/1.0)', 'Accept': 'text/html,application/xhtml+xml' },
       signal: AbortSignal.timeout(5000),
       redirect: 'follow',
     });
     if (!res.ok) { linkPreviewCache.set(url, { result: null, ts: Date.now() }); return null; }
-    const html = await res.text();
+    // Only HTML can carry og: tags. Without this check a link to a large binary
+    // (anything not in the renderer's extension skip-list) was downloaded into a
+    // main-process string for up to 5s.
+    const ctype = (res.headers.get('content-type') || '').toLowerCase();
+    if (!/^(text\/html|application\/xhtml\+xml)\b/.test(ctype)) {
+      res.body?.cancel().catch(() => {});
+      linkPreviewCache.set(url, { result: null, ts: Date.now() });
+      return null;
+    }
+    const html = await readCapped(res, PREVIEW_MAX_BYTES);
     function getMeta(prop) {
       const esc = prop.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const r1 = new RegExp('<meta[^>]+property=["\']' + esc + '["\'][^>]+content=["\']([^"\']+)["\']', 'i');
@@ -3771,37 +3887,11 @@ ipcMain.handle('links:preview', async (_e, url) => {
 // ── Photo gallery ─────────────────────────────────────────────────────────────
 
 ipcMain.handle('logs:dmPhotos', (_e, username) => {
-  const logDir = path.join(PROFILE_DIR, 'logs');
-  if (!fs.existsSync(logDir)) return [];
-  const target = username.toLowerCase();
-  const nickOf = jid => {
-    const slash = jid.indexOf('/');
-    if (slash !== -1) return jid.slice(slash + 1).toLowerCase();
-    const at = jid.indexOf('@');
-    return (at !== -1 ? jid.slice(0, at) : jid).toLowerCase();
-  };
   const fmtA = /^\u{1F4F7} (https:\/\/picpub\.art\/([a-z0-9]+\.[a-z]+))/u;
-  const fmtB = /\u{1F4F7} View photo: https:\/\/picpub\.art\/v\/([a-f0-9]+)(?:\?[^#]*)?#([\w.]+)/u;
+  const fmtB = /\u{1F4F7} View photo: https:\/\/picpub\.art\/v\/([a-f0-9]+)(?:\?[^#\s"'<>]*)?#([\w.]+)/u;
   const seen = new Set();
   const photos = [];
-  const msgs = [];
-  for (const file of fs.readdirSync(logDir).filter(f => f.endsWith('.jsonl')).sort()) {
-    const lines = fs.readFileSync(path.join(logDir, file), 'utf8').split('\n');
-    for (const line of lines) {
-      try {
-        const m = JSON.parse(line);
-        if (m.type !== 'chat') continue;
-        const peer = nickOf(m.direction === 'sent' ? (m.to || '') : (m.from || ''));
-        if (peer !== target) continue;
-        msgs.push(m);
-      } catch {}
-    }
-  }
-  // Log-file append order isn't guaranteed to match true chronological order
-  // (received messages are logged asynchronously and can land late), so sort
-  // by timestamp rather than trusting file/line order.
-  msgs.sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
-  for (const m of msgs) {
+  for (const m of messagesWithPeer(username)) {
     try {
       let hash, token, viewUrl;
       const mA = fmtA.exec(m.body || '');
@@ -3955,6 +4045,17 @@ function injectImageSharing() {
         })(li);
       }
 
+      // Rooms are public: a link posted there by anyone must not make this app
+      // fetch the page (link previews) or hot-link an image from an arbitrary
+      // host (which reveals the reader's IP to that host). PicPub formats A/B
+      // are left alone — that host is the one the app already talks to.
+      function inDMPane(el) {
+        var pane = el.closest && el.closest('.room-pane[data-roomjid]');
+        if (!pane) return false;
+        var jid = pane.dataset.roomjid || '';
+        return !(jid.indexOf('/') === -1 && jid.indexOf('@conference.') !== -1);
+      }
+
       function renderPhotoMsg(li) {
         if (li._litPhotoRendered) return;
         var text = li.textContent || '';
@@ -3978,13 +4079,13 @@ function injectImageSharing() {
 
         // Format B: uploaded image — proxied via litpic://
         // Message body: "📷 View photo: https://picpub.art/v/TOKEN#HASH"
-        var m = /\u{1F4F7} View photo: (https:\\/\\/picpub\\.art\\/v\\/([a-f0-9]+)(?:\\?[^#]*)?)#([\\w.]+)/u.exec(text);
+        var m = /\u{1F4F7} View photo: (https:\\/\\/picpub\\.art\\/v\\/([a-f0-9]+)(?:\\?[^#\\s"'<>]*)?)#([\\w.]+)/u.exec(text);
         if (!m) {
           // Fallback: Candy may linkify the URL — check anchor hrefs directly
           li.querySelectorAll('a[href*="picpub.art/v/"]').forEach(function(a) {
             if (m) return;
             var href = a.getAttribute('href') || '';
-            var hm = /picpub\\.art\\/v\\/([a-f0-9]+)(\\?[^#]*)?#([\\w.]+)/.exec(href);
+            var hm = /picpub\\.art\\/v\\/([a-f0-9]+)(\\?[^#\\s"'<>]*)?#([\\w.]+)/.exec(href);
             if (hm) m = [hm[0], 'https://picpub.art/v/' + hm[1] + (hm[2] || ''), hm[1], hm[3]];
           });
         }
@@ -4006,7 +4107,8 @@ function injectImageSharing() {
           return;
         }
 
-        // Format C: direct image URL from any host (jpg/jpeg/png/gif/webp)
+        // Format C: direct image URL from any host (jpg/jpeg/png/gif/webp) — DMs only
+        if (!inDMPane(li)) return;
         var imgM = /(https?:\\/\\/[^\\s<>"']+\\.(?:jpg|jpeg|png|gif|webp)(?:\\?[^\\s<>"']*)?)/i.exec(text);
         if (!imgM) return;
         var iurl = imgM[1];
@@ -4050,6 +4152,7 @@ function injectImageSharing() {
       function renderLinkPreview(li) {
         if (li._litPreviewDone || li._litPhotoRendered) return;
         li._litPreviewDone = true;
+        if (!inDMPane(li)) return;
         var text = li.textContent || '';
         var m = /(https?:\\/\\/[^\\s<>"']{12,})/.exec(text);
         if (!m) return;
@@ -4226,6 +4329,11 @@ function injectImageSharing() {
         if (submitBtn) submitBtn.click();
         else if (typeof form.requestSubmit === 'function') form.requestSubmit();
         else form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+        // Submit is handled synchronously, so the flag has done its job. Clear it
+        // unconditionally: if our interceptor wasn't attached to this form, a
+        // stale 'true' would make the user's next typed picpub link bypass
+        // conversion and go out as a raw URL.
+        form._litBypass = false;
 
         if (needsSwitch && prevJid && Candy.View.Pane.Chat.rooms[prevJid]) Candy.View.Pane.Room.show(prevJid);
         return true;
@@ -4241,26 +4349,41 @@ function injectImageSharing() {
           indLi.style.cssText = 'list-style:none;padding:2px 8px';
           var ind = document.createElement('span');
           ind.style.cssText = 'color:#7c5cbf;font-size:12px;font-style:italic';
-          ind.textContent = file.type.startsWith('video/') ? 'Uploading video…' : 'Uploading image…';
+          var baseLabel = file.type.startsWith('video/') ? 'Uploading video…' : 'Uploading image…';
+          ind.textContent = baseLabel;
           indLi.appendChild(ind);
           msgPane.appendChild(indLi);
           var indScroller = msgPane.closest('.message-pane-wrapper') || msgPane.parentElement;
           if (indScroller) indScroller.scrollTop = indScroller.scrollHeight;
         }
 
+        var uploadId = null;
         try {
           if (typeof window.litChat === 'undefined')
             throw new Error('preload bridge not loaded — try fully restarting the app');
-          if (typeof window.litChat.uploadPhoto !== 'function')
-            throw new Error('uploadPhoto missing from bridge (bridge keys: ' + Object.keys(window.litChat).join(', ') + ')');
+          if (typeof window.litChat.uploadPhoto !== 'function' || typeof window.litChat.uploadChunk !== 'function')
+            throw new Error('upload bridge missing (bridge keys: ' + Object.keys(window.litChat).join(', ') + ')');
+          if (!file.size) throw new Error('dropped file is empty');
+          var slash = jid.indexOf('/');
+          var partner = slash !== -1 ? jid.slice(slash + 1) : jid.split('@')[0];
           // Read the dropped file's bytes directly — never via file.path. Drags from
           // screenshot tools/browsers land in reused temp files, so the path can hold
           // the PREVIOUS drag's image even though the File object has the right data.
-          var bytes = new Uint8Array(await file.arrayBuffer());
-          if (!bytes.length) throw new Error('dropped file is empty');
-          var slash = jid.indexOf('/');
-          var partner = slash !== -1 ? jid.slice(slash + 1) : jid.split('@')[0];
-          var result = await window.litChat.uploadPhoto(partner, file.name || 'image', file.type, bytes);
+          // Stream them to the main process in ~4MB slices rather than one giant
+          // invoke(): serialising a whole video into a single IPC message froze the
+          // renderer and multiplied memory use (see picpub:uploadChunk in main.js).
+          uploadId = 'u' + Date.now().toString(36) + Math.random().toString(36).slice(2);
+          var CHUNK = 4 * 1024 * 1024;
+          var sentBytes = 0;
+          for (var off = 0; off < file.size; off += CHUNK) {
+            var part = new Uint8Array(await file.slice(off, off + CHUNK).arrayBuffer());
+            if (!(await window.litChat.uploadChunk(uploadId, part))) throw new Error('upload transfer rejected');
+            sentBytes += part.length;
+            if (ind && file.size > CHUNK) ind.textContent = baseLabel + ' ' + Math.round(sentBytes * 100 / file.size) + '%';
+          }
+          if (ind) ind.textContent = baseLabel;
+          var result = await window.litChat.uploadPhoto(partner, file.name || 'image', file.type, uploadId);
+          uploadId = null;   // main has consumed (or discarded) the chunks
           if (indLi) indLi.remove();
           if (!result.ok) throw new Error(result.error || 'upload failed');
 
@@ -4282,6 +4405,7 @@ function injectImageSharing() {
             setTimeout(function() { dupLi.remove(); }, 8000);
           }
         } catch (err) {
+          if (uploadId && window.litChat && window.litChat.uploadAbort) window.litChat.uploadAbort(uploadId).catch(function() {});
           if (indLi) { ind.textContent = 'Upload failed: ' + err.message; ind.style.color = '#e05050'; setTimeout(function() { indLi.remove(); }, 5000); }
         }
       }
@@ -4445,6 +4569,44 @@ function injectImageSharing() {
   `).catch(() => {});
 }
 
+// Housekeeping for state that otherwise only ever grows. Album records are kept
+// for a month past expiry so DM history can still mark our own expired photos
+// without a network check; thumbnails (96px JPEGs used as placeholders for
+// expired photos) are kept for a year. photo-meta.json is left alone: its
+// entries are ~60 bytes and stay useful indefinitely (linked images outlive
+// their albums on PicPub).
+const ALBUM_RETENTION_S = 30 * 24 * 3600;
+const THUMB_RETENTION_MS = 365 * 24 * 3600 * 1000;
+function pruneStaleState() {
+  const now = Date.now() / 1000;
+  let changed = false;
+  for (const [token, a] of Object.entries(settings.picpubAlbums || {})) {
+    if (typeof a?.expiresAt === 'number' && a.expiresAt < now - ALBUM_RETENTION_S) {
+      delete settings.picpubAlbums[token];
+      changed = true;
+    }
+  }
+  for (const [partner, token] of Object.entries(settings.dmAlbumsByPartner || {})) {
+    if (!settings.picpubAlbums?.[token]) {
+      delete settings.dmAlbumsByPartner[partner];
+      changed = true;
+    }
+  }
+  if (changed) saveSettings();
+
+  const cutoff = Date.now() - THUMB_RETENTION_MS;
+  fs.promises.readdir(THUMBS_DIR).then(async names => {
+    for (const name of names) {
+      if (!name.endsWith('.jpg')) continue;
+      const file = path.join(THUMBS_DIR, name);
+      try {
+        const st = await fs.promises.stat(file);
+        if (st.mtimeMs < cutoff) await fs.promises.unlink(file);
+      } catch { /* ignore */ }
+    }
+  }).catch(() => { /* no thumbs dir yet */ });
+}
+
 // ── End PicPub photo sharing ─────────────────────────────────────────────────
 
 function attachBOSHLogger() {
@@ -4459,7 +4621,11 @@ function attachBOSHLogger() {
     } catch (e) {
       return false;
     }
-    dbg.sendCommand('Network.enable');
+    // With the Network domain enabled Chromium keeps a copy of *every* renderer
+    // response body (that is what getResponseBody reads from) — inline images
+    // and video range chunks included, with defaults around 100MB total. We only
+    // ever read the KB-sized BOSH bodies, so keep those buffers small.
+    dbg.sendCommand('Network.enable', { maxTotalBufferSize: 32_000_000, maxResourceBufferSize: 8_000_000 });
     return true;
   }
 
@@ -4483,13 +4649,18 @@ function attachBOSHLogger() {
   // Fetch a completed response body and log any messages in it. getResponseBody
   // can still transiently fail (buffer not ready / evicted), so retry briefly
   // before giving up rather than silently losing the batch.
-  async function logReceivedBody(requestId, attempt = 0) {
+  //
+  // `arrivalTs` is passed in rather than looked up from responseArrival inside:
+  // an earlier version looked it up per attempt and deleted it in a `finally`,
+  // but `return logReceivedBody(...)` runs that finally as soon as the retry
+  // *starts*, so every retried batch lost its arrival time and fell back to
+  // "now" — exactly the large/slow bodies the arrival stamp exists for.
+  async function logReceivedBody(requestId, arrivalTs, attempt = 0) {
     try {
       const result = await dbg.sendCommand('Network.getResponseBody', { requestId });
       const body = result.base64Encoded
         ? Buffer.from(result.body, 'base64').toString('utf8')
         : result.body;
-      const arrivalTs = responseArrival.get(requestId);
       const received = extractMessages(body, 'received', arrivalTs);
       writeMessages(received);
       await notifyDMs(received);
@@ -4498,19 +4669,25 @@ function attachBOSHLogger() {
     } catch (e) {
       if (attempt < 3) {
         await new Promise(r => setTimeout(r, 100));
-        return logReceivedBody(requestId, attempt + 1);
+        return logReceivedBody(requestId, arrivalTs, attempt + 1);
       }
       console.error('[logger] dropped response body after retries:', e.message);
-    } finally {
-      responseArrival.delete(requestId);
     }
   }
 
   dbg.on('message', async (_e, method, params) => {
     if (method === 'Network.requestWillBeSent') {
-      const { requestId, request } = params;
+      const { requestId, request, wallTime } = params;
       if (request.method === 'POST' && request.postData) {
-        pendingRequests.set(requestId, request.postData);
+        // Stamp sent messages with the moment the request left, not when its
+        // BOSH response eventually came back: the server holds the request that
+        // carries an outgoing stanza until it has inbound data for us (or `wait`
+        // expires — up to 60s), so a response-time stamp can land our own
+        // message *after* the partner's reply once everything is sorted by ts.
+        const ts = typeof wallTime === 'number'
+          ? new Date(wallTime * 1000).toISOString()
+          : new Date().toISOString();
+        pendingRequests.set(requestId, { postData: request.postData, ts });
       }
     }
 
@@ -4531,7 +4708,7 @@ function attachBOSHLogger() {
       // Log sent messages from the request body (postData is already in hand — no race)
       const sent = pendingRequests.get(requestId);
       if (sent) {
-        const sentMsgs = extractMessages(sent, 'sent');
+        const sentMsgs = extractMessages(sent.postData, 'sent', sent.ts);
         writeMessages(sentMsgs);
         // Detect our own Literotica username from the local-part of our JID
         if (!myLitUsername) {
@@ -4567,7 +4744,9 @@ function attachBOSHLogger() {
 
     if (method === 'Network.loadingFinished') {
       if (!pendingBodies.delete(params.requestId)) return;
-      await logReceivedBody(params.requestId);
+      const arrivalTs = responseArrival.get(params.requestId);
+      responseArrival.delete(params.requestId);
+      await logReceivedBody(params.requestId, arrivalTs);
     }
   });
 
@@ -4615,12 +4794,25 @@ app.whenReady().then(() => {
     }
     const rangeHeader = request.headers.get('Range');
     if (rangeHeader) fetchHeaders['Range'] = rangeHeader;
+    // Bound only the wait for headers: once upstream starts streaming we must not
+    // abort mid-body, or long videos would cut out partway through playback.
+    if (!TOKEN_RE.test(token) || !HASH_RE.test(hash)) return new Response('Bad URL', { status: 400 });
+    const ac = new AbortController();
+    const headerTimer = setTimeout(() => ac.abort(), 20_000);
     try {
-      return await fetch(`https://picpub.art/v/api/albums/${token}/images/${hash}`, {
+      // net.fetch (Chromium's stack) rather than Node's: it is what Electron
+      // documents for protocol handlers, honours the system proxy, and returns
+      // headers consistent with the decoded body (Node's fetch can hand back a
+      // decoded body still labelled content-encoding: gzip, which Chromium then
+      // tries to decode a second time).
+      return await net.fetch(`https://picpub.art/v/api/albums/${token}/images/${hash}`, {
         headers: fetchHeaders,
+        signal: ac.signal,
       });
     } catch (e) {
-      return new Response(e.message, { status: 502 });
+      return new Response(e.message, { status: e.name === 'AbortError' ? 504 : 502 });
+    } finally {
+      clearTimeout(headerTimer);
     }
   });
 
@@ -4629,6 +4821,7 @@ app.whenReady().then(() => {
   attachBOSHLogger();
   setupTray();
   setupAutoUpdater();
+  pruneStaleState();
 
   if (settings.prefs?.lowMemoryModeAutoDetected) {
     delete settings.prefs.lowMemoryModeAutoDetected;

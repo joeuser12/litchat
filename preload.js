@@ -7,8 +7,12 @@ contextBridge.exposeInMainWorld('litChat', {
   dmHistory:        (username) => ipcRenderer.invoke('logs:dmHistory', username),
   openLitProfile:   () => ipcRenderer.send('ui:openLitProfile'),
   toggleAway:       () => ipcRenderer.invoke('prefs:toggleAway'),
-  uploadPhoto:      (partnerUser, fileName, mimeType, data) =>
-                      ipcRenderer.invoke('picpub:upload', partnerUser, fileName, mimeType, data),
+  // Uploads stream to the main process in slices: N × uploadChunk(uploadId, bytes),
+  // then uploadPhoto(…, uploadId) commits them; uploadAbort discards on failure.
+  uploadChunk:      (uploadId, chunk) => ipcRenderer.invoke('picpub:uploadChunk', uploadId, chunk),
+  uploadAbort:      (uploadId) => ipcRenderer.invoke('picpub:uploadAbort', uploadId),
+  uploadPhoto:      (partnerUser, fileName, mimeType, uploadId) =>
+                      ipcRenderer.invoke('picpub:upload', partnerUser, fileName, mimeType, uploadId),
   linkPhoto:        (partnerUser, url) =>
                       ipcRenderer.invoke('picpub:link', partnerUser, url),
   getViewerLink:    (token) =>

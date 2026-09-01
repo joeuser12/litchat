@@ -312,6 +312,9 @@
     function esc(s) {
       return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     }
+    // Logs written before 2026-05-27 (commit 251b985) stored bodies with XML
+    // entities intact; logger.js has unescaped at write time since. Kept for
+    // those older lines — a literally typed "&amp;" will display as "&".
     function unescapeXml(s) {
       return s.replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&apos;/g,"'").replace(/&amp;/g,'&');
     }

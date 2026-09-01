@@ -1,76 +1,14 @@
 const { contextBridge } = require('electron');
-const fs = require('fs');
-const path = require('path');
 const { readNote, saveNote } = require('./notes');
 const { loadWatchList, saveWatchList } = require('./watch');
-
-const LOG_DIR = path.join(process.env.LIT_USERDATA || __dirname, 'logs');
-
-// The nick is always the resource after '/' when present:
-//   "nudist@conference.server/arizona527" → "arizona527"
-//   "arizona527@server"                  → "arizona527"
-function nickOf(jid) {
-  if (!jid) return null;
-  const slash = jid.indexOf('/');
-  if (slash !== -1) return jid.slice(slash + 1).toLowerCase() || null;
-  const at = jid.indexOf('@');
-  return (at !== -1 ? jid.slice(0, at) : jid).toLowerCase() || null;
-}
-
-// Extracts the room name from a groupchat JID's local part.
-// XMPP escapes spaces as \20: "literotica\20lobby@..." → "literotica lobby"
-function roomOf(m) {
-  if (m.type !== 'groupchat') return null;
-  const jid = m.direction === 'received' ? m.from : m.to;
-  if (!jid) return null;
-  const at = jid.indexOf('@');
-  const local = at !== -1 ? jid.slice(0, at) : jid;
-  return local.replace(/\\20/g, ' ').replace(/\\22/g, '"').replace(/\\26/g, '&')
-              .replace(/\\27/g, "'").replace(/\\3a/g, ':').replace(/\\40/g, '@');
-}
-
-// Returns the "other person" for a message.
-// Sent groupchat is addressed to the room (no resource), so skip it.
-function peerName(m) {
-  if (m.type === 'groupchat' && m.direction === 'sent') return null;
-  const jid = m.direction === 'sent' ? m.to : m.from;
-  return nickOf(jid);
-}
-
-function readAllMessages() {
-  if (!fs.existsSync(LOG_DIR)) return [];
-  const msgs = fs.readdirSync(LOG_DIR)
-    .filter(f => f.endsWith('.jsonl'))
-    .sort()
-    .flatMap(file => {
-      const lines = fs.readFileSync(path.join(LOG_DIR, file), 'utf8').split('\n');
-      return lines.flatMap(line => {
-        try { return [JSON.parse(line)]; } catch { return []; }
-      });
-    });
-  // Log-file append order isn't guaranteed to match true chronological order
-  // (received messages are logged asynchronously and can land late), so sort
-  // by timestamp rather than trusting file/line order.
-  msgs.sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
-  return msgs;
-}
+const { nickOf, roomOf, peerName, readAllMessages, rewriteLogs } = require('./logstore');
 
 function msgSig(m) {
   return m.ts + '|' + m.direction + '|' + (m.body || '').slice(0, 80);
 }
 
-function rewriteLogs(keep) {
-  if (!fs.existsSync(LOG_DIR)) return;
-  for (const file of fs.readdirSync(LOG_DIR).filter(f => f.endsWith('.jsonl'))) {
-    const filepath = path.join(LOG_DIR, file);
-    const lines = fs.readFileSync(filepath, 'utf8').split('\n').filter(l => l.trim());
-    const kept = lines.filter(line => {
-      try { return keep(JSON.parse(line)); } catch { return true; }
-    });
-    if (kept.length !== lines.length) {
-      fs.writeFileSync(filepath, kept.length ? kept.join('\n') + '\n' : '');
-    }
-  }
+function decorate(m) {
+  return { ...m, sig: msgSig(m), fromUser: nickOf(m.from), toUser: nickOf(m.to), room: roomOf(m) };
 }
 
 contextBridge.exposeInMainWorld('logAPI', {
@@ -85,19 +23,16 @@ contextBridge.exposeInMainWorld('logAPI', {
 
   queryUser(username) {
     const target = username.toLowerCase();
-    return readAllMessages()
-      .filter(m => peerName(m) === target)
-      .map(m => ({ ...m, sig: msgSig(m), fromUser: nickOf(m.from), toUser: nickOf(m.to), room: roomOf(m) }));
+    return readAllMessages(m => peerName(m) === target).map(decorate);
   },
 
   recentDMs(limit = 15) {
-    const msgs = readAllMessages().filter(m => m.type === 'chat');
     const groups = new Map();
-    for (const m of msgs) {
+    for (const m of readAllMessages(m => m.type === 'chat')) {
       const peer = peerName(m);
       if (!peer) continue;
       if (!groups.has(peer)) groups.set(peer, []);
-      groups.get(peer).push({ ...m, sig: msgSig(m), fromUser: nickOf(m.from), toUser: nickOf(m.to), room: null });
+      groups.get(peer).push({ ...decorate(m), room: null });
     }
     return [...groups.entries()]
       .map(([peer, messages]) => ({ peer, messages, lastTs: messages[messages.length - 1].ts }))
@@ -122,15 +57,8 @@ contextBridge.exposeInMainWorld('logAPI', {
   searchMessages(query, limit = 300) {
     if (!query || query.trim().length < 2) return [];
     const q = query.toLowerCase();
-    const msgs = readAllMessages()
-      .filter(m => m.body && m.body.toLowerCase().includes(q));
-    return msgs.slice(-limit).map(m => ({
-      ...m,
-      sig: msgSig(m),
-      fromUser: nickOf(m.from),
-      toUser: nickOf(m.to),
-      room: roomOf(m),
-    }));
+    const msgs = readAllMessages(m => m.body && m.body.toLowerCase().includes(q));
+    return msgs.slice(-limit).map(decorate);
   },
 
   readNote,
