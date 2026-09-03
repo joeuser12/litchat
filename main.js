@@ -855,6 +855,9 @@ function createWindow() {
     const fsPx = settings.prefs?.fontSize;
     if (fsPx && fsPx !== 15)
       cssKeys.push(await win.webContents.insertCSS(fontSizeCSS(fsPx)));
+    const nameW = settings.prefs?.nameColWidth ?? DEFAULT_NAME_WIDTH;
+    if (nameW !== 110)
+      cssKeys.push(await win.webContents.insertCSS(nameColCSS(nameW)));
 
     if (fs.existsSync(USER_JS)) {
       win.webContents.executeJavaScript(fs.readFileSync(USER_JS, 'utf8')).catch(() => {});
@@ -1383,6 +1386,23 @@ const FONT_SIZES = [
 
 function fontSizeCSS(px) {
   return `#candy .message-pane,#candy .message-pane li,#candy .message-pane li span,#candy .message-pane li div{font-size:${px}px!important}`;
+}
+
+// Width of the sender-name column to the left of each chat message. Candy hard-codes
+// 110px, which clips longer Literotica usernames. The label floats inside the row's
+// left padding (padding = width + 20px gutter, label pulled back by the same amount).
+const NAME_WIDTHS = [
+  { px: 110, label: 'Normal' },
+  { px: 150, label: 'Wide' },
+  { px: 200, label: 'Extra Wide' },
+  { px: 260, label: 'Widest' },
+];
+const DEFAULT_NAME_WIDTH = 150;
+
+function nameColCSS(px) {
+  const pad = px + 20;
+  return `#candy .message-pane .label{width:${px}px!important;margin-left:-${pad}px!important}` +
+         `#candy .message-pane li>div{padding-left:${pad}px!important}`;
 }
 
 function adjustZoom(delta) {
@@ -2917,6 +2937,9 @@ async function setTheme(theme) {
   const fsPx = settings.prefs?.fontSize;
   if (fsPx && fsPx !== 15)
     cssKeys.push(await win.webContents.insertCSS(fontSizeCSS(fsPx)));
+  const nameW = settings.prefs?.nameColWidth ?? DEFAULT_NAME_WIDTH;
+  if (nameW !== 110)
+    cssKeys.push(await win.webContents.insertCSS(nameColCSS(nameW)));
 
   // Re-inject nav buttons with updated theme colours
   await win.webContents.executeJavaScript(
@@ -3372,6 +3395,20 @@ function createAppMenu() {
             click: async () => {
               if (!settings.prefs) settings.prefs = {};
               settings.prefs.fontSize = px;
+              saveSettings();
+              await setTheme(settings.theme || 'dark');
+            },
+          })),
+        },
+        {
+          label: 'Name Column',
+          submenu: NAME_WIDTHS.map(({ px, label }) => ({
+            label,
+            type: 'checkbox',
+            checked: (settings.prefs?.nameColWidth ?? DEFAULT_NAME_WIDTH) === px,
+            click: async () => {
+              if (!settings.prefs) settings.prefs = {};
+              settings.prefs.nameColWidth = px;
               saveSettings();
               await setTheme(settings.theme || 'dark');
             },
