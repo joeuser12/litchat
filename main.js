@@ -66,6 +66,72 @@ process.env.LIT_PROFILE  = ACTIVE_ID;
 
 // ── End profile system ─────────────────────────────────────────────────────
 
+// ── Single instance (per profile) ──────────────────────────────────────────
+// Electron's requestSingleInstanceLock() is keyed on userData, which every profile
+// shares, so it would break simultaneous --profile instances. Instead each profile
+// owns a small local IPC endpoint: a second launch of the same profile connects to
+// it, asks the running instance to show its window, and exits. Without this, users
+// who lost the window to the tray (Windows 11 hides tray icons by default) would
+// relaunch, get a second process fighting over the same session, and have to kill
+// everything from Task Manager.
+const net_ = require('net');
+// Keyed on the profile dir (which includes the user's home), so it's unique per
+// user and per profile. Lives in tmpdir rather than PROFILE_DIR because Unix socket
+// paths are capped at ~104 bytes and macOS userData paths can blow past that.
+const INSTANCE_KEY = require('crypto').createHash('sha1').update(PROFILE_DIR).digest('hex').slice(0, 16);
+const INSTANCE_ENDPOINT = process.platform === 'win32'
+  ? `\\\\.\\pipe\\litchat-${INSTANCE_KEY}`
+  : path.join(os.tmpdir(), `litchat-${INSTANCE_KEY}.sock`);
+let instanceServer = null;
+
+function restoreMainWindow() {
+  if (!win || win.isDestroyed()) return;
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+}
+
+// Resolves true if this process should run (it now owns the endpoint), false if a
+// running instance for this profile was told to show itself and we should quit.
+function claimInstance() {
+  return new Promise(resolve => {
+    let settled = false;
+    const done = v => { if (!settled) { settled = true; resolve(v); } };
+
+    const listen = () => {
+      if (process.platform !== 'win32') { try { fs.unlinkSync(INSTANCE_ENDPOINT); } catch {} }
+      instanceServer = net_.createServer(sock => {
+        let buf = '';
+        sock.setEncoding('utf8');
+        sock.on('data', d => {
+          buf += d;
+          if (buf.includes('show')) { restoreMainWindow(); sock.end('ok\n'); }
+        });
+        sock.on('error', () => {});
+      });
+      instanceServer.on('error', e => { console.warn('[instance] listen failed:', e.message); instanceServer = null; done(true); });
+      instanceServer.listen(INSTANCE_ENDPOINT, () => done(true));
+    };
+
+    const client = net_.connect(INSTANCE_ENDPOINT);
+    const giveUp = setTimeout(() => { client.destroy(); listen(); }, 1500);
+    client.on('connect', () => {
+      client.write('show\n');
+      // Wait briefly for the ack so the write is flushed before we exit.
+      const exitTimer = setTimeout(() => { client.destroy(); done(false); }, 1000);
+      client.on('data', () => { clearTimeout(exitTimer); client.destroy(); done(false); });
+    });
+    client.on('error', () => { clearTimeout(giveUp); listen(); }); // ECONNREFUSED / ENOENT: nobody home
+  });
+}
+const instanceClaim = claimInstance();
+
+app.on('will-quit', () => {
+  if (!instanceServer) return; // secondary instance: never touch the primary's endpoint
+  try { instanceServer.close(); } catch {}
+  if (process.platform !== 'win32') { try { fs.unlinkSync(INSTANCE_ENDPOINT); } catch {} }
+});
+
 const { extractMessages, writeMessages } = require('./logger');
 const { messagesWithPeer } = require('./logstore');
 const { loadWatchList, saveWatchList } = require('./watch');
@@ -663,12 +729,15 @@ function createWindow() {
   win.on('close',  scheduleWindowStateSave);
 
   win.on('minimize', () => {
+    if (!(settings.prefs?.minimizeToTray ?? true)) return;
     win.hide();
     if (!trayMinimizeHintShown) {
       trayMinimizeHintShown = true;
       new Notification({
         title: 'Lit Chat is still running',
-        body: 'Click the tray icon to bring it back.',
+        body: process.platform === 'win32'
+          ? 'Click the tray icon (it may be under the ^ arrow by the clock) or launch Lit Chat again to bring it back.'
+          : 'Click the tray icon or launch Lit Chat again to bring it back.',
       }).show();
     }
   });
@@ -3362,6 +3431,16 @@ function createAppMenu() {
             saveSettings();
           },
         },
+        {
+          label: 'Minimize to Tray',
+          type: 'checkbox',
+          checked: settings.prefs?.minimizeToTray ?? true,
+          click: (menuItem) => {
+            if (!settings.prefs) settings.prefs = {};
+            settings.prefs.minimizeToTray = menuItem.checked;
+            saveSettings();
+          },
+        },
         { type: 'separator' },
         // ── Performance ──────────────────────────────────────────────────────
         {
@@ -3456,7 +3535,7 @@ function updateTray() {
       },
     },
     { type: 'separator' },
-    { label: 'Show', click: () => { win.show(); win.focus(); } },
+    { label: 'Show', click: restoreMainWindow },
     { type: 'separator' },
     { label: 'Quit', click: () => app.quit() },
   ]));
@@ -3468,9 +3547,7 @@ function setupTray() {
   tray = new Tray(icon);
   tray.setToolTip('Lit Chat');
   updateTray();
-  tray.on('click', () => {
-    if (win.isVisible()) { win.focus(); } else { win.show(); win.focus(); }
-  });
+  tray.on('click', restoreMainWindow);
 }
 
 function setupAutoUpdater() {
@@ -4770,7 +4847,8 @@ function attachBOSHLogger() {
   attach();
 }
 
-app.whenReady().then(() => {
+Promise.all([app.whenReady(), instanceClaim]).then(([, isPrimary]) => {
+  if (!isPrimary) { app.exit(0); return; }
   // Proxy litpic://TOKEN/HASH → PicPub API with owner-token auth
   // Must be registered on the partition session, not the default session.
   session.fromPartition(PARTITION).protocol.handle('litpic', async (request) => {

@@ -17,6 +17,7 @@ Built with [Electron](https://www.electronjs.org/) around the site's existing Ca
 - User profile pages open in an in-app window
 - Per-room status message toggle — hide join/leave noise in busy rooms without affecting quieter ones
 - Multiple profiles — separate cookie sessions and per-profile theme selection
+- Minimize to tray (optional, on by default) — the app keeps running in the tray when minimized; relaunching it or clicking the tray icon brings the window back
 - **Inline photo sharing in DMs** — upload or link images directly from the chat input; photos are shared via [picpub.art](https://picpub.art) ephemeral albums and appear as inline thumbnails for both users. Recipients without the app see a working browser link. Drag-and-drop or use the 📷 button
 - Photo album manager — track active albums, set expiry (1h–7d), enable IP watermarking, or delete albums from the **Photo Albums** menu
 - Right-click any sent photo thumbnail to remove that image from the album
@@ -89,6 +90,8 @@ npm start -- --profile bob
 ```
 
 Profile IDs are the slugified version of the name you gave when creating the profile (e.g. "My Alt" → `my-alt`). They are shown in the window title when more than one profile exists.
+
+Launching a profile that is already running doesn't start a second copy — it just brings the existing window back to the front. This is also the easiest way to recover the window if it has been minimized to the tray and you can't find the tray icon (Windows 11 hides tray icons behind the **^** arrow by the clock unless you pin them).
 
 ## User data
 
