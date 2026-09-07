@@ -675,15 +675,28 @@ let readyPoll = null;
 let loginRaceRetried = false; // one-shot guard: auto-reload once if the logged-out
                               // login form shows despite having session cookies
 
+// Floor for both the live window and any restored geometry. Linux WMs report
+// transitional (sometimes near-zero) sizes while a window maximizes, minimizes or
+// hides, and a saved sliver came back as a window that was nothing but a title bar.
+const MIN_WIN_WIDTH  = 640;
+const MIN_WIN_HEIGHT = 400;
+
 function savedWindowBounds() {
   const ws = settings.windowState;
-  if (!ws?.width) return {};
+  if (!ws) return {};
+  const width  = Math.round(ws.width);
+  const height = Math.round(ws.height);
+  if (!Number.isFinite(width)  || width  < MIN_WIN_WIDTH)  return {};
+  if (!Number.isFinite(height) || height < MIN_WIN_HEIGHT) return {};
+  if (!Number.isFinite(ws.x) || !Number.isFinite(ws.y)) return { width, height };
+  const x = Math.round(ws.x), y = Math.round(ws.y);
   const { screen } = require('electron');
   const visible = screen.getAllDisplays().some(d =>
-    ws.x < d.bounds.x + d.bounds.width  && ws.x + ws.width  > d.bounds.x &&
-    ws.y < d.bounds.y + d.bounds.height && ws.y + ws.height > d.bounds.y
+    x < d.bounds.x + d.bounds.width  && x + width  > d.bounds.x &&
+    y < d.bounds.y + d.bounds.height && y + height > d.bounds.y
   );
-  return visible ? { width: ws.width, height: ws.height, x: ws.x, y: ws.y } : {};
+  // Off-screen position (monitor unplugged): keep the size, let the WM place it.
+  return visible ? { width, height, x, y } : { width, height };
 }
 
 let winStateSaveTimer = null;
@@ -691,16 +704,32 @@ function scheduleWindowStateSave() {
   clearTimeout(winStateSaveTimer);
   winStateSaveTimer = setTimeout(() => {
     if (!win || win.isDestroyed()) return;
-    const maximized = win.isMaximized();
-    if (!maximized) {
-      const [x, y] = win.getPosition();
-      const [width, height] = win.getSize();
-      settings.windowState = { width, height, x, y, maximized: false };
-    } else {
-      settings.windowState = { ...(settings.windowState || {}), maximized: true };
+    // Only a plain, visible window has geometry worth recording. Minimized, hidden
+    // and full-screen windows report junk on Linux, and isMaximized() can still be
+    // false mid-transition — so record the maximized flag from the dedicated
+    // maximize/unmaximize events' own state and never overwrite the restore size
+    // with whatever the WM happened to report during the animation.
+    if (win.isMinimized() || win.isFullScreen() || !win.isVisible()) return;
+    if (win.isMaximized()) {
+      if (!settings.windowState?.maximized) {
+        settings.windowState = { ...(settings.windowState || {}), maximized: true };
+        saveSettings();
+      }
+      return;
     }
+    const [x, y] = win.getPosition();
+    const [width, height] = win.getSize();
+    if (width < MIN_WIN_WIDTH || height < MIN_WIN_HEIGHT) return;
+    settings.windowState = { width, height, x, y, maximized: false };
     saveSettings();
   }, 500);
+}
+
+// Minimize to tray is only safe where a tray icon actually exists to click. Most
+// Linux desktops (GNOME without an extension) have no tray at all, so hiding there
+// makes the window vanish with no way back short of relaunching — default it off.
+function minimizeToTrayPref() {
+  return settings.prefs?.minimizeToTray ?? (process.platform !== 'linux');
 }
 
 function createWindow() {
@@ -710,6 +739,8 @@ function createWindow() {
   win = new BrowserWindow({
     width: 1280,
     height: 900,
+    minWidth: MIN_WIN_WIDTH,
+    minHeight: MIN_WIN_HEIGHT,
     ...savedWindowBounds(),
     title: multiProfile ? `Lit Chat — ${profileName}` : 'Lit Chat',
     icon: path.join(__dirname, 'build', 'icon.png'),
@@ -724,12 +755,16 @@ function createWindow() {
 
   if (settings.windowState?.maximized) win.maximize();
 
-  win.on('resize', scheduleWindowStateSave);
-  win.on('move',   scheduleWindowStateSave);
-  win.on('close',  scheduleWindowStateSave);
+  win.on('resize',     scheduleWindowStateSave);
+  win.on('move',       scheduleWindowStateSave);
+  win.on('maximize',   scheduleWindowStateSave);
+  win.on('unmaximize', scheduleWindowStateSave);
+  win.on('close',      scheduleWindowStateSave);
 
   win.on('minimize', () => {
-    if (!(settings.prefs?.minimizeToTray ?? true)) return;
+    // No tray icon (setupTray failed, or the desktop has no tray host) means
+    // hiding would strand the window, so stay in the taskbar instead.
+    if (!minimizeToTrayPref() || !tray) return;
     win.hide();
     if (!trayMinimizeHintShown) {
       trayMinimizeHintShown = true;
@@ -3471,7 +3506,8 @@ function createAppMenu() {
         {
           label: 'Minimize to Tray',
           type: 'checkbox',
-          checked: settings.prefs?.minimizeToTray ?? true,
+          enabled: !!tray,
+          checked: minimizeToTrayPref() && !!tray,
           click: (menuItem) => {
             if (!settings.prefs) settings.prefs = {};
             settings.prefs.minimizeToTray = menuItem.checked;
@@ -3579,12 +3615,21 @@ function updateTray() {
 }
 
 function setupTray() {
-  const iconPath = path.join(__dirname, 'build', 'icon.png');
-  const icon = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 });
-  tray = new Tray(icon);
-  tray.setToolTip('Lit Chat');
-  updateTray();
-  tray.on('click', restoreMainWindow);
+  // Linux desktops without a StatusNotifier/AppIndicator host can throw here. That
+  // must not abort the rest of app-ready, and it must leave tray null so the
+  // minimize handler knows not to hide the window.
+  try {
+    const iconPath = path.join(__dirname, 'build', 'icon.png');
+    const icon = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 });
+    tray = new Tray(icon);
+    tray.setToolTip('Lit Chat');
+    updateTray();
+    tray.on('click', restoreMainWindow);
+  } catch (err) {
+    tray = null;
+    console.warn('[tray] unavailable, minimize to tray disabled:', err?.message || err);
+  }
+  createAppMenu();   // refresh the Minimize to Tray item now that tray state is known
 }
 
 function setupAutoUpdater() {
