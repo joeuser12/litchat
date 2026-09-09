@@ -16,7 +16,7 @@ jobs:
             artifact: dist/LitChat-linux.AppImage
           - os: windows-latest
             build: npm run build:win -- --publish never
-            artifact: dist/LitChat-windows.exe
+            artifact: dist/LitChat-windows*.exe
           - os: macos-latest
             build: npm run build:mac -- --publish never
             artifact: dist/LitChat-mac.*

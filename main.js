@@ -230,6 +230,12 @@ let updateState = 'idle';   // 'idle' | 'checking' | 'downloading' | 'ready'
 let updateVersion = null;
 let _autoUpdater = null;
 
+// electron-builder's portable target sets these when its self-extracting exe runs.
+// A portable copy has no install location to update in place: letting electron-updater
+// run would download the NSIS installer and quietly turn the portable exe the user
+// placed somewhere deliberately into an ordinary installed app. Updates are manual there.
+const IS_PORTABLE = !!process.env.PORTABLE_EXECUTABLE_FILE;
+
 let tray = null;
 let trayMinimizeHintShown = false;
 
@@ -3548,6 +3554,13 @@ function createAppMenu() {
         // ── App ──────────────────────────────────────────────────────────────
         (() => {
           if (!app.isPackaged) return { label: 'Check for Updates (dev build)', enabled: false };
+          if (IS_PORTABLE) {
+            // Portable builds can't update themselves in place — link to releases instead.
+            return {
+              label: 'Get Updates on GitHub…',
+              click: () => require('electron').shell.openExternal('https://github.com/joeuser12/litchat/releases/latest'),
+            };
+          }
           if (process.platform === 'darwin') {
             // No auto-update on macOS (requires a signed app) — link to releases instead.
             return {
@@ -3634,6 +3647,8 @@ function setupTray() {
 
 function setupAutoUpdater() {
   if (!app.isPackaged) return;
+  // See IS_PORTABLE: updating a portable copy would install the app instead.
+  if (IS_PORTABLE) return;
   // electron-updater refuses to update unsigned apps on macOS; the menu links
   // to the GitHub releases page instead (see createAppMenu).
   if (process.platform === 'darwin') return;

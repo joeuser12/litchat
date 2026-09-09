@@ -49,10 +49,19 @@ Literotica's chat server keeps your session alive for up to a minute after you c
 ## Installation
 
 - **Linux** — [download LitChat-linux.AppImage](../../releases/latest/download/LitChat-linux.AppImage), make it executable, and run it
-- **Windows** — [download LitChat-windows.exe](../../releases/latest/download/LitChat-windows.exe) and run the installer
+- **Windows** — [download LitChat-windows.exe](../../releases/latest/download/LitChat-windows.exe) and run the installer, or see the portable build below
 - **macOS** — [download LitChat-mac.dmg](../../releases/latest/download/LitChat-mac.dmg), open it, drag to Applications — then follow the extra step below 👇
 
 All releases: [Releases page](../../releases)
+
+### Windows: portable build
+
+[LitChat-windows-portable.exe](../../releases/latest/download/LitChat-windows-portable.exe) is a single standalone executable. Nothing is installed: put it anywhere you like — a USB stick, a folder of your choosing — and rename it to whatever you want. It creates no Start Menu entry, no desktop shortcut and no Add/Remove Programs entry.
+
+Two things to know:
+
+- **It does not update itself.** The installer version updates in the background; the portable one can't, because it has no install location to replace. When a new version comes out, download the new exe and swap it in. The ☰ menu links to the releases page.
+- **Your settings are not portable.** Chat logs, profiles and preferences live in `%APPDATA%\Lit Chat\` on the machine, exactly as they do for the installed version — not next to the exe. The portable build shares them with an installed copy, and it leaves them behind on any machine you run it on.
 
 ### macOS: "Lit Chat is damaged and can't be opened"
 
@@ -129,6 +138,7 @@ To verify a downloaded binary (requires the [GitHub CLI](https://cli.github.com/
 ```
 gh attestation verify LitChat-linux.AppImage --repo joeuser12/litchat
 gh attestation verify LitChat-windows.exe    --repo joeuser12/litchat
+gh attestation verify LitChat-windows-portable.exe --repo joeuser12/litchat
 gh attestation verify LitChat-mac.dmg        --repo joeuser12/litchat
 ```
 
