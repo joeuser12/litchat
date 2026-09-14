@@ -12,13 +12,14 @@ Built with [Electron](https://www.electronjs.org/) around the site's existing Ca
 - Presence notifications for watched users
 - Multiple built-in themes: Dark, Dark Warm, Dark Teal, Nord, Dracula, Gruvbox, Catppuccin Mocha, Tokyo Night, Rosé Pine, Solarized Dark, Solarized Light, and Light
 - Chat log viewer — opens to recent DMs; search conversation history by username
+- **DM history that carries over between sessions** — the standard CandyChat interface opens every private chat blank, so yesterday's conversation is gone once you close the window. Lit Chat fills each DM with your last 100 messages with that person from your local chat log, in a collapsible, timestamped section above the live chat (shared photos included), so you can pick up where you left off. History is read from the chat logs stored locally for each profile
 - Per-user notes
 - Room manager — browse, favourite, and auto-join rooms on startup
 - User profile pages open in an in-app window
 - Per-room status message toggle — hide join/leave noise in busy rooms without affecting quieter ones
 - Multiple profiles — separate cookie sessions and per-profile theme selection
 - Adjustable name column — widen the sender-name column beside chat messages (☰ → Name Column) so long usernames aren't clipped
-- Minimize to tray (optional, on by default) — the app keeps running in the tray when minimized; relaunching it or clicking the tray icon brings the window back
+- Minimize to tray (optional; on by default on Windows and macOS, off by default on Linux, where many desktops have no tray) — the app keeps running in the tray when minimized; relaunching it or clicking the tray icon brings the window back. If no tray icon can be created, the option is disabled and minimizing works normally
 - **Inline photo sharing in DMs** — upload or link images directly from the chat input; photos are shared via [picpub.art](https://picpub.art) ephemeral albums and appear as inline thumbnails for both users. Recipients without the app see a working browser link. Drag-and-drop or use the 📷 button
 - Photo album manager — track active albums, set expiry (1h–7d), enable IP watermarking, or delete albums from the **Photo Albums** menu
 - Right-click any sent photo thumbnail to remove that image from the album
