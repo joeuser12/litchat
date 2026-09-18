@@ -134,6 +134,7 @@ app.on('will-quit', () => {
 
 const { extractMessages, writeMessages } = require('./logger');
 const { messagesWithPeer } = require('./logstore');
+const { parsePhotoBody } = require('./media-parse');
 const { loadWatchList, saveWatchList } = require('./watch');
 
 const USER_CSS        = path.join(PROFILE_DIR, 'user.css');
@@ -977,6 +978,7 @@ function createWindow() {
         injectNavButtons();
         setupPerRoomStatus();
         injectEmojiPicker();
+        injectMediaParser();
         injectDMHistory();
         injectImageSharing();
         // After readyPoll succeeds the BOSH connection may still be stalled (e.g.
@@ -1231,6 +1233,14 @@ function setupPerRoomStatus() {
   `).catch(() => {});
 }
 
+// Shared photo-message parser for the page. Must be injected before
+// injectDMHistory / injectImageSharing, which both call window._litParsePhoto.
+function injectMediaParser() {
+  win.webContents.executeJavaScript(
+    'window._litParsePhoto = ' + parsePhotoBody.toString() + ';'
+  ).catch(() => {});
+}
+
 function injectDMHistory() {
   win.webContents.executeJavaScript(`
     (function() {
@@ -1266,10 +1276,12 @@ function injectDMHistory() {
           var body = escHtml(unescXml(m.body || ''));
           // Render photo messages inline
           var IMG_S = 'max-width:280px;max-height:280px;object-fit:contain;border-radius:6px;display:block;margin:4px 0;cursor:pointer';
+          // Photo formats are recognised by the shared parser (media-parse.js),
+          // the same one the live-message enhancer uses.
+          var photo = window._litParsePhoto ? window._litParsePhoto(m.body || '') : null;
           // Format A: linked native — "📷 https://picpub.art/hash.ext"
-          var nativeM = /^\u{1F4F7} (https:\\/\\/picpub\\.art\\/[a-z0-9]+\\.[a-z]+)$/u.exec(m.body ? m.body.trim() : '');
-          if (nativeM) {
-            var nurl = escHtml(nativeM[1]);
+          if (photo && photo.kind === 'native' && photo.whole) {
+            var nurl = escHtml(photo.url);
             body = '<a href="' + nurl + '" target="_blank" style="display:inline-block">' +
                    '<img src="' + nurl + '" loading="lazy" decoding="async" style="' + IMG_S + '" title="Click to view image"></a>';
           } else if (m._photoExpired) {
@@ -1281,14 +1293,11 @@ function injectDMHistory() {
               : '<span style="color:#444;font-style:italic">' + (isExpiredVideo ? '📹 (video expired)' : '📷 (photo expired)') + '</span>';
           } else {
             // Format B: uploaded — "📷 View photo: https://picpub.art/v/TOKEN#HASH"
-            var photoM = /\u{1F4F7} View photo: (https:\\/\\/picpub\\.art\\/v\\/([a-f0-9]+)(?:\\?[^#\\s"'<>]*)?)#([\\w.]+)/u.exec(m.body || '');
-            if (photoM) {
-              var pBase = photoM[1], pToken = photoM[2], pHash = photoM[3];
-              var pFull = escHtml(pBase + '#' + pHash);
-              var pVtM = /[?&]vt=([^&#]+)/.exec(pBase);
-              var pLitpic = 'litpic://' + pToken + '/' + pHash + (pVtM ? '?vt=' + pVtM[1] : '');
-              var pIsVideo = /\.(?:mp4|webm|mov|mkv|avi)$/i.test(pHash);
-              if (pIsVideo) {
+            if (photo && photo.kind === 'album') {
+              var pToken = escHtml(photo.token), pHash = escHtml(photo.hash);
+              var pFull = escHtml(photo.fullUrl);
+              var pLitpic = escHtml(photo.litpicSrc);
+              if (photo.isVideo) {
                 // <img> can't decode video — render a real player instead of a broken thumbnail.
                 // preload="none": up to 100 of these render at once; fetching even
                 // metadata for each is a burst of range requests through the proxy.
@@ -1310,6 +1319,16 @@ function injectDMHistory() {
               // linkify
               body = body.replace(/(https?:\\/\\/[^\\s<>"']+)/g,
                 '<a href="$1" target="_blank" style="color:#818cf8;text-decoration:underline">$1</a>');
+              // Format C: direct image URL (or a native PicPub link with other text
+              // around it) — show it inline under the message text. The text link is
+              // hidden once the image loads; if it fails, the image is dropped and the
+              // link stays (see populatePaneInner).
+              if (photo && (photo.kind === 'image' || photo.kind === 'native')) {
+                var curl = escHtml(photo.url);
+                body += '<a href="' + curl + '" target="_blank" style="display:block;width:fit-content">' +
+                        '<img src="' + curl + '" loading="lazy" decoding="async" data-lit-inline-url="1" ' +
+                        'style="' + IMG_S + '" title="Click to view image"></a>';
+              }
             }
           }
           return '<li style="padding:3px 8px;border-bottom:1px solid rgba(255,255,255,0.04);list-style:none">' +
@@ -1318,7 +1337,11 @@ function injectDMHistory() {
             '<span style="color:#cccaee">' + body + '</span>' +
             '</li>';
         });
-        return '<li style="list-style:none;padding:0;margin:0" class="lit-dm-history">' +
+        // data-lit-owned: this <li> is app-injected, not a Candy message. The
+        // live-message enhancer (injectImageSharing) skips anything carrying it —
+        // without that it treated the whole history as ONE message, appended the
+        // oldest photo's thumbnail at the bottom and hid every in-place image.
+        return '<li style="list-style:none;padding:0;margin:0" class="lit-dm-history" data-lit-owned="history">' +
           '<details open>' +
           '<summary style="cursor:pointer;padding:6px 8px;color:#4a4870;font-size:11px;' +
             'background:rgba(0,0,0,0.25);letter-spacing:0.05em;user-select:none">' +
@@ -1394,6 +1417,18 @@ function injectDMHistory() {
             ph.textContent = '\u{1F4F7} (photo unavailable)';
             wrap.replaceWith(ph);
           }, { once: true });
+        });
+        // Inline direct-image URLs: once the image is showing, hide the raw URL
+        // link in that same message; a dead image degrades back to just the link.
+        msgPane.querySelectorAll('.lit-dm-history img[data-lit-inline-url]').forEach(function(img) {
+          var wrap = img.closest('a'), li = img.closest('li'), src = img.getAttribute('src');
+          img.addEventListener('load', function() {
+            li.querySelectorAll('a').forEach(function(a) {
+              if (a === wrap || a.querySelector('img,video')) return;
+              if ((a.getAttribute('href') || '').indexOf(src) === 0) a.style.display = 'none';
+            });
+          }, { once: true });
+          img.addEventListener('error', function() { wrap.remove(); }, { once: true });
         });
         // Scroll the containing pane to the bottom so live messages are visible
         var scroller = msgPane.closest('.message-pane-wrapper') || msgPane.parentElement;
@@ -4180,6 +4215,8 @@ function injectImageSharing() {
         // Hide any <a> elements Candy created for the picpub viewer URL
         li.querySelectorAll('a').forEach(function(a) {
           if (thumb && thumb.contains(a)) return;
+          // Only ever hide a text link — never an anchor that wraps rendered media.
+          if (a.querySelector('img,video')) return;
           if (/picpub\\.art\\/v\\//.test(a.getAttribute('href') || '')) a.style.display = 'none';
         });
         function walk(node) {
@@ -4201,6 +4238,7 @@ function injectImageSharing() {
 
       function hideImgUrl(li, iurl) {
         li.querySelectorAll('a').forEach(function(a) {
+          if (a.querySelector('img,video')) return;
           var href = a.getAttribute('href') || '';
           if (href === iurl || a.textContent.trim() === iurl) a.style.display = 'none';
         });
@@ -4232,14 +4270,17 @@ function injectImageSharing() {
 
       function renderPhotoMsg(li) {
         if (li._litPhotoRendered) return;
+        // Never enhance app-injected content (restored DM history renders its own media).
+        if (li.closest('[data-lit-owned]')) return;
         var text = li.textContent || '';
+        // Shared parser (media-parse.js) — same one buildHistory uses.
+        var photo = window._litParsePhoto ? window._litParsePhoto(text) : null;
 
         // Format A: linked image — native URL, directly embeddable, no auth needed
         // Message body: "📷 https://picpub.art/hash.ext"
-        var nativeM = /^\u{1F4F7} (https:\\/\\/picpub\\.art\\/[a-z0-9]+\\.[a-z]+)$/u.exec(text.trim());
-        if (nativeM) {
+        if (photo && photo.kind === 'native' && photo.whole) {
           li._litPhotoRendered = true;
-          var nurl = nativeM[1];
+          var nurl = photo.url;
           var thumb = makeThumb(nurl, function() { window.open(nurl); });
           thumb.addEventListener('load', function() {
             var ul = li.closest('ul');
@@ -4253,7 +4294,7 @@ function injectImageSharing() {
 
         // Format B: uploaded image — proxied via litpic://
         // Message body: "📷 View photo: https://picpub.art/v/TOKEN#HASH"
-        var m = /\u{1F4F7} View photo: (https:\\/\\/picpub\\.art\\/v\\/([a-f0-9]+)(?:\\?[^#\\s"'<>]*)?)#([\\w.]+)/u.exec(text);
+        var m = photo && photo.kind === 'album' ? [photo.fullUrl, photo.base, photo.token, photo.hash] : null;
         if (!m) {
           // Fallback: Candy may linkify the URL — check anchor hrefs directly
           li.querySelectorAll('a[href*="picpub.art/v/"]').forEach(function(a) {
@@ -4283,9 +4324,9 @@ function injectImageSharing() {
 
         // Format C: direct image URL from any host (jpg/jpeg/png/gif/webp) — DMs only
         if (!inDMPane(li)) return;
-        var imgM = /(https?:\\/\\/[^\\s<>"']+\\.(?:jpg|jpeg|png|gif|webp)(?:\\?[^\\s<>"']*)?)/i.exec(text);
-        if (!imgM) return;
-        var iurl = imgM[1];
+        // A native PicPub link surrounded by other text (nick, timestamp) lands here too.
+        if (!photo || (photo.kind !== 'image' && photo.kind !== 'native')) return;
+        var iurl = photo.url;
         li._litPhotoRendered = true;
         var imgThumb = makeThumb(iurl, function() { window.open(iurl); });
         imgThumb.addEventListener('load', function() {
@@ -4297,22 +4338,30 @@ function injectImageSharing() {
         li.appendChild(imgThumb);
       }
 
+      // A "message" is a direct <li> child of the observed pane that the app
+      // doesn't own. Everything the enhancer touches goes through here, so
+      // app-injected blocks (data-lit-owned, e.g. restored DM history) and any
+      // <li> nested inside them can never be mistaken for a chat message.
+      function messageLiFor(node, ul) {
+        var el = node.nodeType === 1 ? node : node.parentElement;
+        while (el && el.parentElement !== ul) el = el.parentElement;
+        if (!el || el.tagName !== 'LI' || el.hasAttribute('data-lit-owned')) return null;
+        return el;
+      }
+
       function observePane(ul) {
         if (ul._litPhotoObs) return;
         ul._litPhotoObs = true;
-        ul.querySelectorAll('li').forEach(renderPhotoMsg);
+        ul.querySelectorAll(':scope > li').forEach(function(li) {
+          if (messageLiFor(li, ul)) renderPhotoMsg(li);
+        });
         new MutationObserver(function(muts) {
           muts.forEach(function(mut) {
             mut.addedNodes.forEach(function(n) {
-              if (n.nodeType === 1) {
-                if (n.tagName === 'LI') { renderPhotoMsg(n); renderLinkPreview(n); }
-                else {
-                  // Content added inside an existing LI (e.g. Candy populating asynchronously)
-                  var parentLi = n.closest ? n.closest('li') : null;
-                  if (parentLi && !parentLi._litPhotoRendered) { renderPhotoMsg(parentLi); renderLinkPreview(parentLi); }
-                  n.querySelectorAll('li').forEach(function(li) { renderPhotoMsg(li); renderLinkPreview(li); });
-                }
-              }
+              // Covers both a new message <li> and content added inside an
+              // existing one (e.g. Candy populating asynchronously).
+              var li = messageLiFor(n, ul);
+              if (li) { renderPhotoMsg(li); renderLinkPreview(li); }
             });
           });
         }).observe(ul, { childList: true, subtree: true });
@@ -4325,6 +4374,7 @@ function injectImageSharing() {
       var _previewSkipRe = /\\.(?:jpg|jpeg|png|gif|webp|svg|mp4|webm|mov|pdf|zip|tar|gz)(\\?|#|$)/i;
       function renderLinkPreview(li) {
         if (li._litPreviewDone || li._litPhotoRendered) return;
+        if (li.closest('[data-lit-owned]')) return;
         li._litPreviewDone = true;
         if (!inDMPane(li)) return;
         var text = li.textContent || '';
