@@ -25,4 +25,9 @@ contextBridge.exposeInMainWorld('litChat', {
                       ipcRenderer.invoke('links:preview', url),
   dmPhotos:         (username) =>
                       ipcRenderer.invoke('logs:dmPhotos', username),
+  // LitChat-owned ignore list (nick-keyed, applies in every room and in private chats)
+  getIgnoreList:    () => ipcRenderer.invoke('ignore:list'),
+  ignoreUser:       (nick) => ipcRenderer.invoke('ignore:add', nick),
+  unignoreUser:     (nick) => ipcRenderer.invoke('ignore:remove', nick),
+  importNativeIgnores: (nicks) => ipcRenderer.invoke('ignore:importNative', nicks),
 });

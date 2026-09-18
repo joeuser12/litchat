@@ -136,6 +136,7 @@ const { extractMessages, writeMessages } = require('./logger');
 const { messagesWithPeer } = require('./logstore');
 const { parsePhotoBody } = require('./media-parse');
 const { loadWatchList, saveWatchList } = require('./watch');
+const { loadIgnoreList, saveIgnoreList, addTo: addIgnore, removeFrom: removeIgnore, normNick } = require('./ignore');
 
 const USER_CSS        = path.join(PROFILE_DIR, 'user.css');
 const USER_JS         = path.join(PROFILE_DIR, 'user.js');
@@ -208,6 +209,8 @@ function savePhotoMeta() {
 let cssKeys = []; // keys returned by insertCSS; needed to remove on theme change
 
 let watchList = loadWatchList();           // Set of lowercased nicks to watch
+let ignoreList = loadIgnoreList();         // Map lowercased nick → display name (see ignore.js)
+const isIgnored = nick => ignoreList.has(normNick(nick));
 let onlineWatched = new Set();             // currently-online watched nicks this session
 let presenceNotifyReady = false;           // false during startup roster flood
 let awayRepliedTo = new Set();             // JIDs already sent an away-reply this away session
@@ -282,6 +285,7 @@ function notifyRoomMessages(messages) {
     const roomJid  = unescapeJid(m.from.slice(0, slash));
     const msgNick  = m.from.slice(slash + 1);
     if (myLitUsername && msgNick === myLitUsername) continue;
+    if (isIgnored(msgNick)) continue;
     const roomName = settings.favourites?.[roomJid]?.name || roomJid.split('@')[0];
     const body     = m.body || '';
     const bodyDisp = body.length > 80 ? body.slice(0, 80) + '…' : body;
@@ -324,6 +328,8 @@ async function notifyDMs(messages) {
   }
   for (const m of messages) {
     if (m.type !== 'chat' || m.direction !== 'received') continue;
+    // Ignored sender: no notification and no away/LLM auto-reply either.
+    if (isIgnored(nickOf(m.from))) continue;
     const senderJid = (m.from || '').split('/')[0];
     if (activePaneJid && senderJid === activePaneJid) continue;
     const nick = nickOf(m.from);
@@ -975,6 +981,7 @@ function createWindow() {
         })();
         // Suppress presence notifications briefly while the initial roster flood passes
         setTimeout(() => { presenceNotifyReady = true; }, 5000);
+        injectIgnore();
         injectNavButtons();
         setupPerRoomStatus();
         injectEmojiPicker();
@@ -1239,6 +1246,216 @@ function injectMediaParser() {
   win.webContents.executeJavaScript(
     'window._litParsePhoto = ' + parsePhotoBody.toString() + ';'
   ).catch(() => {});
+}
+
+// LitChat's own ignore, replacing Candy's native one. Native ignore stores
+// room-occupant JIDs (room@conference/Nick) in a per-session server privacy
+// list and Candy never filters client-side, so it only held in the room where
+// it was clicked. Here the list is keyed by nick (= Literotica account name),
+// lives in the profile (ignore.js) and is enforced in the page at Candy's own
+// before-show hook — every room, private messages, all sessions.
+// The roster popup menu's Ignore/Unignore entries are re-pointed at this list,
+// so the UI users already know keeps working.
+// NOTE: injected template — keep it free of backslashes and regex literals.
+function injectIgnore() {
+  win.webContents.executeJavaScript(`
+    (function() {
+      if (window._litIgnoreActive) return;
+      if (typeof Candy === 'undefined' || !window.jQuery || !window.litChat) return;
+      window._litIgnoreActive = true;
+      var jq = window.jQuery;
+      var names = new Set();   // lowercased nicks
+
+      function norm(s) { return String(s == null ? '' : s).trim().toLowerCase(); }
+      function has(nick) { var n = norm(nick); return !!n && names.has(n); }
+      function resourceOf(jid) { try { return Strophe.getResourceFromJid(jid) || ''; } catch (e) { return ''; } }
+
+      var style = document.createElement('style');
+      style.textContent = 'ul.message-pane > li.lit-ignored { display: none !important; }';
+      document.head.appendChild(style);
+
+      // ── Enforcement: Candy's own hooks (a false return is honoured) ─────────
+      // Suppressing here also skips unread counters and the site's notification
+      // plugin, which both run after this hook.
+      jq(Candy).on('candy:view.message.before-show.litignore', function(e, a) {
+        if (a && has(a.name)) return false;
+      });
+      // An incoming private message from an ignored nick must not open/flash a tab.
+      jq(Candy).on('candy:view.private-room.before-open.litignore', function(e, a) {
+        if (a && has(a.roomName)) return false;
+      });
+      // Stamp the (uncropped) sender nick on every message rendered from now on,
+      // so sweep() can match exactly instead of by the cropped display name.
+      jq(Candy).on('candy:view.message.before-render.litignore', function(e, a) {
+        if (a && typeof a.template === 'string' && a.template.indexOf('data-lit-nick') === -1) {
+          a.template = a.template.replace('<li', '<li data-lit-nick="{{name}}"');
+        }
+      });
+
+      // ── Already-rendered messages (room history that arrived before this
+      // script, or messages from someone who is ignored only now) ─────────────
+      function cropNick(n) {
+        try { return Candy.Util.crop(n, Candy.View.getOptions().crop.message.nickname); } catch (e) { return n; }
+      }
+      function sweep() {
+        var cropped = new Set();
+        names.forEach(function(n) { cropped.add(norm(cropNick(n))); });
+        document.querySelectorAll('ul.message-pane > li').forEach(function(li) {
+          if (li.hasAttribute('data-lit-owned')) return;
+          var hit, nick = li.getAttribute('data-lit-nick');
+          if (nick !== null) {
+            hit = has(nick);
+          } else {
+            var label = li.querySelector(':scope > div > a.label');
+            hit = !!label && cropped.has(norm(label.textContent));
+          }
+          li.classList.toggle('lit-ignored', hit);
+        });
+      }
+
+      // ── Roster: ignore icon for that nick in every room ─────────────────────
+      function markRosterUser(el) {
+        var ig = has(el.getAttribute('data-nick'));
+        if (ig) el.classList.add('status-ignored');
+        else if (el._litIgnored) el.classList.remove('status-ignored');
+        el._litIgnored = ig;
+      }
+      function syncRoster() {
+        document.querySelectorAll('.roster-pane .user[data-nick]').forEach(markRosterUser);
+      }
+      jq(Candy).on('candy:view.roster.after-update.litignore', function(e, a) {
+        var el = a && a.element && a.element[0];
+        if (el && el.getAttribute) markRosterUser(el);
+      });
+
+      // ── Roster popup menu: Ignore / Unignore drive LitChat's list ───────────
+      function info(text) {
+        try {
+          var cur = Candy.View.getCurrent().roomJid;
+          if (cur) Candy.View.Pane.Chat.infoMessage(cur, 'Ignore:', text);
+        } catch (e) {}
+      }
+      function change(nick, add) {
+        var p = add ? window.litChat.ignoreUser(nick) : window.litChat.unignoreUser(nick);
+        Promise.resolve(p).then(function(changed) {
+          if (!changed) return;
+          info(add
+            ? 'You are now ignoring ' + nick + ' in all rooms and private messages.'
+            : 'You are no longer ignoring ' + nick + '.');
+        }).catch(function() {});
+      }
+      jq(Candy).on('candy:view.roster.context-menu.litignore', function(e, a) {
+        var ml = a && a.menulinks;
+        if (!ml) return;
+        function notMe(user, me) { return me.getNick() !== user.getNick(); }
+        ml.ignore = jq.extend({ 'class': 'ignore', label: jq.i18n._('ignoreActionLabel') }, ml.ignore, {
+          requiredPermission: function(user, me) { return notMe(user, me) && !has(user.getNick()); },
+          callback: function(ev, roomJid, user) { change(user.getNick(), true); }
+        });
+        ml.unignore = jq.extend({ 'class': 'unignore', label: jq.i18n._('unignoreActionLabel') }, ml.unignore, {
+          requiredPermission: function(user, me) { return notMe(user, me) && has(user.getNick()); },
+          callback: function(ev, roomJid, user) { change(user.getNick(), false); }
+        });
+        if (ml['private'] && typeof ml['private'].requiredPermission === 'function') {
+          var origPriv = ml['private'].requiredPermission;
+          ml['private'].requiredPermission = function(user, me, elem) {
+            return !has(user.getNick()) && origPriv(user, me, elem);
+          };
+        }
+      });
+
+      // ── Candy's native (room-scoped) privacy list ───────────────────────────
+      // Read with real result/error callbacks — Candy's own calls have none.
+      var PRIVACY = 'jabber:iq:privacy';
+      function getNative(cb) {
+        var c = Candy.Core.getConnection();
+        if (!c || !c.connected) return cb(null);
+        // Own watchdog: right after a (re)connect Strophe can report connected
+        // while the BOSH session is still stalled; an IQ sent then gets neither
+        // a reply nor Strophe's own timeout callback.
+        var done = false;
+        function finish(v) { if (done) return; done = true; clearTimeout(timer); cb(v); }
+        var timer = setTimeout(function() { finish(null); }, 15000);
+        try {
+          c.sendIQ(
+            $iq({ type: 'get' }).c('query', { xmlns: PRIVACY }).c('list', { name: 'ignore' }).tree(),
+            function(res) {
+              var vals = [];
+              jq(res).find('item').each(function() {
+                var it = jq(this);
+                if (it.attr('action') === 'deny' && it.attr('type') === 'jid' && it.attr('value')) vals.push(it.attr('value'));
+              });
+              finish(vals);
+            },
+            function() { finish(null); }
+          );
+        } catch (e) { finish(null); }
+      }
+      // Existing native ignores carry over once (main keeps the "imported" flag).
+      // Retried until the session is really up; it can take a minute to reconnect.
+      function importNative(attempt) {
+        attempt = attempt || 1;
+        window._litIgnore.nativeImport = 'pending (attempt ' + attempt + ')';
+        getNative(function(vals) {
+          window._litIgnore.nativeImport = vals ? 'fetched ' + vals.length : 'fetch failed (attempt ' + attempt + ')';
+          if (!vals) {
+            if (attempt < 12) setTimeout(function() { importNative(attempt + 1); }, 20000);
+            return;
+          }
+          var nicks = vals.map(resourceOf).filter(Boolean);
+          window.litChat.importNativeIgnores(nicks);
+        });
+      }
+      // Unignoring in LitChat must also drop native entries for that nick, or the
+      // server would keep blocking them in the one room where they were ignored.
+      // Built from a fresh, successful GET (never from Candy's in-memory copy,
+      // which is empty early in a session) and with all nicks in one write.
+      function removeNative(nicks) {
+        var gone = new Set(nicks.map(norm));
+        getNative(function(vals) {
+          if (!vals) return;
+          var keep = vals.filter(function(v) { return !gone.has(norm(resourceOf(v))); });
+          if (keep.length === vals.length) return;
+          var iq = $iq({ type: 'set' }).c('query', { xmlns: PRIVACY }).c('list', { name: 'ignore' });
+          if (keep.length) {
+            keep.forEach(function(v, i) {
+              iq.c('item', { type: 'jid', value: v, action: 'deny', order: String(i) }).c('message').up().up();
+            });
+          } else {
+            iq.c('item', { action: 'allow', order: '0' }).up();
+          }
+          Candy.Core.getConnection().sendIQ(iq.tree(), function() {
+            try {
+              var mem = Candy.Core.getUser().getPrivacyList('ignore');
+              for (var i = mem.length - 1; i >= 0; i--) {
+                if (gone.has(norm(resourceOf(mem[i])))) mem.splice(i, 1);
+              }
+            } catch (e) {}
+          }, function() {
+            console.warn('[lit-ignore] could not update the native privacy list');
+          }, 10000);
+        });
+      }
+
+      window._litIgnore = {
+        has: has,
+        set: function(list) {
+          var next = new Set((list || []).map(norm).filter(Boolean));
+          var removed = [];
+          names.forEach(function(n) { if (!next.has(n)) removed.push(n); });
+          names = next;
+          sweep();
+          syncRoster();
+          if (removed.length) removeNative(removed);
+        }
+      };
+
+      window.litChat.getIgnoreList().then(function(list) {
+        window._litIgnore.set(list);
+        importNative();
+      }).catch(function() {});
+    })();
+  `).catch(() => {});
 }
 
 function injectDMHistory() {
@@ -2774,6 +2991,9 @@ function openLinkWindow(url) {
     if (watchGuess) {
       sep();
       template.push({ label: `Watch "${watchGuess}"`, click: () => addWatchedUserViaPrompt(w, watchGuess) });
+      template.push(isIgnored(watchGuess)
+        ? { label: `Unignore "${watchGuess}"`, click: () => unignoreUser(watchGuess) }
+        : { label: `Ignore "${watchGuess}"`, click: () => ignoreUser(watchGuess) });
     }
 
     sep();
@@ -2868,6 +3088,11 @@ ipcMain.handle('prefs:toggleAway', () => {
   updateTray();
   return settings.prefs.away; // returned to renderer so button can update its style
 });
+
+ipcMain.handle('ignore:list', () => [...ignoreList.values()]);
+ipcMain.handle('ignore:add', (_e, name) => ignoreUser(name));
+ipcMain.handle('ignore:remove', (_e, name) => unignoreUser(name));
+ipcMain.handle('ignore:importNative', (_e, names) => importNativeIgnores(names));
 
 ipcMain.handle('status:getHidden', (_e, jid) => !!(settings.hideStatusRooms?.[jid]));
 ipcMain.handle('status:setHidden', (_e, jid, hidden) => {
@@ -3277,6 +3502,70 @@ async function addWatchedUserViaPrompt(targetWin, prefill = '') {
   if (name && name.trim()) watchUser(name);
 }
 
+// ── Ignored users ────────────────────────────────────────────────────────────
+// LitChat owns the ignore list (ignore.js); the page-side filter lives in
+// injectIgnore(). Every change is saved, reflected in the menu and pushed to
+// the page so it takes effect immediately in all rooms and private chats.
+function pushIgnoreListToPage() {
+  if (!win || win.isDestroyed()) return;
+  win.webContents.executeJavaScript(
+    'window._litIgnore && window._litIgnore.set(' + JSON.stringify([...ignoreList.values()]) + ');0'
+  ).catch(() => {});
+}
+
+function commitIgnoreList() {
+  saveIgnoreList(ignoreList);
+  createAppMenu();
+  pushIgnoreListToPage();
+}
+
+function ignoreUser(name) {
+  if (myLitUsername && normNick(name) === normNick(myLitUsername)) return false;
+  if (!addIgnore(ignoreList, name)) return false;
+  commitIgnoreList();
+  return true;
+}
+
+function unignoreUser(name) {
+  if (!removeIgnore(ignoreList, name)) return false;
+  commitIgnoreList();
+  return true;
+}
+
+// One-time merge of whatever was ignored through Candy's native (room-scoped)
+// privacy list, so existing ignores carry over and now apply everywhere.
+function importNativeIgnores(names) {
+  if (settings.ignoreNativeImported) return 0;
+  let added = 0;
+  for (const n of Array.isArray(names) ? names : []) {
+    if (myLitUsername && normNick(n) === normNick(myLitUsername)) continue;
+    if (addIgnore(ignoreList, n)) added++;
+  }
+  settings.ignoreNativeImported = true;
+  saveSettings();
+  if (added) commitIgnoreList();
+  return added;
+}
+
+async function addIgnoredUserViaPrompt(targetWin, prefill = '') {
+  const name = await promptDialog(targetWin || win, 'Ignore user (all rooms and private messages)', prefill);
+  if (name && name.trim()) ignoreUser(name);
+}
+
+function buildIgnoredUsersSubmenu() {
+  const users = [...ignoreList.values()].sort((a, b) => a.localeCompare(b));
+  const items = users.length
+    ? users.map((u) => ({
+        label: u,
+        type: 'checkbox',
+        checked: true,
+        click: () => unignoreUser(u), // unchecking removes the ignore
+      }))
+    : [{ label: '(no ignored users)', enabled: false }];
+  items.push({ type: 'separator' }, { label: 'Add User…', click: () => addIgnoredUserViaPrompt(win) });
+  return items;
+}
+
 function buildWatchedUsersSubmenu() {
   const users = [...loadWatchList()].sort();
   const items = users.length
@@ -3459,6 +3748,7 @@ function createAppMenu() {
           },
         },
         { label: 'Watched Users', submenu: buildWatchedUsersSubmenu() },
+        { label: 'Ignored Users', submenu: buildIgnoredUsersSubmenu() },
         { type: 'separator' },
         // ── Appearance ───────────────────────────────────────────────────────
         { label: 'Theme',     submenu: themeItems },
