@@ -1271,7 +1271,13 @@ function injectIgnore() {
       function resourceOf(jid) { try { return Strophe.getResourceFromJid(jid) || ''; } catch (e) { return ''; } }
 
       var style = document.createElement('style');
-      style.textContent = 'ul.message-pane > li.lit-ignored { display: none !important; }';
+      // Second rule: the site gives the roster name a fixed 110px and floats the
+      // 19px icons right, so a third icon (ignore, next to a moderator/owner star
+      // and the menu arrow) wraps onto the next line whenever the row is a little
+      // narrower, e.g. once the roster has a scrollbar. Size the name to what is
+      // left after three icons instead.
+      style.textContent = 'ul.message-pane > li.lit-ignored { display: none !important; }' +
+        ' #candy .roster-pane .user.status-ignored .label { width: calc(100% - 60px) !important; text-overflow: ellipsis; }';
       document.head.appendChild(style);
 
       // ── Enforcement: Candy's own hooks (a false return is honoured) ─────────
