@@ -30,4 +30,8 @@ contextBridge.exposeInMainWorld('litChat', {
   ignoreUser:       (nick) => ipcRenderer.invoke('ignore:add', nick),
   unignoreUser:     (nick) => ipcRenderer.invoke('ignore:remove', nick),
   importNativeIgnores: (nicks) => ipcRenderer.invoke('ignore:importNative', nicks),
+  // Invisible LitChat-to-LitChat capability discovery (see injectCaps in main.js)
+  capsSeen:         (nick, version) => ipcRenderer.invoke('caps:seen', nick, version),
+  capsList:         () => ipcRenderer.invoke('caps:list'),
+  capsHas:          (nick) => ipcRenderer.invoke('caps:has', nick),
 });

@@ -137,6 +137,7 @@ const { messagesWithPeer } = require('./logstore');
 const { parsePhotoBody } = require('./media-parse');
 const { loadWatchList, saveWatchList } = require('./watch');
 const { loadIgnoreList, saveIgnoreList, addTo: addIgnore, removeFrom: removeIgnore, normNick } = require('./ignore');
+const { loadCaps, saveCaps, recordCap, hasCap } = require('./caps');
 
 const USER_CSS        = path.join(PROFILE_DIR, 'user.css');
 const USER_JS         = path.join(PROFILE_DIR, 'user.js');
@@ -210,6 +211,7 @@ let cssKeys = []; // keys returned by insertCSS; needed to remove on theme chang
 
 let watchList = loadWatchList();           // Set of lowercased nicks to watch
 let ignoreList = loadIgnoreList();         // Map lowercased nick → display name (see ignore.js)
+let peerCaps   = loadCaps();               // Map lowercased nick → { name, version, lastSeen } (see caps.js)
 const isIgnored = nick => ignoreList.has(normNick(nick));
 let onlineWatched = new Set();             // currently-online watched nicks this session
 let presenceNotifyReady = false;           // false during startup roster flood
@@ -982,6 +984,7 @@ function createWindow() {
         // Suppress presence notifications briefly while the initial roster flood passes
         setTimeout(() => { presenceNotifyReady = true; }, 5000);
         injectIgnore();
+        injectCaps();
         injectNavButtons();
         setupPerRoomStatus();
         injectEmojiPicker();
@@ -1246,6 +1249,347 @@ function injectMediaParser() {
   win.webContents.executeJavaScript(
     'window._litParsePhoto = ' + parsePhotoBody.toString() + ';'
   ).catch(() => {});
+}
+
+// Invisible LitChat-to-LitChat capability discovery.
+//
+// The site offers no capability discovery, and every session — browser or app —
+// binds the resource "/Candy", so there is no way to tell from a JID whether the
+// person you are talking to is running this app. Two instances therefore greet
+// each other in band: a <message type='chat'> carrying ONLY a custom child and
+// no <body> at all.
+//
+// Why that is invisible to everyone else (checked against the site's shipped
+// candy.min.js 1.7.1): Candy's room message handler returns early for any stanza
+// without a <body>, and for a bodyless stanza that also has no chat-state child
+// the early return short-circuits before it triggers candy:core.message. So
+// nothing renders, no private-chat tab opens and the notifications plugin — which
+// binds candy:view.message.after-show — never fires. A vanilla Candy user sees
+// nothing whatsoever. (lit-monkeypatch.js only overrides increaseUnreadMessages,
+// so it is not on this path.)
+//
+// Receiving goes through our own Strophe handler rather than the BOSH/CDP logger,
+// because logger.js drops stanzas with no <body> and because only one CDP client
+// can attach at a time (DevTools steals the slot).
+//
+// JID handling is the subtle part. XMPP wants XEP-0106-escaped JIDs, and a JID
+// read back out of the DOM is NOT escaped — sending to one produced bounced
+// stanzas in June 2026 for every room whose name contains a space. So this code
+// never builds a JID: it only ever sends to a JID exactly as it arrived on a
+// stanza, and learns those from inbound presence and messages.
+//
+// NOTE: injected template — keep it free of backslashes and regex literals.
+function injectCaps() {
+  win.webContents.executeJavaScript(`
+    (function() {
+      if (window._litCapsActive) return 'already-active';
+      if (typeof Candy === 'undefined' || typeof $msg === 'undefined') return 'no-candy';
+      window._litCapsActive = true;
+
+      var NS = 'litchat:caps:0';
+      var VERSION = '1';
+      var BS = String.fromCharCode(92);   // backslash, kept out of the template
+
+      var wireJid = {};   // lowercased nick -> full JID exactly as seen on the wire
+      var peers   = {};   // lowercased nick -> peer's protocol version
+      var greeted = {};   // lowercased nick -> we have sent them a hello this session
+      var armedOn = null; // the Strophe.Connection our handlers are attached to
+      var hMsg    = null; // Strophe.Handler objects, kept so we can tell whether
+      var hPres   = null; // they are still registered (see arm() below)
+      var stats   = { sent: 0, recv: 0, msgsSeen: 0, bodyless: 0, rearms: 0, last: null };
+
+      // Undo XEP-0106 escaping in a JID's node part (spaces are the common case).
+      function unescapeNode(s) {
+        var pairs = [['20', ' '], ['22', '"'], ['26', '&'], ['27', "'"], ['2f', '/'],
+                     ['3a', ':'], ['3c', '<'], ['3e', '>'], ['40', '@']];
+        var out = String(s == null ? '' : s);
+        for (var i = 0; i < pairs.length; i++) {
+          out = out.split(BS + pairs[i][0]).join(pairs[i][1]);
+        }
+        return out.split(BS + '5c').join(BS);
+      }
+
+      // Mirrors nickOf() in main.js: the resource if there is one, else the node.
+      // Resources carry the nick unescaped; a bare JID's node may be escaped.
+      function nickOf(jid) {
+        var s = String(jid == null ? '' : jid);
+        var slash = s.indexOf('/');
+        if (slash !== -1) return s.slice(slash + 1).trim().toLowerCase();
+        var at = s.indexOf('@');
+        return unescapeNode(at !== -1 ? s.slice(0, at) : s).trim().toLowerCase();
+      }
+
+      function capsChild(stanza) {
+        if (stanza.getElementsByTagNameNS) {
+          var byNs = stanza.getElementsByTagNameNS(NS, 'x');
+          if (byNs && byNs.length) return byNs[0];
+        }
+        var kids = stanza.childNodes || [];
+        for (var i = 0; i < kids.length; i++) {
+          var k = kids[i];
+          if (k.nodeType === 1 && k.getAttribute && k.getAttribute('xmlns') === NS) return k;
+        }
+        return null;
+      }
+
+      function hasBody(stanza) {
+        var kids = stanza.childNodes || [];
+        for (var i = 0; i < kids.length; i++) {
+          var k = kids[i];
+          if (k.nodeType === 1 && String(k.nodeName).toLowerCase() === 'body') return true;
+        }
+        return false;
+      }
+
+      // Sends to 'to' verbatim — it must be a JID that came off the wire.
+      function sendCaps(to, kind) {
+        try {
+          var conn = Candy.Core.getConnection();
+          if (!conn || !to) return false;
+          var m = $msg({ to: to, type: 'chat' }).c('x', { xmlns: NS, v: VERSION, t: kind });
+          conn.send(m.tree ? m.tree() : m);
+          stats.sent++;
+          return true;
+        } catch (e) { return false; }
+      }
+
+      // ── Roster: a green dot on everyone known to run LitChat ────────────────
+      // Each roster row is <div.user><div.label/><ul><li.context/><li.role/><li.ignore/></ul></div>
+      // where every li is a 16px float:right icon with a 3px left margin (19px
+      // each) and the site shows/hides them by class. The dot is one more li, added
+      // last so it sits leftmost, next to the name. The label is a fixed 110px in a
+      // 164px row, so three icons already wrap onto a second line (the ignore
+      // rule in injectIgnore handles that case); size the label for the icons that
+      // can be showing instead: the role icon appears for role-moderator or
+      // affiliation-owner, the ignore icon for status-ignored.
+      var DOT = String.fromCharCode(0x25CF);
+      var rowSel = '#candy .roster-pane .user';
+      var capsStyle = document.createElement('style');
+      capsStyle.textContent =
+        rowSel + ' li.lit-peer-dot { float: right; display: block; width: 16px; height: 16px;' +
+          ' margin-left: 3px; line-height: 16px; font-size: 15px; text-align: center; color: #2ecc71; cursor: default; }' +
+        rowSel + '.lit-peer.role-moderator .label, ' + rowSel + '.lit-peer.affiliation-owner .label' +
+          ' { width: calc(100% - 60px) !important; text-overflow: ellipsis; }' +
+        rowSel + '.lit-peer.status-ignored.role-moderator .label, ' + rowSel + '.lit-peer.status-ignored.affiliation-owner .label' +
+          ' { width: calc(100% - 79px) !important; }' +
+        ' #candy #tooltip.lit-tip-near { bottom: auto !important; right: auto !important;' +
+          ' width: auto !important; white-space: nowrap; }';
+      document.head.appendChild(capsStyle);
+
+      // Tooltips. The site's script positions #tooltip beside the hovered icon, but
+      // its stylesheet then pins every tooltip to the bottom-right corner of the chat
+      // pane with !important (left/top: initial, bottom: 30px, right: 5px), so the
+      // coordinates never apply — the moderator star's tooltip lands in the corner
+      // too. Those coordinates also assume #candy sits at the page origin (there is a
+      // hard-coded "- 90" for the header), so reusing them here would put the box
+      // over the icon. For the dot, place it ourselves: to the left of the icon,
+      // vertically centred, sized to its text. An inline !important beats the
+      // stylesheet's !important, and the class drops the bottom/right pin and the
+      // fixed width. Every other icon is left as the site has it, so the class is
+      // cleared as soon as a different icon's tooltip shows. The site's own
+      // mouseenter handler is bound first, so it has already set the text and started
+      // the fade-in (which makes the box measurable) by the time this runs.
+      try {
+        window.jQuery('body').delegate('li[data-tooltip]', 'mouseenter.litcaps', function() {
+          var tip = document.getElementById('tooltip');
+          if (!tip) return;
+          if (!this.classList.contains('lit-peer-dot')) {
+            tip.classList.remove('lit-tip-near');
+            return;
+          }
+          tip.classList.add('lit-tip-near');
+          var icon = this.getBoundingClientRect();
+          var host = (tip.offsetParent || document.body).getBoundingClientRect();
+          var left = icon.left - host.left - tip.offsetWidth - 8;
+          var top = icon.top - host.top + (icon.height - tip.offsetHeight) / 2;
+          tip.style.setProperty('left', Math.round(left) + 'px', 'important');
+          tip.style.setProperty('top', Math.round(top) + 'px', 'important');
+        });
+      } catch (e) { /* the dot's tooltip placement is cosmetic */ }
+
+      function markRosterUser(el) {
+        var isPeer = !!peers[String(el.getAttribute('data-nick') || '').trim().toLowerCase()];
+        var ul = el.querySelector(':scope > ul');
+        var dot = ul && ul.querySelector(':scope > li.lit-peer-dot');
+        el.classList.toggle('lit-peer', isPeer);
+        if (isPeer && ul && !dot) {
+          dot = document.createElement('li');
+          dot.className = 'lit-peer-dot';
+          dot.setAttribute('data-tooltip', 'Uses LitChat');
+          dot.textContent = DOT;
+          ul.appendChild(dot);
+        } else if (!isPeer && dot) {
+          dot.remove();
+        }
+      }
+
+      function syncRoster() {
+        var rows = document.querySelectorAll('.roster-pane .user[data-nick]');
+        for (var i = 0; i < rows.length; i++) markRosterUser(rows[i]);
+      }
+
+      function record(nick, version) {
+        if (!nick) return;
+        peers[nick] = String(version == null ? '?' : version);
+        syncRoster();
+        try {
+          if (window.litChat && window.litChat.capsSeen) window.litChat.capsSeen(nick, peers[nick]);
+        } catch (e) { /* reporting is best-effort */ }
+      }
+
+      function onCaps(stanza, x, from) {
+        var nick = nickOf(from);
+        if (!nick) return;
+        var kind = x.getAttribute('t');
+        var version = x.getAttribute('v') || '?';
+        stats.recv++;
+        stats.last = { nick: nick, kind: kind, v: version, at: new Date().toISOString() };
+        if (kind === 'hello') {
+          greeted[nick] = true;      // they opened; no need for us to greet them
+          record(nick, version);
+          sendCaps(from, 'ack');     // reply to the exact JID we were given
+        } else if (kind === 'ack') {
+          record(nick, version);
+        }
+      }
+
+      // Strophe removes a handler that returns anything falsy, so this must
+      // return true on every path — including when something throws.
+      function onMessage(stanza) {
+        try {
+          var from = stanza.getAttribute('from');
+          if (from) wireJid[nickOf(from)] = from;
+          stats.msgsSeen++;
+          if (!hasBody(stanza)) stats.bodyless++;
+          var x = capsChild(stanza);
+          if (x) { onCaps(stanza, x, from); return true; }
+          // A real DM from someone we have not greeted: greet them now. This is
+          // the common discovery path, and it costs no extra stanza to strangers
+          // beyond the people the user is actually talking to.
+          if (from && hasBody(stanza) && stanza.getAttribute('type') === 'chat') {
+            var nick = nickOf(from);
+            if (nick && !greeted[nick] && !peers[nick]) {
+              greeted[nick] = true;
+              sendCaps(from, 'hello');
+            }
+          }
+        } catch (e) { /* never let a throw unregister us */ }
+        return true;
+      }
+
+      function onPresence(stanza) {
+        try {
+          var from = stanza.getAttribute('from');
+          if (from) wireJid[nickOf(from)] = from;
+        } catch (e) { /* ignore */ }
+        return true;
+      }
+
+      // Greet the peer of an open DM pane, for the case where we message first.
+      // The pane's data-roomjid is unescaped, so it is only used to find the nick;
+      // the JID we send to comes from the wire table.
+      function greetPane(pane) {
+        try {
+          var jid = pane.getAttribute('data-roomjid');
+          if (!jid) return;
+          var slash = jid.indexOf('/');
+          if (slash === -1 && jid.indexOf('@conference.') !== -1) return;  // a real room
+          var nick = slash !== -1 ? jid.slice(slash + 1).trim().toLowerCase()
+                                  : unescapeNode(jid.split('@')[0]).trim().toLowerCase();
+          if (!nick || greeted[nick] || peers[nick]) return;
+          var wire = wireJid[nick];
+          if (!wire) return;   // no wire-form JID yet; the inbound path will cover it
+          greeted[nick] = true;
+          sendCaps(wire, 'hello');
+        } catch (e) { /* ignore */ }
+      }
+
+      function sweepPanes() {
+        var panes = document.querySelectorAll('.room-pane[data-roomjid]');
+        for (var i = 0; i < panes.length; i++) greetPane(panes[i]);
+      }
+
+      // Re-arming cannot key on the connection object's identity. Strophe empties
+      // conn.handlers on reset/(re)connect while keeping the SAME Connection
+      // object, so handlers added before the session finished establishing are
+      // silently dropped and an identity check never notices — the handlers are
+      // simply gone for the rest of the session. Instead keep the Strophe.Handler
+      // objects addHandler() hands back and re-add them whenever they are no
+      // longer in the connection's live or pending list.
+      function isLive(conn, h) {
+        if (!h) return false;
+        var lists = [conn.handlers || [], conn.addHandlers || []];
+        for (var i = 0; i < lists.length; i++) {
+          if (lists[i].indexOf(h) !== -1) return true;
+        }
+        return false;
+      }
+
+      function arm() {
+        try {
+          var conn = Candy.Core.getConnection();
+          if (!conn || typeof conn.addHandler !== 'function') return false;
+          if (conn === armedOn && isLive(conn, hMsg) && isLive(conn, hPres)) return true;
+          armedOn = conn;
+          stats.rearms++;
+          hMsg  = conn.addHandler(onMessage, null, 'message', null, null, null);
+          hPres = conn.addHandler(onPresence, null, 'presence', null, null, null);
+          return true;
+        } catch (e) { return false; }
+      }
+
+      arm();
+      setInterval(arm, 10000);
+      sweepPanes();
+
+      // Candy re-renders roster rows as people join and change status.
+      try {
+        window.jQuery(Candy).on('candy:view.roster.after-update.litcaps', function(e, a) {
+          var el = a && a.element && a.element[0];
+          if (el && el.getAttribute) markRosterUser(el);
+        });
+      } catch (e) { /* the dot is cosmetic */ }
+
+      // Peers learned in earlier sessions, so their dot shows straight away.
+      try {
+        if (window.litChat && window.litChat.capsList) {
+          window.litChat.capsList().then(function(list) {
+            for (var i = 0; i < list.length; i++) {
+              var n = String(list[i].name || '').trim().toLowerCase();
+              if (n && !peers[n]) peers[n] = String(list[i].version || '?');
+            }
+            syncRoster();
+          }).catch(function() {});
+        }
+      } catch (e) { /* ignore */ }
+
+      try {
+        var host = document.querySelector('#chat-rooms');
+        if (host && window.MutationObserver) {
+          new MutationObserver(function() { sweepPanes(); }).observe(host, { childList: true });
+        }
+      } catch (e) { /* pane sweep is best-effort */ }
+
+      // Diagnostics, and the probe used to verify server routing.
+      window._litCaps = {
+        peers:   function() { return JSON.parse(JSON.stringify(peers)); },
+        wire:    function() { return JSON.parse(JSON.stringify(wireJid)); },
+        stats:   function() { return JSON.parse(JSON.stringify(stats)); },
+        armed:   function() {
+          try {
+            var conn = Candy.Core.getConnection();
+            return !!conn && isLive(conn, hMsg) && isLive(conn, hPres);
+          } catch (e) { return false; }
+        },
+        selfJid: function() {
+          try { return Candy.Core.getUser().getEscapedJid(); } catch (e) { return null; }
+        },
+        probe:   function(to) { return sendCaps(to, 'hello'); }
+      };
+      return 'ok';
+    })();
+  `).then(r => { if (r !== 'ok' && r !== 'already-active') console.warn('[caps] inject:', r); })
+    .catch(e => console.error('[caps] inject failed:', e.message));
 }
 
 // LitChat's own ignore, replacing Candy's native one. Native ignore stores
@@ -3100,6 +3444,18 @@ ipcMain.handle('ignore:add', (_e, name) => ignoreUser(name));
 ipcMain.handle('ignore:remove', (_e, name) => unignoreUser(name));
 ipcMain.handle('ignore:importNative', (_e, names) => importNativeIgnores(names));
 
+// A peer's LitChat handshake reached us (see injectCaps). Repeat handshakes with
+// an already-known peer are the common case, so only touch the disk on a change.
+ipcMain.handle('caps:seen', (_e, nick, version) => {
+  if (recordCap(peerCaps, nick, version)) {
+    saveCaps(peerCaps);
+    console.log('[caps] peer runs LitChat:', normNick(nick), 'v' + version);
+  }
+  return true;
+});
+ipcMain.handle('caps:list', () => [...peerCaps.values()]);
+ipcMain.handle('caps:has', (_e, nick) => hasCap(peerCaps, nick));
+
 ipcMain.handle('status:getHidden', (_e, jid) => !!(settings.hideStatusRooms?.[jid]));
 ipcMain.handle('status:setHidden', (_e, jid, hidden) => {
   if (!settings.hideStatusRooms) settings.hideStatusRooms = {};
@@ -4812,52 +5168,57 @@ function injectImageSharing() {
 
       // ── Upload logic (shared by button) ─────────────────────────────────────
 
-      // Send a DM by driving Candy's own message form, so the stanza is addressed
-      // and routed exactly like a message the user typed. Hand-building a stanza and
-      // calling conn.send(to: roomjid) does NOT reach the recipient's app session
-      // (wrong/stale resource on the roomjid), so we must go through Candy.
-      // The _litBypass flag tells our picpub submit-interceptor to ignore this one.
+      // Send a DM into a specific chat tab without touching which tab is on screen.
       //
-      // Candy's own Message.submit handler (src/view/pane/message.js) addresses and
-      // renders every send using Candy.View.getCurrent().roomJid — the tab currently
-      // on screen — not the pane the submitted form belongs to (upstream even has a
-      // "roomJid might be slightly incorrect in this case" FIXME on it). Since photo
-      // uploads/link-fetches are async, the user can switch DM tabs before this runs;
-      // without correcting for that, the message gets addressed to whatever tab is
-      // active at submit time instead of the one the photo was dropped/linked into.
-      // Force Candy's active room to the target for the moment of submit, then
-      // restore whatever tab the user is actually looking at.
-      function sendViaCandyForm(jid, text) {
-        var pane = document.querySelector('.room-pane[data-roomjid=' + JSON.stringify(jid) + ']');
-        var form = pane && pane.querySelector('.message-form');
-        var input = form && form.querySelector('input[type="text"], textarea');
-        var submitBtn = form && form.querySelector('input[type="submit"], button[type="submit"]');
-        if (!form || !input) {
-          console.warn('[picpub] sendViaCandyForm: no message form/input for', jid);
+      // Candy's Message.submit (the form's submit handler) addresses and renders
+      // every send using Candy.View.getCurrent().roomJid — the tab on screen, not
+      // the form's own tab (upstream has a "roomJid might be slightly incorrect in
+      // this case" FIXME on it). Photo uploads and link fetches are async, so the
+      // user can move to another tab before we send. This used to be handled by
+      // driving the form and flipping the visible tab to the target and back, which
+      // flickered the UI. But the two calls submit makes underneath take an explicit
+      // JID, so we make them ourselves: run the before-send hook, send with
+      // Candy.Core.Action.Jabber.Room.Message, and echo the message locally (Candy
+      // does not echo private messages back).
+      //
+      // jid is the tab's own key — the same string as its pane's data-roomjid and
+      // the key in Candy.View.Pane.Chat.rooms. That form is UNESCAPED (spaces
+      // etc.); Room.Message escapes it for the wire (XEP-0106). Do not hand-build a
+      // stanza from a DOM-derived JID: without that escaping every room whose name
+      // has a space bounced its DMs.
+      function sendDM(jid, text) {
+        var rooms = typeof Candy !== 'undefined' && Candy.View && Candy.View.Pane &&
+                    Candy.View.Pane.Chat && Candy.View.Pane.Chat.rooms;
+        var room = rooms && rooms[jid];
+        if (!room || room.type !== 'chat' || !window.jQuery) {
+          console.warn('[picpub] sendDM: no chat tab for', jid);
           return false;
         }
+        text = String(text == null ? '' : text).substring(0, Candy.View.getOptions().crop.message.body);
+        var msg = { roomJid: jid, message: text, xhtmlMessage: undefined };
+        if (window.jQuery(Candy).triggerHandler('candy:view.message.before-send', msg) === false) return false;
+        text = msg.message;
+        if (!Candy.Core.Action.Jabber.Room.Message(jid, text, 'chat', msg.xhtmlMessage)) return false;
 
-        var canSwitch = typeof Candy !== 'undefined' && Candy.View && Candy.View.getCurrent &&
-          Candy.View.Pane && Candy.View.Pane.Room && typeof Candy.View.Pane.Room.show === 'function' &&
-          Candy.View.Pane.Chat && Candy.View.Pane.Chat.rooms;
-        var prevJid = canSwitch ? Candy.View.getCurrent().roomJid : null;
-        var needsSwitch = canSwitch && prevJid !== jid && Candy.View.Pane.Chat.rooms[jid];
-        if (needsSwitch) Candy.View.Pane.Room.show(jid);
-
-        form._litBypass = true;
-        input.value = text;
-        if (submitBtn) submitBtn.click();
-        else if (typeof form.requestSubmit === 'function') form.requestSubmit();
-        else form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-        // Submit is handled synchronously, so the flag has done its job. Clear it
-        // unconditionally: if our interceptor wasn't attached to this form, a
-        // stale 'true' would make the user's next typed picpub link bypass
-        // conversion and go out as a raw URL.
-        form._litBypass = false;
-
-        if (needsSwitch && prevJid && Candy.View.Pane.Chat.rooms[prevJid]) Candy.View.Pane.Room.show(prevJid);
+        // Message.show counts anything shown in a tab that is not the current,
+        // focused one as unread — badge, window-title count, and a sound for private
+        // chats. That is right for the partner's messages and wrong for our own, so
+        // mute those for this one synchronous call and put them straight back.
+        var chat = Candy.View.Pane.Chat;
+        var tb = chat.Toolbar;
+        var origUnread = chat.increaseUnreadMessages;
+        var origSound = tb && tb.playSound;
+        chat.increaseUnreadMessages = function() {};
+        if (tb) tb.playSound = function() {};
+        try {
+          Candy.View.Pane.Message.show(jid, Candy.View.Pane.Room.getUser(jid).getNick(), text);
+        } finally {
+          chat.increaseUnreadMessages = origUnread;
+          if (tb) tb.playSound = origSound;
+        }
         return true;
       }
+      window._litSendDM = sendDM;
 
       async function handlePhotoUpload(jid, file) {
         var pane = document.querySelector('.room-pane[data-roomjid=' + JSON.stringify(jid) + ']');
@@ -4910,10 +5271,10 @@ function injectImageSharing() {
           var viewBase = result.partnerViewUrl || ('https://picpub.art/v/' + result.token);
           var msgBody = '\\u{1F4F7} View photo: ' + viewBase + '#' + result.hash;
 
-          // Send through Candy's form so it's routed/rendered like a normal DM.
+          // Send through Candy so it's routed/rendered like a normal DM.
           // Candy renders the sent message locally, which our observer turns into a thumbnail.
-          if (!sendViaCandyForm(jid, msgBody))
-            throw new Error('could not send (message form not found)');
+          if (!sendDM(jid, msgBody))
+            throw new Error('could not send (chat tab not found)');
           if (result.deduped && msgPane) {
             var dupLi = document.createElement('li');
             dupLi.style.cssText = 'list-style:none;padding:2px 8px';
@@ -4958,9 +5319,9 @@ function injectImageSharing() {
           var photoFmt = '\\u{1F4F7} View photo: ' + viewBase + '#' + result.hash;
           var msgBody = context ? context.replace(url, photoFmt) : photoFmt;
 
-          // Send through Candy's form so it's routed/rendered like a normal DM.
-          if (!sendViaCandyForm(jid, msgBody))
-            throw new Error('could not send (message form not found)');
+          // Send through Candy so it's routed/rendered like a normal DM.
+          if (!sendDM(jid, msgBody))
+            throw new Error('could not send (chat tab not found)');
         } catch (err) {
           if (indLi) { ind.textContent = 'Link failed: ' + err.message; ind.style.color = '#e05050'; setTimeout(function() { indLi.remove(); }, 5000); }
         }
@@ -5012,8 +5373,6 @@ function injectImageSharing() {
         var textInput = form.querySelector('input[type="text"], textarea');
         if (textInput) {
           form.addEventListener('submit', function(e) {
-            // Programmatic submit from sendViaCandyForm — let Candy handle it normally
-            if (form._litBypass) { form._litBypass = false; return; }
             var raw = textInput.value;
             var val = raw.trim();
             var urlM = /(https?:\\/\\/picpub\\.art\\/\\S+)/.exec(val);
