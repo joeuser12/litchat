@@ -60,13 +60,30 @@ jobs:
       contents: write
 
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
           path: dist
 
+      # The release body is this version's section of CHANGELOG.md. GitHub prepends
+      # it to the auto-generated notes, which add the "Full Changelog" compare link.
+      - name: Extract release notes
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            /^## \[/ { in_section = (index($0, "## [" v "]") == 1); next }
+            /^\[[0-9][^]]*\]: / { in_section = 0 }
+            in_section
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "::warning::CHANGELOG.md has no section for $version; the release will only have the auto-generated notes"
+          fi
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/**
+          body_path: release-notes.md
           generate_release_notes: true

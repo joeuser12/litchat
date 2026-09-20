@@ -1,6 +1,6 @@
 {
   "name": "lit-chat",
-  "version": "0.9.22",
+  "version": "0.9.23",
   "description": "Electron wrapper for chat.literotica.com",
   "homepage": "https://chat.literotica.com",
   "author": {
@@ -35,6 +35,7 @@
       "media-parse.js",
       "ignore.js",
       "caps.js",
+      "context-menu.js",
       "notes.js",
       "watch.js",
       "log-viewer.html",

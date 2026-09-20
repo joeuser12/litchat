@@ -138,6 +138,7 @@ const { parsePhotoBody } = require('./media-parse');
 const { loadWatchList, saveWatchList } = require('./watch');
 const { loadIgnoreList, saveIgnoreList, addTo: addIgnore, removeFrom: removeIgnore, normNick } = require('./ignore');
 const { loadCaps, saveCaps, recordCap, hasCap } = require('./caps');
+const { buildChatContextMenu } = require('./context-menu');
 
 const USER_CSS        = path.join(PROFILE_DIR, 'user.css');
 const USER_JS         = path.join(PROFILE_DIR, 'user.js');
@@ -1044,6 +1045,14 @@ function createWindow() {
         openLinkWindow(url);
       }
     } catch { e.preventDefault(); }
+  });
+
+  // Electron has no default context menu, so give the chat window one for copy and
+  // paste and for copying a link address. If the page handles the right-click itself
+  // (photo thumbnails do) Electron never emits this event.
+  win.webContents.on('context-menu', (_e, params) => {
+    const template = buildChatContextMenu(params, { copyText: t => clipboard.writeText(t) });
+    if (template.length) Menu.buildFromTemplate(template).popup({ window: win });
   });
 }
 
@@ -4284,6 +4293,10 @@ function createAppMenu() {
         { label: 'Quit',      accelerator: 'CmdOrCtrl+Q', click: () => app.quit() },
       ],
     },
+    // macOS routes Cmd+C/V/X/A/Z through the Edit menu's items, so with no Edit menu
+    // those shortcuts do nothing in the page. Windows and Linux handle them natively,
+    // so their menu bar stays as it is.
+    ...(process.platform === 'darwin' ? [{ role: 'editMenu' }] : []),
   ]));
 }
 
@@ -5175,9 +5188,9 @@ function injectImageSharing() {
       // the form's own tab (upstream has a "roomJid might be slightly incorrect in
       // this case" FIXME on it). Photo uploads and link fetches are async, so the
       // user can move to another tab before we send. This used to be handled by
-      // driving the form and flipping the visible tab to the target and back, which
-      // flickered the UI. But the two calls submit makes underneath take an explicit
-      // JID, so we make them ourselves: run the before-send hook, send with
+      // driving the form and flipping the visible tab to the target and back. But
+      // the two calls submit makes underneath take an explicit JID, so we make
+      // them ourselves: run the before-send hook, send with
       // Candy.Core.Action.Jabber.Room.Message, and echo the message locally (Candy
       // does not echo private messages back).
       //
@@ -5219,6 +5232,34 @@ function injectImageSharing() {
         return true;
       }
       window._litSendDM = sendDM;
+
+      // Show a failed photo/link send where the user will see it, and keep it until
+      // they click it. The line used to remove itself after 5 seconds, and worse: the
+      // "Uploading…" line was removed BEFORE the error was thrown, so an error reported
+      // by the upload itself (picpub rejecting it, a timeout, no network) was written
+      // to an element that was already gone. The progress line just vanished and
+      // nothing appeared. If the message list or the whole tab cannot be found, fall
+      // back to a banner so a failure is never silent.
+      function showSendError(pane, msgPane, indLi, text) {
+        var host = msgPane || pane;
+        var line = document.createElement(host && host.tagName === 'UL' ? 'li' : 'div');
+        line.setAttribute('data-lit-owned', 'send-error');
+        line.style.cssText = host
+          ? 'list-style:none;padding:2px 8px'
+          : 'position:fixed;left:50%;bottom:70px;transform:translateX(-50%);z-index:99999;' +
+            'padding:6px 12px;border-radius:4px;background:#2b2b2b';
+        var msg = document.createElement('span');
+        msg.style.cssText = 'color:#e05050;font-size:12px;font-style:italic;cursor:pointer';
+        msg.title = 'Click to dismiss';
+        msg.textContent = text + ' (click to dismiss)';
+        msg.addEventListener('click', function() { line.remove(); });
+        line.appendChild(msg);
+        if (indLi) indLi.remove();
+        (host || document.body).appendChild(line);
+        var scroller = msgPane && (msgPane.closest('.message-pane-wrapper') || msgPane.parentElement);
+        if (scroller) scroller.scrollTop = scroller.scrollHeight;
+      }
+      window._litShowSendError = showSendError;
 
       async function handlePhotoUpload(jid, file) {
         var pane = document.querySelector('.room-pane[data-roomjid=' + JSON.stringify(jid) + ']');
@@ -5287,7 +5328,7 @@ function injectImageSharing() {
           }
         } catch (err) {
           if (uploadId && window.litChat && window.litChat.uploadAbort) window.litChat.uploadAbort(uploadId).catch(function() {});
-          if (indLi) { ind.textContent = 'Upload failed: ' + err.message; ind.style.color = '#e05050'; setTimeout(function() { indLi.remove(); }, 5000); }
+          showSendError(pane, msgPane, indLi, 'Upload failed: ' + err.message);
         }
       }
 
@@ -5323,7 +5364,7 @@ function injectImageSharing() {
           if (!sendDM(jid, msgBody))
             throw new Error('could not send (chat tab not found)');
         } catch (err) {
-          if (indLi) { ind.textContent = 'Link failed: ' + err.message; ind.style.color = '#e05050'; setTimeout(function() { indLi.remove(); }, 5000); }
+          showSendError(pane, msgPane, indLi, 'Link failed: ' + err.message);
         }
       }
 
