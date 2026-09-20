@@ -139,6 +139,7 @@ const { loadWatchList, saveWatchList } = require('./watch');
 const { loadIgnoreList, saveIgnoreList, addTo: addIgnore, removeFrom: removeIgnore, normNick } = require('./ignore');
 const { loadCaps, saveCaps, recordCap, hasCap } = require('./caps');
 const { buildChatContextMenu } = require('./context-menu');
+const { friendlyFetchError } = require('./friendly-error');
 
 const USER_CSS        = path.join(PROFILE_DIR, 'user.css');
 const USER_JS         = path.join(PROFILE_DIR, 'user.js');
@@ -4414,13 +4415,14 @@ function setupAutoUpdater() {
 // bodies are small JSON, so a whole-request deadline is fine. (The litpic://
 // proxy in app.whenReady is the exception: it streams images/video, so it only
 // bounds the wait for response headers.)
+//
+// net.fetch (Chromium's network stack) rather than Node's fetch, like the litpic://
+// proxy: it is the stack the chat itself uses, so it follows the system proxy and
+// certificate settings (Node's does not), and a failure says why ("net::ERR_...")
+// where Node's says only "fetch failed".
 const PICPUB_TIMEOUT_MS = 15_000;
 function picpubFetch(url, opts = {}, timeoutMs = PICPUB_TIMEOUT_MS) {
-  return fetch(url, { ...opts, signal: opts.signal || AbortSignal.timeout(timeoutMs) });
-}
-function friendlyFetchError(e) {
-  if (e && e.name === 'TimeoutError') return 'PicPub did not respond in time — check your connection and try again';
-  return (e && e.message) || String(e);
+  return net.fetch(url, { ...opts, signal: opts.signal || AbortSignal.timeout(timeoutMs) });
 }
 
 function invalidateDMAlbum(partnerUsername) {

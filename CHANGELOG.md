@@ -6,6 +6,17 @@ so keep the heading format `## [x.y.z] - YYYY-MM-DD`.
 
 Versions before 0.9.0 are not listed here; see the [tags](https://github.com/joeuser12/litchat/tags).
 
+## [0.9.24] - 2026-09-20
+
+### Fixed
+- **A failed photo upload says why.** It used to end with just "fetch failed". It now says Lit Chat
+  could not reach PicPub, gives the underlying reason (for example a name lookup failure), and
+  suggests checking a firewall, VPN or proxy.
+
+### Changed
+- Requests to PicPub now go through the same network stack as the chat itself, so they follow your
+  system proxy and certificate settings, which the previous one did not.
+
 ## [0.9.23] - 2026-09-20
 
 ### Added
@@ -189,6 +200,7 @@ Versions before 0.9.0 are not listed here; see the [tags](https://github.com/joe
 ### Fixed
 - Bug fixes and menu cleanup.
 
+[0.9.24]: https://github.com/joeuser12/litchat/compare/v0.9.23...v0.9.24
 [0.9.23]: https://github.com/joeuser12/litchat/compare/v0.9.22...v0.9.23
 [0.9.22]: https://github.com/joeuser12/litchat/compare/v0.9.21...v0.9.22
 [0.9.21]: https://github.com/joeuser12/litchat/compare/v0.9.20...v0.9.21
