@@ -6,6 +6,12 @@ so keep the heading format `## [x.y.z] - YYYY-MM-DD`.
 
 Versions before 0.9.0 are not listed here; see the [tags](https://github.com/joeuser12/litchat/tags).
 
+## [0.9.25] - 2026-09-22
+
+### Fixed
+- **Rooms button shows one room chooser.** Candy's own "Choose a room" popup used to open behind
+  Lit Chat's Rooms window, and flashed up when joining a room from it. It no longer appears.
+
 ## [0.9.24] - 2026-09-20
 
 ### Fixed
@@ -200,6 +206,7 @@ Versions before 0.9.0 are not listed here; see the [tags](https://github.com/joe
 ### Fixed
 - Bug fixes and menu cleanup.
 
+[0.9.25]: https://github.com/joeuser12/litchat/compare/v0.9.24...v0.9.25
 [0.9.24]: https://github.com/joeuser12/litchat/compare/v0.9.23...v0.9.24
 [0.9.23]: https://github.com/joeuser12/litchat/compare/v0.9.22...v0.9.23
 [0.9.22]: https://github.com/joeuser12/litchat/compare/v0.9.21...v0.9.22

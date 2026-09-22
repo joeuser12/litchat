@@ -3148,9 +3148,36 @@ function injectNavButtons() {
 }
 
 
+// Candy only renders its room list inside the native "Choose a room" modal, so
+// our Rooms window and joinRoom() open that modal to read or click the list.
+// This keeps it invisible while we do, so the user sees only our chooser.
+// quiet(true) hides the modal; quiet(false) closes it and unhides it after
+// Candy's fade-out has finished.
+const QUIET_ROOM_PANEL_JS = `
+  window.__litQuietRoomPanel = window.__litQuietRoomPanel || function(on) {
+    if (!document.getElementById('lit-quiet-roompanel-css')) {
+      var st = document.createElement('style');
+      st.id = 'lit-quiet-roompanel-css';
+      st.textContent = 'body.lit-quiet-roompanel #chat-modal, body.lit-quiet-roompanel #chat-modal-overlay { visibility: hidden !important; }';
+      document.head.appendChild(st);
+    }
+    clearTimeout(window.__litQuietRoomPanelTimer);
+    if (on) { document.body.classList.add('lit-quiet-roompanel'); return; }
+    try { Candy.View.Pane.Chat.Modal.hide(); } catch (e) {
+      var m = document.getElementById('chat-modal'), o = document.getElementById('chat-modal-overlay');
+      if (m) m.style.display = 'none';
+      if (o) o.style.display = 'none';
+    }
+    window.__litQuietRoomPanelTimer = setTimeout(function() {
+      document.body.classList.remove('lit-quiet-roompanel');
+    }, 600);
+  };
+`;
+
 function joinRoom(jid) {
   return win.webContents.executeJavaScript(
-    `new Promise(function(resolve) {
+    `${QUIET_ROOM_PANEL_JS}
+     new Promise(function(resolve) {
        var jid = ${JSON.stringify(jid)};
 
        // 1. Already in the roombar — nothing to do.
@@ -3160,12 +3187,7 @@ function joinRoom(jid) {
          resolve(); return;
        }
 
-       function dismiss() {
-         var m = document.getElementById('chat-modal');
-         var o = document.getElementById('chat-modal-overlay');
-         if (m) m.style.display = 'none';
-         if (o) o.style.display = 'none';
-       }
+       function dismiss() { window.__litQuietRoomPanel(false); }
 
        function waitForTab(timeoutMs) {
          var deadline = Date.now() + (timeoutMs || 8000);
@@ -3235,6 +3257,7 @@ function joinRoom(jid) {
          // Only open the panel if the room list isn't already visible —
          // clicking the tab when it's already open would toggle it closed
          if (!document.querySelector('ul.simplePaginationChatRoomList li a')) {
+           window.__litQuietRoomPanel(true);
            document.querySelector('#roomPanel-tab a.label')?.click();
          }
 
@@ -3403,34 +3426,37 @@ function openRoomManager() {
 
 ipcMain.handle('rooms:list', async () => {
   try {
-    // Open the room panel if not already open
-    await win.webContents.executeJavaScript(`
-      (function() {
-        var list = document.querySelector('ul.simplePaginationChatRoomList');
-        if (!list || list.children.length === 0)
-          document.querySelector('#roomPanel-tab a.label')?.click();
-      })()
-    `);
-    // Poll until the list is populated (up to 5 seconds)
-    const rooms = await win.webContents.executeJavaScript(`
+    // Open the room panel invisibly, read the list, close it again. If the
+    // user has the native panel open themselves, read it and leave it alone.
+    // If some other Candy modal is up, don't queue the room panel behind it
+    // (Candy would pop it up as soon as that modal closes).
+    return await win.webContents.executeJavaScript(`
+      ${QUIET_ROOM_PANEL_JS}
       new Promise((resolve) => {
+        const read = () => Array.from(document.querySelectorAll('ul.simplePaginationChatRoomList li a')).map(a => ({
+          jid:   (a.getAttribute('href') || '').replace(/^#/, ''),
+          name:  a.querySelector('.roomName')?.textContent?.trim() ?? '',
+          count: parseInt(a.querySelector('.roomCounter')?.textContent) || 0,
+        })).filter(r => r.jid && r.name);
+
+        const modal = document.getElementById('chat-modal');
+        const modalUp = modal && getComputedStyle(modal).display !== 'none';
+        if (modalUp) { resolve(read()); return; }
+
+        window.__litQuietRoomPanel(true);
+        document.querySelector('#roomPanel-tab a.label')?.click();
         let tries = 0;
-        function attempt() {
-          const items = Array.from(document.querySelectorAll('ul.simplePaginationChatRoomList li a'));
+        (function attempt() {
+          const items = read();
           if (items.length || tries++ > 49) {
-            resolve(items.map(a => ({
-              jid:   (a.getAttribute('href') || '').replace(/^#/, ''),
-              name:  a.querySelector('.roomName')?.textContent?.trim() ?? '',
-              count: parseInt(a.querySelector('.roomCounter')?.textContent) || 0,
-            })).filter(r => r.jid && r.name));
+            window.__litQuietRoomPanel(false);
+            resolve(items);
           } else {
             setTimeout(attempt, 100);
           }
-        }
-        attempt();
+        })();
       })
     `);
-    return rooms;
   } catch { return []; }
 });
 
