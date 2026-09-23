@@ -806,6 +806,7 @@ function createWindow() {
 
 
   win.webContents.on('did-finish-load', async () => {
+    injectStanzaGuard();
     // Detect server error pages (e.g. 500 Internal Server Error) and auto-reload
     // instead of leaving the user staring at a blank or cryptic error screen.
     const pageText = await win.webContents.executeJavaScript(
@@ -1259,6 +1260,64 @@ function injectMediaParser() {
   win.webContents.executeJavaScript(
     'window._litParsePhoto = ' + parsePhotoBody.toString() + ';'
   ).catch(() => {});
+}
+
+// ── Keep Candy's stanza handlers alive ─────────────────────────────────────
+// Strophe removes any handler that throws, for good ("Removing Strophe handlers
+// due to uncaught exception"). Candy registers its message and presence
+// handlers once per connection, and a lot runs synchronously inside them: the
+// whole render path and every candy:view.* hook, including the site's plugins.
+// So one exception anywhere in there stops all messages from showing until the
+// app is restarted, while logger.js, which reads the network traffic, keeps
+// logging them. Reported from the field (September 2026). One reproducible
+// trigger: a message for a room JID missing from Candy.View.Pane.Chat.rooms (a
+// groupchat line for a room just left, or a DM whose private room refused to
+// open) makes Candy's own Message.show throw a TypeError.
+//
+// Patch Strophe.Handler.prototype.run so a persistent handler (user handler,
+// no stanza id) that throws is kept, and report the error to page-errors.log
+// in the profile folder. One-shot IQ callbacks (they have an id) keep
+// Strophe's behaviour. The prototype is shared, so this survives reconnects.
+// Strophe loads a little after did-finish-load, so poll for it.
+// NOTE: injected template — keep it free of backslashes and regex literals.
+function injectStanzaGuard() {
+  win.webContents.executeJavaScript(`
+    (function() {
+      if (window._litStanzaGuard) return;
+      window._litStanzaGuard = true;
+      var tries = 0;
+      (function install() {
+        var H = window.Strophe && window.Strophe.Handler;
+        if (!H || !H.prototype || typeof H.prototype.run !== 'function') {
+          if (++tries < 600) setTimeout(install, 200);
+          return;
+        }
+        var run = H.prototype.run;
+        H.prototype.run = function(elem) {
+          try {
+            return run.call(this, elem);
+          } catch (e) {
+            if (!this.user || this.id != null) throw e;
+            try {
+              var h = String(this.handler);
+              window.litChat.pageError({
+                what: 'stanza handler threw; kept it registered',
+                error: String(e && e.message || e),
+                stack: String(e && e.stack || ''),
+                stanza: elem ? {
+                  name: elem.nodeName,
+                  type: elem.getAttribute('type'),
+                  from: elem.getAttribute('from'),
+                } : null,
+                handler: h.slice(0, 80),
+              });
+            } catch (e2) { /* reporting is best-effort */ }
+            return true;
+          }
+        };
+      })();
+    })();
+  `).catch(() => {});
 }
 
 // Invisible LitChat-to-LitChat capability discovery.
@@ -3462,6 +3521,19 @@ ipcMain.handle('rooms:list', async () => {
 
 ipcMain.on('rooms:join',  (_e, jid) => { win.show(); win.focus(); joinRoom(jid); });
 ipcMain.on('ui:openRooms', () => openRoomManager());
+
+// Errors caught in the chat page (see injectStanzaGuard), appended to
+// <profile>/page-errors.log so a user can send it with a bug report.
+const PAGE_ERRORS_FILE = path.join(PROFILE_DIR, 'page-errors.log');
+ipcMain.on('page:error', (_e, info) => {
+  try {
+    try {
+      if (fs.statSync(PAGE_ERRORS_FILE).size > 512 * 1024) fs.renameSync(PAGE_ERRORS_FILE, PAGE_ERRORS_FILE + '.old');
+    } catch { /* no file yet */ }
+    const line = JSON.stringify({ at: new Date().toISOString(), version: app.getVersion(), ...info });
+    fs.appendFileSync(PAGE_ERRORS_FILE, line + '\n');
+  } catch { /* logging must never break the app */ }
+});
 ipcMain.on('ui:openLogs',  () => openLogViewer());
 ipcMain.on('ui:openLitProfile', () => openLinkWindow('https://www.literotica.com/my/#/user/profile'));
 

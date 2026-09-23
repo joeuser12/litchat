@@ -34,4 +34,6 @@ contextBridge.exposeInMainWorld('litChat', {
   capsSeen:         (nick, version) => ipcRenderer.invoke('caps:seen', nick, version),
   capsList:         () => ipcRenderer.invoke('caps:list'),
   capsHas:          (nick) => ipcRenderer.invoke('caps:has', nick),
+  // Errors caught in the page (see injectStanzaGuard in main.js), for page-errors.log
+  pageError:        (info) => ipcRenderer.send('page:error', info),
 });

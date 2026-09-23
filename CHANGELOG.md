@@ -6,6 +6,17 @@ so keep the heading format `## [x.y.z] - YYYY-MM-DD`.
 
 Versions before 0.9.0 are not listed here; see the [tags](https://github.com/joeuser12/litchat/tags).
 
+## [0.9.26] - 2026-09-23
+
+### Fixed
+- **Messages stopped showing in the chat window until a restart.** A single error while showing
+  one message made Candy stop showing all later ones, in every room and private chat, while the log
+  kept recording them. The chat window now keeps working after such an error.
+
+### Added
+- Errors like this are written to `page-errors.log` in the profile folder, so they can be sent
+  along with a bug report.
+
 ## [0.9.25] - 2026-09-22
 
 ### Fixed
@@ -206,6 +217,7 @@ Versions before 0.9.0 are not listed here; see the [tags](https://github.com/joe
 ### Fixed
 - Bug fixes and menu cleanup.
 
+[0.9.26]: https://github.com/joeuser12/litchat/compare/v0.9.25...v0.9.26
 [0.9.25]: https://github.com/joeuser12/litchat/compare/v0.9.24...v0.9.25
 [0.9.24]: https://github.com/joeuser12/litchat/compare/v0.9.23...v0.9.24
 [0.9.23]: https://github.com/joeuser12/litchat/compare/v0.9.22...v0.9.23
