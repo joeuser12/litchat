@@ -140,6 +140,7 @@ const { loadIgnoreList, saveIgnoreList, addTo: addIgnore, removeFrom: removeIgno
 const { loadCaps, saveCaps, recordCap, hasCap } = require('./caps');
 const { buildChatContextMenu } = require('./context-menu');
 const { friendlyFetchError } = require('./friendly-error');
+const stories = require('./stories-api');
 
 const USER_CSS        = path.join(PROFILE_DIR, 'user.css');
 const USER_JS         = path.join(PROFILE_DIR, 'user.js');
@@ -688,6 +689,7 @@ function handlePresence(presences) {
 let win;
 let logWin  = null;
 let roomWin = null;
+let storiesWin = null;
 let readyPoll = null;
 let loginRaceRetried = false; // one-shot guard: auto-reload once if the logged-out
                               // login form shows despite having session cookies
@@ -3197,10 +3199,15 @@ function injectNavButtons() {
           .catch(function(e) { console.error('[away-btn] toggleAway failed:', e); });
       });
 
+      // Stories: opens the Stories window for the tab on screen (see ui:openStories).
+      var storiesBtn = mkBtn('Stories');
+      armBtn(storiesBtn, function() { window.litChat && window.litChat.openStories(); });
+
       wrap.appendChild(roomsBtn);
       wrap.appendChild(logsBtn);
       wrap.appendChild(profileBtn);
       wrap.appendChild(awayBtn);
+      wrap.appendChild(storiesBtn);
       fw.appendChild(wrap);
     })();
   `).catch(() => {});
@@ -3377,9 +3384,23 @@ function openLinkWindow(url) {
     },
   });
   w.loadURL(url);
+  wireLinkContents(w.webContents, w);
+  w.webContents.on('will-navigate', (_e, navUrl) => {
+    // Allow navigation within the child window (browsing around the site)
+    // Update the title as the user navigates
+    w.webContents.once('did-finish-load', () => {
+      try { w.setTitle(new URL(w.webContents.getURL()).hostname); } catch { /* ignore */ }
+    });
+  });
+}
+
+// Right-click menu and popup handling for a page browsed like a link window: the link
+// windows themselves, and the story <webview> in the Stories window (hostWin is the
+// window the menu pops up over).
+function wireLinkContents(wc, hostWin) {
   // Electron provides no context menu by default — build one so right-click works
   // (copy text/links/images, navigation, paste into form fields, etc.).
-  w.webContents.on('context-menu', (_e, params) => {
+  wc.on('context-menu', (_e, params) => {
     const template = [];
     const sep = () => { if (template.length && template[template.length - 1].type !== 'separator') template.push({ type: 'separator' }); };
 
@@ -3394,9 +3415,9 @@ function openLinkWindow(url) {
     if (params.mediaType === 'image' && params.srcURL) {
       sep();
       template.push(
-        { label: 'Copy Image', click: () => w.webContents.copyImageAt(params.x, params.y) },
+        { label: 'Copy Image', click: () => wc.copyImageAt(params.x, params.y) },
         { label: 'Copy Image Address', click: () => clipboard.writeText(params.srcURL) },
-        { label: 'Save Image As…', click: () => w.webContents.downloadURL(params.srcURL) },
+        { label: 'Save Image As…', click: () => wc.downloadURL(params.srcURL) },
       );
     }
 
@@ -3422,7 +3443,7 @@ function openLinkWindow(url) {
     if (/^[A-Za-z0-9_.-]{2,30}$/.test(selTrim)) {
       watchGuess = selTrim;
     } else {
-      const candidate = params.linkURL || w.webContents.getURL();
+      const candidate = params.linkURL || wc.getURL();
       let host = '';
       try { host = new URL(candidate).hostname; } catch { /* not a URL */ }
       if (/(?:^|\.)literotica\.com$/i.test(host)) {
@@ -3432,7 +3453,7 @@ function openLinkWindow(url) {
     }
     if (watchGuess) {
       sep();
-      template.push({ label: `Watch "${watchGuess}"`, click: () => addWatchedUserViaPrompt(w, watchGuess) });
+      template.push({ label: `Watch "${watchGuess}"`, click: () => addWatchedUserViaPrompt(hostWin, watchGuess) });
       template.push(isIgnored(watchGuess)
         ? { label: `Unignore "${watchGuess}"`, click: () => unignoreUser(watchGuess) }
         : { label: `Ignore "${watchGuess}"`, click: () => ignoreUser(watchGuess) });
@@ -3440,29 +3461,136 @@ function openLinkWindow(url) {
 
     sep();
     template.push(
-      { label: 'Back', enabled: w.webContents.canGoBack(), click: () => w.webContents.goBack() },
-      { label: 'Forward', enabled: w.webContents.canGoForward(), click: () => w.webContents.goForward() },
-      { label: 'Reload', click: () => w.webContents.reload() },
-      { label: 'Open This Page in Browser', click: () => shell.openExternal(w.webContents.getURL()) },
+      { label: 'Back', enabled: wc.canGoBack(), click: () => wc.goBack() },
+      { label: 'Forward', enabled: wc.canGoForward(), click: () => wc.goForward() },
+      { label: 'Reload', click: () => wc.reload() },
+      { label: 'Open This Page in Browser', click: () => shell.openExternal(wc.getURL()) },
     );
     sep();
-    template.push({ label: 'Inspect Element', click: () => w.webContents.inspectElement(params.x, params.y) });
+    template.push({ label: 'Inspect Element', click: () => wc.inspectElement(params.x, params.y) });
 
-    Menu.buildFromTemplate(template).popup({ window: w });
+    Menu.buildFromTemplate(template).popup({ window: hostWin });
   });
-  // Links inside the child window also open in new child windows
-  w.webContents.setWindowOpenHandler(({ url: u }) => {
+  // Links inside the page open in new child windows
+  wc.setWindowOpenHandler(({ url: u }) => {
     openLinkWindow(u);
     return { action: 'deny' };
   });
-  w.webContents.on('will-navigate', (_e, navUrl) => {
-    // Allow navigation within the child window (browsing around the site)
-    // Update the title as the user navigates
-    w.webContents.once('did-finish-load', () => {
-      try { w.setTitle(new URL(w.webContents.getURL()).hostname); } catch { /* ignore */ }
+}
+
+// ── Story search ─────────────────────────────────────────────────────────────
+// Search box and Random in the toolbar open one Stories window: result cards from
+// stories.picpub.art, and the story itself in a <webview> under the same header.
+// Requests go through net.fetch here because the search API sends no CORS headers.
+
+const STORIES_TIMEOUT_MS = 15000;
+
+async function storiesFetchJson(url) {
+  const res = await net.fetch(url, { signal: AbortSignal.timeout(STORIES_TIMEOUT_MS) });
+  if (!res.ok) throw new Error(`Story search failed: ${res.status} ${res.statusText}`);
+  return res.json();
+}
+
+function openStoriesWindow(opts = {}) {
+  const run = { q: opts.q || '', random: !!opts.random, category: opts.category || '' };
+  if (storiesWin && !storiesWin.isDestroyed()) {
+    storiesWin.webContents.send('stories:run', run);
+    storiesWin.show();
+    storiesWin.focus();
+    return;
+  }
+  storiesWin = new BrowserWindow({
+    width: 900,
+    height: 760,
+    title: 'Stories',
+    parent: win,
+    autoHideMenuBar: true,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: false,
+      webviewTag: true,
+      preload: path.join(__dirname, 'stories-preload.js'),
+    },
+  });
+  const wc = storiesWin.webContents;
+  // The story <webview> gets no preload or Node, only http(s) pages, and the chat's
+  // session so the Literotica login carries over, as in link windows.
+  wc.on('will-attach-webview', (e, webPreferences, params) => {
+    delete webPreferences.preload;
+    webPreferences.nodeIntegration = false;
+    webPreferences.contextIsolation = true;
+    if (!/^https?:\/\//i.test(params.src || '') || params.partition !== PARTITION) e.preventDefault();
+  });
+  wc.on('did-attach-webview', (_e, guest) => {
+    wireLinkContents(guest, storiesWin);
+    // Keys typed in the story go to the guest page, so Esc-to-results is caught here.
+    guest.on('before-input-event', (e, input) => {
+      if (input.type === 'keyDown' && input.key === 'Escape' && !input.alt && !input.control && !input.meta && !input.shift) {
+        e.preventDefault();
+        wc.send('stories:back');
+      }
     });
   });
+  // The Stories page itself never navigates; links in it open as link windows.
+  wc.on('will-navigate', (e, u) => { e.preventDefault(); openLinkWindow(u); });
+  wc.setWindowOpenHandler(({ url: u }) => { openLinkWindow(u); return { action: 'deny' }; });
+  wc.on('context-menu', (_e, params) => {
+    const template = buildChatContextMenu(params, { copyText: (t) => clipboard.writeText(t) });
+    if (template.length) Menu.buildFromTemplate(template).popup({ window: storiesWin });
+  });
+  storiesWin.loadFile('stories.html', { query: {
+    dark: isLightTheme() ? '0' : '1',
+    partition: PARTITION,
+    q: run.q,
+    random: run.random ? '1' : '0',
+    category: run.category,
+  } });
+  storiesWin.on('closed', () => { storiesWin = null; });
 }
+
+// The Stories button picks what to show from the active tab and rooms.txt (see there).
+// Read on every click so an edit to it applies without a restart.
+function loadRoomMap() {
+  try { return stories.parseRoomMap(fs.readFileSync(path.join(__dirname, 'rooms.txt'), 'utf8')); }
+  catch { return new Map(); }
+}
+
+// Name of the room on screen, or '' for a private chat or no room.
+async function activeRoomName() {
+  try {
+    return await win.webContents.executeJavaScript(`(function() {
+      var jid = Candy.View.getCurrent().roomJid;
+      var pane = jid && Candy.View.Pane.Chat.rooms[jid];
+      if (!pane || pane.type !== 'groupchat') return '';
+      var room = Candy.Core.getRoom(jid);
+      return (room && room.getName()) || pane.name || '';
+    })()`);
+  } catch { return ''; }
+}
+
+ipcMain.on('ui:openStories', async () => {
+  openStoriesWindow(stories.storyOptsForRoom(await activeRoomName(), loadRoomMap()));
+});
+
+ipcMain.handle('stories:search', async (_e, opts) => {
+  try {
+    return stories.normalizeResponse(await storiesFetchJson(stories.buildSearchUrl(opts || {})));
+  } catch (e) {
+    return { error: friendlyFetchError(e, 'Story search') };
+  }
+});
+
+let storyCategories = null; // fetched once per session
+ipcMain.handle('stories:categories', async () => {
+  if (storyCategories) return storyCategories;
+  try {
+    const json = await storiesFetchJson(stories.categoriesUrl());
+    const list = Array.isArray(json.categories) ? json.categories.filter(c => typeof c === 'string') : [];
+    if (list.length) storyCategories = list;
+    return list;
+  } catch { return []; }
+});
 
 function openRoomManager() {
   if (roomWin && !roomWin.isDestroyed()) { roomWin.focus(); return; }

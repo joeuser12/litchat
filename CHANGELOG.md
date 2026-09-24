@@ -6,6 +6,17 @@ so keep the heading format `## [x.y.z] - YYYY-MM-DD`.
 
 Versions before 0.9.0 are not listed here; see the [tags](https://github.com/joeuser12/litchat/tags).
 
+## [0.9.27] - 2026-09-23
+
+### Added
+- **Stories button** in the toolbar, after Away. It opens a Stories window with a card for each
+  story (summary, tags, rating, length), from the story index at stories.picpub.art, which covers
+  Literotica and AO3. What it shows depends on the tab you're in: random stories from the room's
+  Literotica category, stories matching the room's name when the room has no category, or random
+  stories from every category in the lobby and private chats. From there you can search, pick a
+  category, or use **More like this** on a card. Click a card to read the story in the same window;
+  **← Results** or Esc takes you back to the list where you left it.
+
 ## [0.9.26] - 2026-09-23
 
 ### Fixed

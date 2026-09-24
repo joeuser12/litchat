@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'">
+<title>Stories</title>
+<style>
+  :root {
+    --bg: #15131c; --panel: #1e1b28; --card: #221f2e; --border: #332e44;
+    --text: #d8d4e4; --muted: #8e88a3; --accent: #8b5cf6; --accent-text: #fff;
+    --link: #a78bfa; --tag-bg: #1e2a4a; --tag-text: #9db4ff; --star: #eab308; --err: #f87171;
+  }
+  :root.light {
+    --bg: #f5f4f9; --panel: #fff; --card: #fff; --border: #ddd8ea;
+    --text: #1f1b2e; --muted: #6b6480; --accent: #7c3aed; --accent-text: #fff;
+    --link: #6d28d9; --tag-bg: #e8edfb; --tag-text: #3b4f9e; --star: #a16207; --err: #b91c1c;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+
+  header {
+    display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+    padding: 8px 10px; background: var(--panel); border-bottom: 1px solid var(--border);
+  }
+  header input, header select, header button {
+    font: inherit; color: var(--text); background: var(--bg);
+    border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; height: 28px;
+  }
+  header input { flex: 1 1 200px; min-width: 140px; }
+  header select { flex: 0 1 180px; min-width: 100px; }
+  header input:focus, header select:focus { outline: none; border-color: var(--accent); }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+  button.ghost { background: transparent; color: var(--link); }
+  button:hover { filter: brightness(1.15); }
+  #back { display: none; }
+  body.reading #back { display: inline-block; }
+
+  #results { flex: 1; overflow-y: auto; padding: 10px; }
+  body.reading #results { display: none; }
+  #grid { display: grid; grid-template-columns: 1fr; gap: 10px; align-items: start; }
+  @media (min-width: 760px) { #grid { grid-template-columns: 1fr 1fr; } }
+  #status { color: var(--muted); padding: 10px 2px; text-align: center; }
+  #status.error { color: var(--err); }
+
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px 12px; cursor: pointer;
+  }
+  .card:hover { border-color: var(--accent); }
+  .card-head { display: flex; gap: 8px; align-items: baseline; }
+  .card h3 { margin: 0; font-size: 14px; font-weight: 600; flex: 1; color: var(--text); }
+  .badge {
+    font-size: 11px; padding: 0 6px; border-radius: 3px; white-space: nowrap;
+    background: var(--tag-bg); color: var(--tag-text);
+  }
+  .badge.ao3 { background: #7f1d1d; color: #fecaca; }
+  .meta { color: var(--muted); font-size: 12px; margin-top: 2px; display: flex; flex-wrap: wrap; gap: 0 10px; }
+  .meta .author { color: var(--link); }
+  .meta .star { color: var(--star); }
+  .tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+  .tags span { font-size: 11px; padding: 0 6px; border-radius: 3px; background: var(--tag-bg); color: var(--tag-text); }
+  .summary {
+    margin: 6px 0 0; font-size: 12.5px;
+    display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .card.open .summary { display: block; }
+  .actions { display: flex; gap: 6px; margin-top: 8px; align-items: center; }
+  .actions button { font: inherit; font-size: 12px; border-radius: 4px; padding: 3px 10px; border: 1px solid var(--border); }
+  .actions .more-toggle { margin-left: auto; border: none; background: none; color: var(--muted); padding: 3px 0; }
+  #sentinel { height: 1px; }
+
+  #reader { flex: 1; display: none; }
+  body.reading #reader { display: flex; }
+  #reader webview { flex: 1; border: 0; }
+</style>
+</head>
+<body>
+<header>
+  <input id="q" type="search" placeholder="Search by theme, mood, scenario…" aria-label="Search stories">
+  <select id="category" aria-label="Category"><option value="">Any category</option></select>
+  <button id="go" class="primary">Search</button>
+  <button id="random" class="ghost">Random</button>
+  <button id="back" class="ghost" title="Back to results (Esc)">← Results</button>
+</header>
+<main id="results">
+  <div id="grid"></div>
+  <div id="status"></div>
+  <div id="sentinel"></div>
+</main>
+<div id="reader"></div>
+
+<script>
+  const params   = new URLSearchParams(location.search);
+  const PARTITION = params.get('partition') || '';
+  if (params.get('dark') === '0') document.documentElement.classList.add('light');
+
+  const qEl = document.getElementById('q');
+  const catEl = document.getElementById('category');
+  const grid = document.getElementById('grid');
+  const statusEl = document.getElementById('status');
+  const resultsEl = document.getElementById('results');
+  const reader = document.getElementById('reader');
+  let webview = null;
+  let savedScroll = 0;
+
+  // The search being shown; `seq` discards replies to searches that were replaced.
+  let current = null;
+  let seq = 0;
+  let loading = false;
+
+  function setStatus(text, isError) {
+    statusEl.textContent = text;
+    statusEl.className = isError ? 'error' : '';
+  }
+
+  function el(tag, cls, text) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    return e;
+  }
+
+  function fmtWords(n) {
+    if (!n) return '';
+    return n >= 1000 ? `${Math.round(n / 1000)}k words` : `${n} words`;
+  }
+
+  function card(s) {
+    const c = el('article', 'card');
+    const head = el('div', 'card-head');
+    head.appendChild(el('h3', null, s.title));
+    if (s.chapters) head.appendChild(el('span', 'badge', `${s.chapters} ch.`));
+    if (s.source === 'ao3') head.appendChild(el('span', 'badge ao3', 'AO3'));
+    c.appendChild(head);
+
+    const meta = el('div', 'meta');
+    if (s.author) meta.appendChild(el('span', 'author', s.author));
+    for (const t of [s.category, s.year, fmtWords(s.words)]) if (t) meta.appendChild(el('span', null, t));
+    if (s.rating) meta.appendChild(el('span', 'star', `★${s.rating.toFixed(2)}${s.votes ? ` (${s.votes})` : ''}`));
+    c.appendChild(meta);
+
+    if (s.tags.length) {
+      const tags = el('div', 'tags');
+      for (const t of s.tags) tags.appendChild(el('span', null, t));
+      c.appendChild(tags);
+    }
+    const summary = el('p', 'summary', s.summary);
+    c.appendChild(summary);
+
+    const actions = el('div', 'actions');
+    const read = el('button', 'primary', s.chapters ? 'Read Ch. 1 →' : 'Read →');
+    const more = el('button', 'ghost', 'More like this');
+    const toggle = el('button', 'more-toggle', 'more');
+    actions.append(read, more, toggle);
+    c.appendChild(actions);
+
+    more.addEventListener('click', (e) => {
+      e.stopPropagation();
+      qEl.value = '';
+      startSearch({ morelike: s.slug, category: '' }, `More like “${s.title}”`);
+    });
+    toggle.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggle.textContent = c.classList.toggle('open') ? 'less' : 'more';
+    });
+    c.addEventListener('click', () => {
+      // A click that ends a text selection isn't a request to open the story.
+      if (String(window.getSelection())) return;
+      openStory(s);
+    });
+    // Only offer the toggle when the summary is actually cut off.
+    requestAnimationFrame(() => {
+      if (summary.scrollHeight <= summary.clientHeight + 1) toggle.style.display = 'none';
+    });
+    return c;
+  }
+
+  async function loadPage() {
+    if (!current || loading || !current.hasMore) return;
+    loading = true;
+    const mine = seq;
+    setStatus('Searching…');
+    const res = await window.storiesAPI.search({ ...current.opts, offset: current.offset });
+    if (mine !== seq) return; // replaced by a newer search, which owns `loading` now
+    loading = false;
+    if (res.error) { setStatus(res.error, true); return; }
+    for (const s of res.results) grid.appendChild(card(s));
+    current.count += res.results.length;
+    current.offset = res.nextOffset;
+    current.hasMore = res.hasMore && res.results.length > 0;
+    if (!current.count) setStatus('No stories found.');
+    else if (!current.hasMore) setStatus(current.opts.random ? '' : 'No more results.');
+    else setStatus('');
+    // A short page may not fill the window, so the sentinel never scrolls into view.
+    if (current.hasMore && resultsEl.scrollHeight <= resultsEl.clientHeight) loadPage();
+  }
+
+  function startSearch(opts, title) {
+    seq++;
+    loading = false;
+    showResults();
+    grid.replaceChildren();
+    resultsEl.scrollTop = 0;
+    current = { opts, offset: 0, hasMore: true, count: 0, title: title ? `Stories — ${title}` : 'Stories' };
+    document.title = current.title;
+    loadPage();
+  }
+
+  function searchFromHeader() {
+    const q = qEl.value.trim();
+    if (!q) { qEl.focus(); return; }
+    startSearch({ q, category: catEl.value }, q);
+  }
+
+  function randomFromHeader() {
+    qEl.value = '';
+    startSearch({ random: true, category: catEl.value }, catEl.value ? `Random ${catEl.value}` : 'Random');
+  }
+
+  function openStory(s) {
+    if (!webview) {
+      webview = document.createElement('webview');
+      webview.setAttribute('partition', PARTITION);
+      webview.setAttribute('src', s.url);
+      webview.addEventListener('page-title-updated', (e) => { document.title = e.title; });
+      reader.appendChild(webview);
+    } else {
+      webview.loadURL(s.url);
+    }
+    document.title = s.title;
+    // #results is display:none while reading, which drops its scroll offset.
+    if (!document.body.classList.contains('reading')) savedScroll = resultsEl.scrollTop;
+    document.body.classList.add('reading');
+  }
+
+  function showResults() {
+    if (!document.body.classList.contains('reading')) return;
+    document.body.classList.remove('reading');
+    resultsEl.scrollTop = savedScroll;
+    if (current) document.title = current.title;
+  }
+
+  document.getElementById('go').addEventListener('click', searchFromHeader);
+  document.getElementById('random').addEventListener('click', randomFromHeader);
+  document.getElementById('back').addEventListener('click', showResults);
+  qEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') searchFromHeader(); });
+  catEl.addEventListener('change', () => {
+    if (current && !current.opts.morelike) startSearch({ ...current.opts, category: catEl.value }, current.opts.q || 'Random');
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && document.body.classList.contains('reading')) showResults();
+  });
+
+  new IntersectionObserver((entries) => {
+    if (entries.some(e => e.isIntersecting)) loadPage();
+  }, { root: resultsEl, rootMargin: '400px' }).observe(document.getElementById('sentinel'));
+
+  function addCategory(name) {
+    const o = el('option', null, name);
+    o.value = name;
+    catEl.appendChild(o);
+  }
+  const categoriesLoaded = window.storiesAPI.categories().then((list) => list.forEach(addCategory));
+
+  // From the chat's Stories button: random stories from the room's category, a search
+  // for the room's name, or random stories from every category.
+  async function run(opts) {
+    await categoriesLoaded;
+    const category = opts.category || '';
+    // A category the server didn't list (or the list failed to load) still filters.
+    if (category && ![...catEl.options].some(o => o.value === category)) addCategory(category);
+    catEl.value = category;
+    if (opts.random) randomFromHeader();
+    else if (opts.q) { qEl.value = opts.q; searchFromHeader(); }
+    else qEl.focus();
+  }
+  window.storiesAPI.onRun(run);
+  window.storiesAPI.onBack(showResults); // Esc pressed inside the story page
+  run({ q: params.get('q') || '', random: params.get('random') === '1', category: params.get('category') || '' });
+</script>
+</body>
+</html>
