@@ -6,6 +6,13 @@ so keep the heading format `## [x.y.z] - YYYY-MM-DD`.
 
 Versions before 0.9.0 are not listed here; see the [tags](https://github.com/joeuser12/litchat/tags).
 
+## [0.9.28] - 2026-09-24
+
+### Fixed
+- **The first auto-join room was often missing after startup.** When the chat reconnects while
+  starting up, the first room's join ran before the connection was back and gave up. Auto-join now
+  waits until the chat is connected, and a room that still fails to join gets one more try.
+
 ## [0.9.27] - 2026-09-23
 
 ### Added

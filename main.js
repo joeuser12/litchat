@@ -954,36 +954,23 @@ function createWindow() {
         const autoJoins = Object.entries(settings.favourites || {})
           .filter(([, v]) => v.autoJoin);
         (async () => {
-          // Wait for evidence that room joins will work.
-          // Strategy: watch #chat-tabs for the first tab Candy adds via its own
-          // bookmark/session restore — that's concrete proof the XMPP connection
-          // is warm.  Falls back to 3 s for a brand-new session with no bookmarks.
-          await win.webContents.executeJavaScript(`
-            new Promise(function(resolve) {
-              var resolved = false;
-              function done() { if (!resolved) { resolved = true; resolve(); } }
-
-              // Already warm — a tab is present from Candy's own restore
-              if (document.querySelector('#chat-tabs li[data-roomjid]')) {
-                done(); return;
-              }
-
-              // Watch for the first tab Candy adds itself
-              var tabs = document.querySelector('#chat-tabs');
-              var obs = tabs ? new MutationObserver(function() {
-                if (document.querySelector('#chat-tabs li[data-roomjid]')) {
-                  obs.disconnect(); done();
-                }
-              }) : null;
-              if (obs) obs.observe(tabs, { childList: true, subtree: true });
-
-              // Fallback: 3 s (no bookmarks / first-ever session)
-              setTimeout(function() { if (obs) obs.disconnect(); done(); }, 3000);
-            })
-          `).catch(() => {});
+          // Candy's startup often connects, drops the connection ("Disconnecting...")
+          // and connects again ~10 s later. A join started in between opens a room
+          // panel that never fills, so the first room was the one lost. Wait for the
+          // connection, and give any room that still failed one more try at the end.
+          await waitForChatReady();
+          const failed = [];
           for (const [jid] of autoJoins) {
-            await joinRoom(jid);
+            if (!(await joinRoom(jid))) failed.push(jid);
             await new Promise(r => setTimeout(r, 1500)); // let the site settle between joins
+          }
+          if (failed.length) {
+            console.warn('[autojoin] retrying:', failed.join(', '));
+            await waitForChatReady();
+            for (const jid of failed) {
+              if (!(await joinRoom(jid))) console.warn('[autojoin] could not join', jid);
+              await new Promise(r => setTimeout(r, 1500));
+            }
           }
         })();
         // Suppress presence notifications briefly while the initial roster flood passes
@@ -3240,6 +3227,33 @@ const QUIET_ROOM_PANEL_JS = `
   };
 `;
 
+// Resolves once room joins can work: a room tab exists (Candy has joined something),
+// or Strophe is connected and authenticated and Candy's status dialog ("Connecting...",
+// "Disconnecting...") has been closed for 2 s. Gives up waiting after 90 s.
+function waitForChatReady() {
+  return win.webContents.executeJavaScript(`
+    new Promise(function(resolve) {
+      var start = Date.now(), calmSince = 0;
+      (function check() {
+        if (document.querySelector('#chat-tabs li[data-roomjid]')) { resolve('tab'); return; }
+        var conn = null;
+        try { conn = Candy.Core.getConnection(); } catch (e) {}
+        var modal = document.getElementById('chat-modal');
+        var modalUp = modal && getComputedStyle(modal).display !== 'none';
+        if (conn && conn.connected && conn.authenticated && !modalUp) {
+          if (!calmSince) calmSince = Date.now();
+          else if (Date.now() - calmSince >= 2000) { resolve('connected'); return; }
+        } else {
+          calmSince = 0;
+        }
+        if (Date.now() - start > 90000) { resolve('timeout'); return; }
+        setTimeout(check, 200);
+      })();
+    })
+  `).catch(() => 'error');
+}
+
+// Resolves true once the room's tab is in the room bar, false if the join gave up.
 function joinRoom(jid) {
   return win.webContents.executeJavaScript(
     `${QUIET_ROOM_PANEL_JS}
@@ -3250,7 +3264,7 @@ function joinRoom(jid) {
        // By the time we get here, Candy.Core.getUser() has confirmed auth, so a tab
        // in the roombar means the room is genuinely joined (not just a stale restored element).
        if (document.querySelector('li[data-roomjid=' + JSON.stringify(jid) + '] a.label')) {
-         resolve(); return;
+         resolve(true); return;
        }
 
        function dismiss() { window.__litQuietRoomPanel(false); }
@@ -3259,7 +3273,7 @@ function joinRoom(jid) {
          var deadline = Date.now() + (timeoutMs || 8000);
          var poll = setInterval(function() {
            if (document.querySelector('li[data-roomjid=' + JSON.stringify(jid) + '] a.label')) {
-             clearInterval(poll); dismiss(); resolve();
+             clearInterval(poll); dismiss(); resolve(true);
            } else if (Date.now() > deadline) {
              clearInterval(poll); dismiss();
              console.warn('[join] gave up waiting for tab, falling back to UI click:', jid);
@@ -3334,11 +3348,11 @@ function joinRoom(jid) {
            // After clicking the link, wait for the tab — retry the click every 3 s if needed
            if (clickedLink) {
              if (document.querySelector('li[data-roomjid=' + JSON.stringify(jid) + '] a.label')) {
-               clearInterval(poll); dismiss(); resolve(); return;
+               clearInterval(poll); dismiss(); resolve(true); return;
              }
              if (++tries > 80) {
                console.warn('[join] tab never appeared after click for:', jid);
-               clearInterval(poll); dismiss(); resolve(); return;
+               clearInterval(poll); dismiss(); resolve(false); return;
              }
              // Retry the click every 30 ticks (3 s) in case the first click was lost
              if (tries % 30 === 0 && clickAttempts < 3) {
@@ -3358,14 +3372,14 @@ function joinRoom(jid) {
                '— visible rooms:', Array.from(
                  document.querySelectorAll('ul.simplePaginationChatRoomList li a')
                ).map(function(a){ return (a.getAttribute('href')||'').replace(/^#/,''); }));
-             dismiss(); resolve();
+             dismiss(); resolve(false);
            }
          }, 100);
        }
 
        tryViaUI();
      })`
-  ).catch(() => {});
+  ).then(Boolean, () => false);
 }
 
 function openLinkWindow(url) {
