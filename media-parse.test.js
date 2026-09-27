@@ -39,10 +39,38 @@ test('Format B video', () => {
   expect(parsePhotoBody('📷 View photo: https://picpub.art/v/deadbeef01#clip.mp4').isVideo).toBe(true);
 });
 
+test('Format B: a hash of "." or ".." is not a photo (it would be a path segment)', () => {
+  expect(parsePhotoBody('📷 View photo: https://picpub.art/v/deadbeef01#..')).toBeNull();
+  expect(parsePhotoBody('📷 View photo: https://picpub.art/v/deadbeef01#.')).toBeNull();
+  expect(parsePhotoBody('📷 View photo: https://picpub.art/v/deadbeef01#.hidden')).toBeNull();
+});
+
+test('Format B: sentence punctuation after the hash is not part of it', () => {
+  const p = parsePhotoBody('📷 View photo: https://picpub.art/v/deadbeef01#clip.mp4.');
+  expect(p.hash).toBe('clip.mp4');
+  expect(p.isVideo).toBe(true);
+});
+
 test('Format C: direct image URL from any host', () => {
   expect(parsePhotoBody('look https://example.com/a/b.PNG?x=1 wow')).toEqual({
     kind: 'image', url: 'https://example.com/a/b.PNG?x=1',
   });
+});
+
+test('Format C: only a URL that ends in an image extension', () => {
+  expect(parsePhotoBody('https://example.com/photo.jpg.html')).toBeNull();
+  expect(parsePhotoBody('https://x.com/a.pngfoo/bar')).toBeNull();
+  expect(parsePhotoBody('see https://x.com/a.jpg.')).toEqual({ kind: 'image', url: 'https://x.com/a.jpg' });
+  expect(parsePhotoBody('(https://x.com/a.gif)')).toEqual({ kind: 'image', url: 'https://x.com/a.gif' });
+  expect(parsePhotoBody('first https://x.com/page then https://x.com/b.webp')).toEqual({ kind: 'image', url: 'https://x.com/b.webp' });
+});
+
+test('Format C stays fast on long crafted messages', () => {
+  for (const body of ['http://'.repeat(10_000), 'https://a' + '.jpg?'.repeat(20_000), 'x '.repeat(50_000)]) {
+    const t = performance.now();
+    parsePhotoBody(body);
+    expect(performance.now() - t).toBeLessThan(100);
+  }
 });
 
 test('non-photo text', () => {

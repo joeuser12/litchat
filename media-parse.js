@@ -23,7 +23,7 @@ function parsePhotoBody(text) {
     return { kind: 'native', url: a[1], whole: text.trim() === a[0].trim() };
   }
 
-  var b = /\u{1F4F7} View photo: (https:\/\/picpub\.art\/v\/([a-f0-9]+)(?:\?[^#\s"'<>]*)?)#([\w.]+)/u.exec(text);
+  var b = /\u{1F4F7} View photo: (https:\/\/picpub\.art\/v\/([a-f0-9]+)(?:\?[^#\s"'<>]*)?)#(\w+(?:\.\w+)*)/u.exec(text);
   if (b) {
     var vtM = /[?&]vt=([^&#]+)/.exec(b[1]);
     var vt = vtM ? vtM[1] : null;
@@ -39,8 +39,23 @@ function parsePhotoBody(text) {
     };
   }
 
-  var c = /(https?:\/\/[^\s<>"']+\.(?:jpg|jpeg|png|gif|webp)(?:\?[^\s<>"']*)?)/i.exec(text);
-  if (c) return { kind: 'image', url: c[1] };
+  // Format C, word by word: one regex over the whole text re-scanned the rest of
+  // it from every "http" (quadratic on long messages), and matched inside longer
+  // URLs ("photo.jpg.html" became an image at "photo.jpg"). Sentence punctuation
+  // after the URL is not part of it. The query string is split off with indexOf so
+  // nothing here backtracks.
+  var words = text.split(/\s+/);
+  for (var i = 0; i < words.length; i++) {
+    var start = words[i].search(/https?:\/\//i);
+    if (start === -1) continue;
+    var url = words[i].slice(start).replace(/[.,;:!?)\]'"]+$/, '');
+    var q = url.indexOf('?');
+    var base = q === -1 ? url : url.slice(0, q);
+    if (/^https?:\/\/[^<>"'?]+\.(?:jpg|jpeg|png|gif|webp)$/i.test(base) &&
+        (q === -1 || /^\?[^<>"']*$/.test(url.slice(q)))) {
+      return { kind: 'image', url: url };
+    }
+  }
 
   return null;
 }

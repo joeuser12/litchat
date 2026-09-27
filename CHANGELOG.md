@@ -6,6 +6,33 @@ so keep the heading format `## [x.y.z] - YYYY-MM-DD`.
 
 Versions before 0.9.0 are not listed here; see the [tags](https://github.com/joeuser12/litchat/tags).
 
+## [0.9.29] - 2026-09-27
+
+### Security
+- Fixed three ways other chat users could cause harm with a crafted message or link: running code
+  in the Chat Logs window, freezing the app through a link preview, and making the app fetch pages
+  from your local network.
+- Pages opened from chat links no longer get camera, microphone or location access, and only web
+  links open.
+
+### Added
+- **Straight into the chat:** the "Enter Chat As" page is skipped at startup.
+- **What's New** in the menu and in the update dialog opens the release notes.
+
+### Fixed
+- No more burst of "Now online", "joined" and keyword notifications at startup or when rejoining
+  a room, and no notifications for a DM you are already reading.
+- A watched user is only reported offline once they have left all your rooms.
+- Rejoining a room no longer logs its recent history a second time.
+- Ctrl+R in a Stories or link window no longer reloads the chat.
+- Joining a room no longer hides other dialogs, and join errors (banned, room full) are shown.
+- "Delete all" in Chat Logs could delete the previously viewed user's logs.
+- The login form that sometimes appears at startup is retried automatically.
+- Settings survive a crash while saving; a damaged settings file is kept as a backup.
+- The LLM away-reply is paced, so two users in away mode can't keep replying to each other.
+- Link previews show `&`, quotes and dashes correctly.
+- Less disk and CPU work in busy chats, and large uploads use half the memory (now capped at 300 MB).
+
 ## [0.9.28] - 2026-09-24
 
 ### Fixed

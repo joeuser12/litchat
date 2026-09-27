@@ -1,11 +1,7 @@
-const { contextBridge } = require('electron');
+const { contextBridge, ipcRenderer } = require('electron');
 const { readNote, saveNote } = require('./notes');
-const { loadWatchList, saveWatchList } = require('./watch');
-const { nickOf, roomOf, peerName, readAllMessages, rewriteLogs } = require('./logstore');
-
-function msgSig(m) {
-  return m.ts + '|' + m.direction + '|' + (m.body || '').slice(0, 80);
-}
+const { loadWatchList } = require('./watch');
+const { nickOf, roomOf, peerName, msgSig, readAllMessages } = require('./logstore');
 
 function decorate(m) {
   return { ...m, sig: msgSig(m), fromUser: nickOf(m.from), toUser: nickOf(m.to), room: roomOf(m) };
@@ -26,32 +22,35 @@ contextBridge.exposeInMainWorld('logAPI', {
     return readAllMessages(m => peerName(m) === target).map(decorate);
   },
 
-  recentDMs(limit = 15) {
+  // The `limit` most recent DM partners, each with at most `perPeer` of their
+  // latest messages (and the `total` logged). Opening Chat Logs used to decorate
+  // every DM ever logged and render each of these partners' complete history.
+  recentDMs(limit = 15, perPeer = 200) {
     const groups = new Map();
     for (const m of readAllMessages(m => m.type === 'chat')) {
       const peer = peerName(m);
       if (!peer) continue;
       if (!groups.has(peer)) groups.set(peer, []);
-      groups.get(peer).push({ ...decorate(m), room: null });
+      groups.get(peer).push(m);
     }
     return [...groups.entries()]
-      .map(([peer, messages]) => ({ peer, messages, lastTs: messages[messages.length - 1].ts }))
+      .map(([peer, msgs]) => ({ peer, msgs, lastTs: msgs[msgs.length - 1].ts }))
       .sort((a, b) => (a.lastTs < b.lastTs ? 1 : a.lastTs > b.lastTs ? -1 : 0))
-      .slice(0, limit);
+      .slice(0, limit)
+      .map(({ peer, msgs }) => ({
+        peer,
+        total: msgs.length,
+        messages: msgs.slice(-perPeer).map(m => ({ ...decorate(m), room: null })),
+      }));
   },
 
+  // Deletes run on the main process, where new messages are appended (see rewriteLogs).
   deleteMessages(sigs) {
-    const sigSet = new Set(sigs);
-    rewriteLogs(m => !sigSet.has(msgSig(m)));
+    return ipcRenderer.invoke('logs:deleteMessages', sigs);
   },
 
   deleteGroup(username, room) {
-    const target = username.toLowerCase();
-    rewriteLogs(m => {
-      if (peerName(m) !== target) return true;
-      if (room === null) return roomOf(m) !== null;   // keep non-DMs
-      return roomOf(m) !== room;                       // keep other rooms
-    });
+    return ipcRenderer.invoke('logs:deleteGroup', username, room);
   },
 
   searchMessages(query, limit = 300) {
@@ -67,10 +66,8 @@ contextBridge.exposeInMainWorld('logAPI', {
   isWatched(username) {
     return loadWatchList().has(username.toLowerCase());
   },
+  // Through the main process, which owns the watch list (see watchUser in main.js).
   setWatched(username, watched) {
-    const set = loadWatchList();
-    if (watched) set.add(username.toLowerCase());
-    else set.delete(username.toLowerCase());
-    saveWatchList(set);
+    return ipcRenderer.invoke('watch:set', username, !!watched);
   },
 });

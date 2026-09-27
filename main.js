@@ -3,6 +3,30 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
+// Writes through a temp file and a rename, so a crash or power cut mid-write
+// leaves the previous file intact instead of a truncated one.
+function writeFileAtomic(file, data) {
+  const tmp = file + '.tmp';
+  fs.writeFileSync(tmp, data);
+  fs.renameSync(tmp, file);
+}
+
+// Reads a JSON file. Missing → null. Unreadable or corrupt → the file is kept as
+// <file>.corrupt-<time> (so the next save can't destroy what's left of it), the
+// problem is recorded in damagedFiles, and null is returned.
+const damagedFiles = [];
+function readJsonFile(file) {
+  let text;
+  try { text = fs.readFileSync(file, 'utf8'); }
+  catch (e) { if (e.code === 'ENOENT') return null; text = null; }
+  try { if (text !== null) return JSON.parse(text); } catch {}
+  const backup = `${file}.corrupt-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+  try { fs.copyFileSync(file, backup); } catch {}
+  damagedFiles.push({ file, backup });
+  console.error('[settings] could not read', file, '— kept a copy as', backup);
+  return null;
+}
+
 // ── Profile system ─────────────────────────────────────────────────────────
 // Must run before any other requires so logger/watch/notes inherit LIT_USERDATA.
 
@@ -10,12 +34,37 @@ const BASE_USERDATA = app.getPath('userData');
 const PROFILES_FILE = path.join(BASE_USERDATA, 'profiles.json');
 
 function loadProfiles() {
-  try { return JSON.parse(fs.readFileSync(PROFILES_FILE, 'utf8')); }
-  catch { return null; }
+  const p = readJsonFile(PROFILES_FILE);
+  return p && typeof p === 'object' && p.list ? p : null;
 }
 
 function saveProfiles(p) {
-  fs.writeFileSync(PROFILES_FILE, JSON.stringify(p, null, 2));
+  writeFileAtomic(PROFILES_FILE, JSON.stringify(p, null, 2));
+}
+
+// Applies one change to profiles.json as it is on disk now, not to the copy read
+// at startup: other instances (one per --profile) may have changed it since, and
+// saving the stale copy threw their changes away, e.g. a profile created there.
+function updateProfiles(change) {
+  const fresh = loadProfiles();
+  if (fresh) profiles = fresh;
+  change(profiles);
+  saveProfiles(profiles);
+}
+
+// profiles.json was damaged: list the profile folders that exist, so no profile
+// disappears from the menu (display names fall back to the folder names).
+function rebuildProfiles() {
+  let ids = [];
+  try {
+    ids = fs.readdirSync(path.join(BASE_USERDATA, 'profiles'), { withFileTypes: true })
+      .filter(d => d.isDirectory()).map(d => d.name);
+  } catch {}
+  if (!ids.length) return null;
+  const p = { active: ids.includes('default') ? 'default' : ids[0], list: {} };
+  for (const id of ids) p.list[id] = { name: id === 'default' ? 'Default' : id };
+  saveProfiles(p);
+  return p;
 }
 
 function slugify(name) {
@@ -40,6 +89,7 @@ function migrateToProfiles() {
 }
 
 let profiles = loadProfiles();
+if (!profiles && fs.existsSync(PROFILES_FILE)) profiles = rebuildProfiles();
 if (!profiles) profiles = migrateToProfiles();
 
 // Guard against a stale active profile
@@ -116,6 +166,9 @@ function claimInstance() {
     const client = net_.connect(INSTANCE_ENDPOINT);
     const giveUp = setTimeout(() => { client.destroy(); listen(); }, 1500);
     client.on('connect', () => {
+      // A primary answered. Without this, a slow app.whenReady() (>1.5 s) let the
+      // fallback run listen(), which unlinks the primary's socket before we exit.
+      clearTimeout(giveUp);
       client.write('show\n');
       // Wait briefly for the ack so the write is flushed before we exit.
       const exitTimer = setTimeout(() => { client.destroy(); done(false); }, 1000);
@@ -126,14 +179,16 @@ function claimInstance() {
 }
 const instanceClaim = claimInstance();
 
-app.on('will-quit', () => {
+function releaseInstance() {
   if (!instanceServer) return; // secondary instance: never touch the primary's endpoint
   try { instanceServer.close(); } catch {}
   if (process.platform !== 'win32') { try { fs.unlinkSync(INSTANCE_ENDPOINT); } catch {} }
-});
+  instanceServer = null;
+}
+app.on('will-quit', releaseInstance);
 
-const { extractMessages, writeMessages } = require('./logger');
-const { messagesWithPeer } = require('./logstore');
+const { extractMessages, writeMessages, unescapeXml } = require('./logger');
+const { messagesWithPeer, rewriteLogs, msgSig, peerName, roomOf, withoutLoggedReplays } = require('./logstore');
 const { parsePhotoBody } = require('./media-parse');
 const { loadWatchList, saveWatchList } = require('./watch');
 const { loadIgnoreList, saveIgnoreList, addTo: addIgnore, removeFrom: removeIgnore, normNick } = require('./ignore');
@@ -141,6 +196,9 @@ const { loadCaps, saveCaps, recordCap, hasCap } = require('./caps');
 const { buildChatContextMenu } = require('./context-menu');
 const { friendlyFetchError } = require('./friendly-error');
 const stories = require('./stories-api');
+const { parseLinkMeta } = require('./link-meta');
+const { isPreviewableUrl, resolvesToPublic } = require('./preview-guard');
+const { initialHistory, addToHistory, modelMessages, buildLlamaPrompt, replyDelay, MAX_REPLIES: MAX_AWAY_REPLIES } = require('./away-reply');
 
 const USER_CSS        = path.join(PROFILE_DIR, 'user.css');
 const USER_JS         = path.join(PROFILE_DIR, 'user.js');
@@ -187,19 +245,17 @@ const THEMES = [
 ];
 
 function loadSettings() {
-  try {
-    const s = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
-    // Migrate darkMode boolean → theme string
-    if (s.darkMode !== undefined && !s.theme) {
-      s.theme = s.darkMode ? 'dark' : 'light';
-      delete s.darkMode;
-    }
-    return s;
+  const s = readJsonFile(SETTINGS_FILE);
+  if (!s || typeof s !== 'object') return { theme: 'dark' };
+  // Migrate darkMode boolean → theme string
+  if (s.darkMode !== undefined && !s.theme) {
+    s.theme = s.darkMode ? 'dark' : 'light';
+    delete s.darkMode;
   }
-  catch { return { theme: 'dark' }; }
+  return s;
 }
 function saveSettings() {
-  fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
+  writeFileAtomic(SETTINGS_FILE, JSON.stringify(settings, null, 2));
 }
 
 const settings = loadSettings();
@@ -216,8 +272,9 @@ let watchList = loadWatchList();           // Set of lowercased nicks to watch
 let ignoreList = loadIgnoreList();         // Map lowercased nick → display name (see ignore.js)
 let peerCaps   = loadCaps();               // Map lowercased nick → { name, version, lastSeen } (see caps.js)
 const isIgnored = nick => ignoreList.has(normNick(nick));
-let onlineWatched = new Set();             // currently-online watched nicks this session
+let onlineWatched = new Map();             // watched nick → Set of rooms we can see them in (this page load)
 let presenceNotifyReady = false;           // false during startup roster flood
+const joinedRooms = new Set();             // rooms whose own-join presence arrived this page load
 let awayRepliedTo = new Set();             // JIDs already sent an away-reply this away session
 
 const ROOM_IDLE_MS        = 5 * 60 * 1000;  // 5-minute idle window for room notifications
@@ -232,12 +289,14 @@ const picpubExpiredTokens = new Set();     // tokens confirmed dead via HEAD che
 protocol.registerSchemesAsPrivileged([
   { scheme: 'litpic', privileges: { bypassCSP: true } },
 ]);
-let awayConversations = new Map();         // per-sender conversation history for llama mode
+let awayConversations = new Map();         // per-sender LLM away-reply state (see queueLlmAwayReply)
 
 // Auto-updater state — read by createAppMenu() to reflect current status
 let updateState = 'idle';   // 'idle' | 'checking' | 'downloading' | 'ready'
 let updateVersion = null;
 let _autoUpdater = null;
+// Each release's page carries its CHANGELOG.md section as the release notes.
+const RELEASES_URL = 'https://github.com/joeuser12/litchat/releases';
 
 // electron-builder's portable target sets these when its self-extracting exe runs.
 // A portable copy has no install location to update in place: letting electron-updater
@@ -284,7 +343,7 @@ function notifyRoomMessages(messages) {
   if (!presenceNotifyReady) return;
   const keywords = (settings.prefs?.keywords || []).map(k => k.toLowerCase()).filter(Boolean);
   for (const m of messages) {
-    if (m.type !== 'groupchat' || m.direction !== 'received') continue;
+    if (m.type !== 'groupchat' || m.direction !== 'received' || m.delayed) continue;
     const slash = (m.from || '').indexOf('/');
     if (slash === -1) continue;
     const roomJid  = unescapeJid(m.from.slice(0, slash));
@@ -320,7 +379,18 @@ function notifyRoomMessages(messages) {
   }
 }
 
+// A private chat pane's data-roomjid is the sender's full JID with the room part
+// unescaped ("literotica lobby@conference…/Nick"), while stanzas carry it escaped
+// ("literotica\20lobby@…/Nick"). The nick is a resource, which is never escaped.
+function paneJidOf(from) {
+  if (!from) return null;
+  const slash = from.indexOf('/');
+  return slash === -1 ? unescapeJid(from) : unescapeJid(from.slice(0, slash)) + from.slice(slash);
+}
+
 async function notifyDMs(messages) {
+  // Most batches carry no DM at all; don't ask the page for its active tab then.
+  if (!messages.some(m => m.type === 'chat' && m.direction === 'received')) return;
   // If the window is focused and the sender's DM pane is the active tab,
   // the user is already reading — skip the notification.
   let activePaneJid = null;
@@ -335,8 +405,7 @@ async function notifyDMs(messages) {
     if (m.type !== 'chat' || m.direction !== 'received') continue;
     // Ignored sender: no notification and no away/LLM auto-reply either.
     if (isIgnored(nickOf(m.from))) continue;
-    const senderJid = (m.from || '').split('/')[0];
-    if (activePaneJid && senderJid === activePaneJid) continue;
+    if (activePaneJid && paneJidOf(m.from) === activePaneJid) continue;
     const nick = nickOf(m.from);
     sendNotification({
       title: `DM from ${nick}`,
@@ -344,10 +413,8 @@ async function notifyDMs(messages) {
     });
     if (settings.prefs?.away && m.from && m.body) {
       const awayMsg = settings.prefs.awayMessage || "I'm currently away.";
-      if (awayMsg.startsWith('llama-server:')) {
-        sendLlamaReply(m.from, m.body).catch(e => console.error('[away/llama] error:', e.message));
-      } else if (awayMsg.startsWith('openrouter:')) {
-        sendOpenRouterReply(m.from, m.body).catch(e => console.error('[away/openrouter] error:', e.message));
+      if (awayMsg.startsWith('llama-server:') || awayMsg.startsWith('openrouter:')) {
+        queueLlmAwayReply(m.from, m.body);
       } else if (!awayRepliedTo.has(m.from)) {
         // Static reply — one per sender
         awayRepliedTo.add(m.from);
@@ -399,10 +466,12 @@ function parseLlamaEndpoint(awayMsg) {
   return { host: spec, port: 8080 };
 }
 
-let _llamaArch = null; // cached per app session
-
+// llama-server's model family, per endpoint. A failed detection is not cached,
+// so a server that was down for the first DM is detected properly later.
+const llamaArchByEndpoint = new Map();
 async function detectLlamaArch(endpoint) {
-  if (_llamaArch) return _llamaArch;
+  const key = JSON.stringify(endpoint);
+  if (llamaArchByEndpoint.has(key)) return llamaArchByEndpoint.get(key);
   const http = require('http');
   return new Promise(resolve => {
     const opts = {
@@ -416,62 +485,34 @@ async function detectLlamaArch(endpoint) {
       let data = '';
       res.on('data', chunk => { data += chunk; });
       res.on('end', () => {
-        try {
-          const id = (JSON.parse(data).data?.[0]?.id || '').toLowerCase();
-          if (id.includes('gemma'))       _llamaArch = 'gemma';
-          else if (id.includes('qwen3')) _llamaArch = 'qwen3';
-          else                            _llamaArch = 'chatml';
-        } catch { _llamaArch = 'chatml'; }
-        console.log('[away/llama] detected arch:', _llamaArch);
-        resolve(_llamaArch);
+        let id;
+        try { id = (JSON.parse(data).data?.[0]?.id || '').toLowerCase(); }
+        catch { resolve('chatml'); return; }
+        const arch = id.includes('gemma') ? 'gemma' : id.includes('qwen3') ? 'qwen3' : 'chatml';
+        llamaArchByEndpoint.set(key, arch);
+        console.log('[away/llama] detected arch:', arch);
+        resolve(arch);
       });
     });
-    req.on('error', () => { _llamaArch = 'chatml'; resolve(_llamaArch); });
+    req.setTimeout(10_000, () => req.destroy(new Error('timed out')));
+    req.on('error', () => resolve('chatml'));
     req.end();
   });
 }
 
-function buildLlamaPrompt(arch, messages) {
-  let prompt = '';
-  for (const msg of messages) {
-    if (arch === 'gemma') {
-      if (msg.role === 'system') {
-        prompt += `<start_of_turn>user\n${msg.content}\n\n`;
-      } else if (msg.role === 'user') {
-        // first system message already opened user turn; subsequent user messages start fresh
-        prompt += prompt ? `${msg.content}\n<end_of_turn>\n<start_of_turn>model\n`
-                         : `<start_of_turn>user\n${msg.content}\n<end_of_turn>\n<start_of_turn>model\n`;
-      } else if (msg.role === 'assistant') {
-        prompt += `${msg.content}<end_of_turn>\n<start_of_turn>user\n`;
-      }
-    } else {
-      // ChatML — covers Qwen3, Llama-3, Mistral, Phi, etc.
-      if (msg.role === 'system') {
-        prompt += `<|im_start|>system\n${msg.content}<|im_end|>\n`;
-      } else if (msg.role === 'user') {
-        prompt += `<|im_start|>user\n${msg.content}<|im_end|>\n`;
-      } else if (msg.role === 'assistant') {
-        prompt += `<|im_start|>assistant\n${msg.content}<|im_end|>\n`;
-      }
-    }
-  }
-  // Assistant prefill — Qwen3: empty think block skips chain-of-thought
-  if (arch === 'qwen3') prompt += '<|im_start|>assistant\n<think>\n\n</think>\n\n';
-  else if (arch === 'gemma') { /* already opened model turn above */ }
-  else prompt += '<|im_start|>assistant\n';
-  return prompt;
-}
+// A local model can be slow, but a request that never answers must not leave
+// that sender's replies stuck behind it forever.
+const LLM_TIMEOUT_MS = 120_000;
 
 async function callLlamaServer(endpoint, messages) {
   const http = require('http');
   const arch = await detectLlamaArch(endpoint);
   const prompt = buildLlamaPrompt(arch, messages);
-
   const body = JSON.stringify({
     prompt,
     stream: false,
     n_predict: 1024,
-    stop: ['<|im_end|>', '<|endoftext|>'],
+    stop: ['<|im_end|>', '<|endoftext|>', '<end_of_turn>'],
   });
   const opts = {
     path: '/completion',
@@ -494,6 +535,7 @@ async function callLlamaServer(endpoint, messages) {
         } catch (e) { reject(e); }
       });
     });
+    req.setTimeout(LLM_TIMEOUT_MS, () => req.destroy(new Error('llama-server timed out')));
     req.on('error', reject);
     req.write(body);
     req.end();
@@ -533,37 +575,11 @@ async function callOpenRouter(model, apiKey, messages) {
         } catch (e) { reject(e); }
       });
     });
+    req.setTimeout(LLM_TIMEOUT_MS, () => req.destroy(new Error('OpenRouter timed out')));
     req.on('error', reject);
     req.write(body);
     req.end();
   });
-}
-
-async function sendOpenRouterReply(toJid, userText) {
-  const awayMsg = settings.prefs?.awayMessage || '';
-  const model = awayMsg.slice('openrouter:'.length).trim();
-  const apiKey = loadOpenRouterKey();
-  if (!apiKey) { console.error('[away/openrouter] no key found at openrouter.key'); return; }
-
-  const systemPrompt = loadSystemPrompt();
-  if (!awayConversations.has(toJid)) {
-    awayConversations.set(toJid, loadDMHistory(toJid));
-  }
-  const history = awayConversations.get(toJid);
-  history.push({ role: 'user', content: userText });
-
-  const messages = [
-    ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
-    ...history,
-  ];
-
-  console.log('[away/openrouter] calling', model, 'for', toJid);
-  const reply = await callOpenRouter(model, apiKey, messages);
-  console.log('[away/openrouter] got reply:', reply.slice(0, 80));
-  if (!reply) return;
-
-  history.push({ role: 'assistant', content: reply });
-  sendAwayReply(toJid, reply);
 }
 
 function loadDMHistory(toJid) {
@@ -575,29 +591,70 @@ function loadDMHistory(toJid) {
   }));
 }
 
-async function sendLlamaReply(toJid, userText) {
-  const awayMsg  = settings.prefs?.awayMessage || '';
-  const endpoint = parseLlamaEndpoint(awayMsg);
-  const systemPrompt = loadSystemPrompt();
-
-  if (!awayConversations.has(toJid)) {
-    awayConversations.set(toJid, loadDMHistory(toJid));
+// LLM away-replies (llama-server or OpenRouter). awayConversations holds one
+// state per sender JID: { history, inFlight, timer, lastReplyAt, replies }. It
+// is cleared when away mode is turned off. Replies are paced per sender (see
+// away-reply.js); a DM that arrives while one is running or queued is added to
+// the history and answered by the next reply.
+function queueLlmAwayReply(toJid, userText) {
+  let st = awayConversations.get(toJid);
+  if (!st) {
+    st = { history: initialHistory(loadDMHistory(toJid), userText), inFlight: false, timer: null, lastReplyAt: 0, replies: 0 };
+    awayConversations.set(toJid, st);
   }
-  const history = awayConversations.get(toJid);
-  history.push({ role: 'user', content: userText });
+  addToHistory(st.history, { role: 'user', content: userText });
+  scheduleLlmAwayReply(toJid, st);
+}
 
-  const messages = [
-    ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
-    ...history,
-  ];
+function scheduleLlmAwayReply(toJid, st) {
+  const delay = replyDelay(st, Date.now());
+  if (delay === null) {
+    if (st.replies >= MAX_AWAY_REPLIES && !st.capLogged) {
+      st.capLogged = true;
+      console.warn('[away] reply limit reached for', toJid);
+    }
+    return;
+  }
+  st.timer = setTimeout(() => {
+    st.timer = null;
+    runLlmAwayReply(toJid, st).catch(e => console.error('[away] error:', e.message));
+  }, delay);
+}
 
-  console.log('[away/llama] calling endpoint', endpoint, 'for', toJid);
-  const reply = await callLlamaServer(endpoint, messages);
-  console.log('[away/llama] got reply:', reply?.slice(0, 80));
-  if (!reply) return;
-
-  history.push({ role: 'assistant', content: reply });
+async function runLlmAwayReply(toJid, st) {
+  if (!settings.prefs?.away || awayConversations.get(toJid) !== st) return;
+  const awayMsg = settings.prefs.awayMessage || '';
+  const isLlama = awayMsg.startsWith('llama-server:');
+  if (!isLlama && !awayMsg.startsWith('openrouter:')) return;
+  const messages = modelMessages(loadSystemPrompt(), st.history);
+  const lastAnswered = st.history[st.history.length - 1];
+  let reply = '';
+  st.inFlight = true;
+  try {
+    if (isLlama) {
+      const endpoint = parseLlamaEndpoint(awayMsg);
+      console.log('[away/llama] calling endpoint', endpoint, 'for', toJid);
+      reply = await callLlamaServer(endpoint, messages);
+    } else {
+      const model = awayMsg.slice('openrouter:'.length).trim();
+      const apiKey = loadOpenRouterKey();
+      if (!apiKey) { console.error('[away/openrouter] no key found at openrouter.key'); return; }
+      console.log('[away/openrouter] calling', model, 'for', toJid);
+      reply = await callOpenRouter(model, apiKey, messages);
+    }
+  } finally {
+    st.inFlight = false;
+    st.lastReplyAt = Date.now();
+  }
+  console.log('[away] got reply:', reply.slice(0, 80));
+  // Away turned off, or off and on again, while the model was working.
+  if (!reply || !settings.prefs?.away || awayConversations.get(toJid) !== st) return;
+  st.replies++;
+  // DMs that arrived meanwhile stay after this reply, and get the next one.
+  const i = st.history.lastIndexOf(lastAnswered);
+  st.history.splice(i === -1 ? st.history.length : i + 1, 0, { role: 'assistant', content: reply });
   sendAwayReply(toJid, reply);
+  if (st.history[st.history.length - 1].role === 'user') scheduleLlmAwayReply(toJid, st);
 }
 
 // Decodes XEP-0106 JID escaping (e.g. \20 → space) used in XMPP stanza from/to attributes.
@@ -626,7 +683,8 @@ function extractPresence(xml) {
   while ((m = re.exec(xml)) !== null) {
     const attrs = m[1];
     const inner = m[2] || '';
-    const from = (attrs.match(/\bfrom=["']([^"']+)["']/) || [])[1];
+    const rawFrom = (attrs.match(/\bfrom=["']([^"']+)["']/) || [])[1];
+    const from = rawFrom && unescapeXml(rawFrom);   // attribute values arrive XML-escaped
     const type = (attrs.match(/\btype=["']([^"']+)["']/) || [])[1] || 'available';
     if (from && (type === 'available' || type === 'unavailable')) {
       // status code 110 = MUC server reflecting our own join back to us
@@ -637,22 +695,53 @@ function extractPresence(xml) {
   return out;
 }
 
+// Unescaped room JID of a MUC presence's from ("room@conference…/Nick").
+function roomOfPresence(from) {
+  const slash = (from || '').indexOf('/');
+  return slash === -1 ? null : unescapeJid(from.slice(0, slash));
+}
+
 function handlePresence(presences) {
-  watchList = loadWatchList(); // pick up any changes made via the log viewer
+  if (!presences.length) return;
+  // Joining a room delivers every occupant's presence and then our own (status
+  // 110), so a room's presences only mean "someone came or went" once our own
+  // has been seen. Rooms whose own presence is in this batch count as joining
+  // too, in case the server splits or reorders the roster.
+  const joiningNow = new Set();
+  for (const p of presences) {
+    if (p.isSelf && p.type === 'available') joiningNow.add(roomOfPresence(p.from));
+  }
   for (const p of presences) {
     const { nick, type, from } = p;
+    const room = roomOfPresence(from);
+    const live = presenceNotifyReady && !joiningNow.has(room) && joinedRooms.has(room);
 
-    // Watch list: online/offline notifications for specific users
-    if (watchList.has(nick)) {
-      if (type === 'available' && !onlineWatched.has(nick)) {
-        onlineWatched.add(nick);
-        if (presenceNotifyReady)
-          sendNotification({ title: 'Now online', body: nick });
-      } else if (type === 'unavailable' && onlineWatched.has(nick)) {
-        onlineWatched.delete(nick);
-        if (presenceNotifyReady)
-          sendNotification({ title: 'Went offline', body: nick });
+    if (p.isSelf) {
+      if (type === 'available') joinedRooms.add(room);
+      else joinedRooms.delete(room);
+    }
+
+    // We left this room: we can no longer see who is in it, which says nothing
+    // about whether they are online. Forget it for everyone, silently.
+    if (p.isSelf && type === 'unavailable') {
+      for (const [n, rooms] of onlineWatched) {
+        rooms.delete(room);
+        if (!rooms.size) onlineWatched.delete(n);
       }
+    }
+
+    // Watch list: online/offline notifications for specific users, tracked per
+    // room — someone in two rooms who leaves one is still online. A roster flood
+    // still records who is where, silently.
+    if (watchList.has(nick) && !p.isSelf) {
+      const rooms = onlineWatched.get(nick) || new Set();
+      const wasOnline = rooms.size > 0;
+      if (type === 'available') rooms.add(room); else rooms.delete(room);
+      if (rooms.size) onlineWatched.set(nick, rooms); else onlineWatched.delete(nick);
+      if (live && !wasOnline && rooms.size)
+        sendNotification({ title: 'Now online', body: nick });
+      else if (live && wasOnline && !rooms.size)
+        sendNotification({ title: 'Went offline', body: nick });
     }
 
     // Suppress notifications for message history delivered after we join a room.
@@ -667,7 +756,7 @@ function handlePresence(presences) {
     }
 
     // Room join notifications — skip our own join reflection (MUC status 110)
-    if (type === 'available' && presenceNotifyReady && !p.isSelf) {
+    if (type === 'available' && live && !p.isSelf) {
       const slash = (from || '').indexOf('/');
       if (slash !== -1) {
         const roomJid  = unescapeJid(from.slice(0, slash));
@@ -691,8 +780,13 @@ let logWin  = null;
 let roomWin = null;
 let storiesWin = null;
 let readyPoll = null;
-let loginRaceRetried = false; // one-shot guard: auto-reload once if the logged-out
-                              // login form shows despite having session cookies
+let pageLoadGen = 0;          // bumped on every chat page load; async work from an older load stops
+// Startup retries, reset when the chat is up (see did-finish-load): reloads for the
+// login-form race, and automatic clicks through the "Enter Chat As" landing page.
+const MAX_LOGIN_RETRIES = 3;
+const MAX_AUTO_ENTERS   = 3;
+let loginRetries = 0;
+let autoEnters = 0;
 
 // Floor for both the live window and any restored geometry. Linux WMs report
 // transitional (sometimes near-zero) sizes while a window maximizes, minimizes or
@@ -721,27 +815,37 @@ function savedWindowBounds() {
 let winStateSaveTimer = null;
 function scheduleWindowStateSave() {
   clearTimeout(winStateSaveTimer);
-  winStateSaveTimer = setTimeout(() => {
-    if (!win || win.isDestroyed()) return;
-    // Only a plain, visible window has geometry worth recording. Minimized, hidden
-    // and full-screen windows report junk on Linux, and isMaximized() can still be
-    // false mid-transition — so record the maximized flag from the dedicated
-    // maximize/unmaximize events' own state and never overwrite the restore size
-    // with whatever the WM happened to report during the animation.
-    if (win.isMinimized() || win.isFullScreen() || !win.isVisible()) return;
-    if (win.isMaximized()) {
-      if (!settings.windowState?.maximized) {
-        settings.windowState = { ...(settings.windowState || {}), maximized: true };
-        saveSettings();
-      }
-      return;
+  winStateSaveTimer = setTimeout(saveWindowStateNow, 500);
+}
+
+// On close the window still exists, so save now: the debounced save used to
+// fire after it was destroyed and return early, losing a move or resize made
+// just before closing.
+function saveWindowStateOnClose() {
+  clearTimeout(winStateSaveTimer);
+  saveWindowStateNow();
+}
+
+function saveWindowStateNow() {
+  if (!win || win.isDestroyed()) return;
+  // Only a plain, visible window has geometry worth recording. Minimized, hidden
+  // and full-screen windows report junk on Linux, and isMaximized() can still be
+  // false mid-transition — so record the maximized flag from the dedicated
+  // maximize/unmaximize events' own state and never overwrite the restore size
+  // with whatever the WM happened to report during the animation.
+  if (win.isMinimized() || win.isFullScreen() || !win.isVisible()) return;
+  if (win.isMaximized()) {
+    if (!settings.windowState?.maximized) {
+      settings.windowState = { ...(settings.windowState || {}), maximized: true };
+      saveSettings();
     }
-    const [x, y] = win.getPosition();
-    const [width, height] = win.getSize();
-    if (width < MIN_WIN_WIDTH || height < MIN_WIN_HEIGHT) return;
-    settings.windowState = { width, height, x, y, maximized: false };
-    saveSettings();
-  }, 500);
+    return;
+  }
+  const [x, y] = win.getPosition();
+  const [width, height] = win.getSize();
+  if (width < MIN_WIN_WIDTH || height < MIN_WIN_HEIGHT) return;
+  settings.windowState = { width, height, x, y, maximized: false };
+  saveSettings();
 }
 
 // Minimize to tray is only safe where a tray icon actually exists to click. Most
@@ -778,7 +882,7 @@ function createWindow() {
   win.on('move',       scheduleWindowStateSave);
   win.on('maximize',   scheduleWindowStateSave);
   win.on('unmaximize', scheduleWindowStateSave);
-  win.on('close',      scheduleWindowStateSave);
+  win.on('close',      saveWindowStateOnClose);
 
   win.on('minimize', () => {
     // No tray icon (setupTray failed, or the desktop has no tray host) means
@@ -796,7 +900,8 @@ function createWindow() {
     }
   });
 
-  loginRaceRetried = false;
+  loginRetries = 0;
+  autoEnters = 0;
   // Ensure the partition's cookie store is fully loaded from disk BEFORE the first
   // navigation. Otherwise the initial request can race ahead of the lazy cookie-store
   // load and Literotica serves the logged-out login form. Awaiting a cookies.get()
@@ -808,6 +913,15 @@ function createWindow() {
 
 
   win.webContents.on('did-finish-load', async () => {
+    // A login from the site's fallback page (where a wrong password leads) ends
+    // on www.literotica.com; bring the window back to the chat.
+    try {
+      const here = new URL(win.webContents.getURL());
+      if (here.hostname === 'www.literotica.com' && !here.pathname.startsWith('/authenticate')) {
+        win.loadURL(CHAT_URL).catch(() => {});
+        return;
+      }
+    } catch {}
     injectStanzaGuard();
     // Detect server error pages (e.g. 500 Internal Server Error) and auto-reload
     // instead of leaving the user staring at a blank or cryptic error screen.
@@ -844,27 +958,64 @@ function createWindow() {
     // partition's cookie store has finished loading from disk, so Literotica serves
     // the logged-out login form even though we have a valid session. A reload sends
     // the now-loaded cookies. Detect the login form (it has a password field, which
-    // the logged-in landing page does not) and reload once — but only if we actually
-    // have cookies, so a genuinely logged-out user isn't reloaded in a loop.
-    if (!loginRaceRetried) {
-      const loggedOut = await win.webContents.executeJavaScript(
-        `!!document.querySelector('input[type=password]')`
-      ).catch(() => false);
-      if (loggedOut) {
-        const cookies = await session.fromPartition(PARTITION)
-          .cookies.get({ url: CHAT_URL }).catch(() => []);
-        if (cookies.length > 0) {
-          loginRaceRetried = true;
+    // the logged-in landing page does not) and reload — only while the site's
+    // `authenticated` cookie is present, so a genuinely logged-out user just sees
+    // the form. One reload was not always enough, and users had to press Ctrl+R, so
+    // it retries a few times with a growing pause.
+    const loggedOut = await win.webContents.executeJavaScript(
+      `!!document.querySelector('input[type=password]')`
+    ).catch(() => false);
+    if (loggedOut && loginRetries < MAX_LOGIN_RETRIES) {
+      const auth = await session.fromPartition(PARTITION)
+        .cookies.get({ url: CHAT_URL, name: 'authenticated' }).catch(() => []);
+      if (auth.length > 0) {
+        loginRetries++;
+        console.warn(`[login] login form despite a saved session; reloading (${loginRetries}/${MAX_LOGIN_RETRIES})`);
+        setTimeout(async () => {
+          if (!win || win.isDestroyed()) return;
+          // The cookie can outlive the real session, and then the form is genuine:
+          // once the user starts filling it in, stop reloading it under them.
+          const typing = await win.webContents.executeJavaScript(`(function() {
+            var a = document.activeElement;
+            return !!(a && /^(INPUT|TEXTAREA)$/.test(a.tagName)) ||
+              Array.from(document.querySelectorAll('input[type=password], input[type=text], input[type=email]')).some(function(i) { return i.value; });
+          })()`).catch(() => false);
+          if (typing) { loginRetries = MAX_LOGIN_RETRIES; return; }
           win.webContents.reload();
-          return;
-        }
+        }, 1000 * loginRetries);
+        return;
+      }
+    }
+
+    // Logged in, the site stops at a landing page with an "Enter Chat As <nick>"
+    // link on every start. Follow it. If the site bounces back here, the server
+    // usually still holds the previous session (it takes up to a minute to let
+    // go, and one account can't be in twice), so later tries wait 30 s each; after
+    // a few the button is left to the user.
+    if (!loggedOut && autoEnters < MAX_AUTO_ENTERS) {
+      const enterHref = await win.webContents.executeJavaScript(`(function() {
+        var a = Array.from(document.querySelectorAll('a[href]')).find(function(a) { return /enter chat as/i.test(a.innerText); });
+        return a ? a.href : null;
+      })()`).catch(() => null);
+      let target = null;
+      try { if (enterHref && new URL(enterHref).hostname === 'chat.literotica.com') target = enterHref; } catch {}
+      const landingUrl = win.webContents.getURL();   // a delayed try only runs if the user is still here
+      if (target) {
+        const delay = autoEnters === 0 ? 0 : 30_000;
+        autoEnters++;
+        setTimeout(() => {
+          if (win && !win.isDestroyed() && win.webContents.getURL() === landingUrl) win.loadURL(target).catch(() => {});
+        }, delay);
+        if (delay) console.warn(`[login] back at the landing page; entering again in 30 s (${autoEnters}/${MAX_AUTO_ENTERS})`);
+        return;
       }
     }
 
     if (readyPoll) { clearInterval(readyPoll); readyPoll = null; }
-    cssKeys = [];
+    const gen = ++pageLoadGen;
     presenceNotifyReady = false;
     onlineWatched.clear();
+    joinedRooms.clear();
 
     if (settings.zoomLevel) win.webContents.setZoomLevel(settings.zoomLevel);
 
@@ -882,37 +1033,7 @@ function createWindow() {
       fs.writeFileSync(USER_CSS, CUSTOM_STARTER); // wipe unmodified seed
     }
 
-    const theme = settings.theme || 'dark';
-    const CUSTOM_LIGHT = new Set(['solarized-light', 'warm-rose', 'blue-steel', 'sage', 'lavender']);
-    if (theme !== 'light') {
-      // Always inject the bundled theme first so app updates reach everyone
-      const themePath = getThemeFile(theme);
-      if (fs.existsSync(themePath))
-        cssKeys.push(await win.webContents.insertCSS(fs.readFileSync(themePath, 'utf8')));
-      // Then layer the user's personal overrides on top
-      if (fs.existsSync(USER_CSS))
-        cssKeys.push(await win.webContents.insertCSS(fs.readFileSync(USER_CSS, 'utf8')));
-
-      // Remove the baked-in white background from the logo PNG via canvas pixel manipulation.
-      // CSS mix-blend-mode cannot cross GPU compositing layer boundaries so JS is required.
-      removeLogoBg();
-    }
-
-    // For dark-background themes, force the logo SVG paths white regardless of
-    // whether the Literotica site itself has dark_theme active (they're independent).
-    if (theme !== 'light' && !CUSTOM_LIGHT.has(theme)) {
-      cssKeys.push(await win.webContents.insertCSS(
-        '#headerLogo path{fill:white!important}' +
-        '#headerLogo .logo__l,#headerLogo .logo__r{fill:#4a89f3!important}'
-      ));
-    }
-
-    const fsPx = settings.prefs?.fontSize;
-    if (fsPx && fsPx !== 15)
-      cssKeys.push(await win.webContents.insertCSS(fontSizeCSS(fsPx)));
-    const nameW = settings.prefs?.nameColWidth ?? DEFAULT_NAME_WIDTH;
-    if (nameW !== 110)
-      cssKeys.push(await win.webContents.insertCSS(nameColCSS(nameW)));
+    await applyPageCss();
 
     if (fs.existsSync(USER_JS)) {
       win.webContents.executeJavaScript(fs.readFileSync(USER_JS, 'utf8')).catch(() => {});
@@ -937,20 +1058,30 @@ function createWindow() {
 
     // Poll for the chat UI to be ready (login complete + Candy initialised).
     // #roomPanel-tab only exists once the user is logged in and the room bar has rendered.
+    // A tick can take longer than 500 ms when the renderer is busy starting Candy;
+    // without the busy flag, queued ticks could each see ready=true and run all of
+    // the setup below (auto-join, every inject) more than once.
     let tries = 0;
+    let busy = false;
     let thisPoll;
     thisPoll = readyPoll = setInterval(async () => {
+      if (busy) return;
+      busy = true;
       let ready = false;
       try {
         ready = await win.webContents.executeJavaScript(
           `!!document.querySelector('#roomPanel-tab')`
         );
       } catch {}
+      busy = false;
       tries++;
+      if (readyPoll !== thisPoll || gen !== pageLoadGen) { clearInterval(thisPoll); return; }
       if (ready || tries > 240) { // give up after ~2 min
         clearInterval(thisPoll);
-        if (readyPoll === thisPoll) readyPoll = null;
+        readyPoll = null;
         if (!ready) return;
+        loginRetries = 0;
+        autoEnters = 0;
         const autoJoins = Object.entries(settings.favourites || {})
           .filter(([, v]) => v.autoJoin);
         (async () => {
@@ -958,23 +1089,27 @@ function createWindow() {
           // and connects again ~10 s later. A join started in between opens a room
           // panel that never fills, so the first room was the one lost. Wait for the
           // connection, and give any room that still failed one more try at the end.
+          // A reload starts its own auto-join, so this one stops at the next step.
+          const stale = () => gen !== pageLoadGen;
           await waitForChatReady();
           const failed = [];
           for (const [jid] of autoJoins) {
+            if (stale()) return;
             if (!(await joinRoom(jid))) failed.push(jid);
             await new Promise(r => setTimeout(r, 1500)); // let the site settle between joins
           }
-          if (failed.length) {
+          if (failed.length && !stale()) {
             console.warn('[autojoin] retrying:', failed.join(', '));
             await waitForChatReady();
             for (const jid of failed) {
+              if (stale()) return;
               if (!(await joinRoom(jid))) console.warn('[autojoin] could not join', jid);
               await new Promise(r => setTimeout(r, 1500));
             }
           }
         })();
         // Suppress presence notifications briefly while the initial roster flood passes
-        setTimeout(() => { presenceNotifyReady = true; }, 5000);
+        setTimeout(() => { if (gen === pageLoadGen) presenceNotifyReady = true; }, 5000);
         injectIgnore();
         injectCaps();
         injectNavButtons();
@@ -1031,10 +1166,16 @@ function createWindow() {
   });
   win.webContents.on('will-navigate', (e, url) => {
     try {
-      if (new URL(url).hostname !== 'chat.literotica.com') {
-        e.preventDefault();
-        openLinkWindow(url);
-      }
+      const u = new URL(url);
+      if (u.hostname === 'chat.literotica.com') return;
+      // Logging in: the site's script normally logs in with a fetch() to
+      // auth.literotica.com, but if it doesn't take over, the landing page's form
+      // POSTs there as a navigation. Diverting that into a link window would load
+      // the URL without the form data, so let it through, and only outside the
+      // chat itself: a literotica link clicked in a room still opens its own window.
+      if (u.hostname === 'auth.literotica.com' && !isInChat()) return;
+      e.preventDefault();
+      openLinkWindow(url);
     } catch { e.preventDefault(); }
   });
 
@@ -1097,6 +1238,14 @@ const DIALOG_LIGHT_CSS = `
 
 function injectDialogTheme(wc) {
   if (isLightTheme()) wc.insertCSS(DIALOG_LIGHT_CSS).catch(() => {});
+}
+
+// True while the main window shows the chat itself (not the landing or login page).
+function isInChat() {
+  try {
+    const u = new URL(win.webContents.getURL());
+    return u.hostname === 'chat.literotica.com' && u.pathname.startsWith('/chat');
+  } catch { return false; }
 }
 
 function disconnectAndReload() {
@@ -1495,6 +1644,12 @@ function injectCaps() {
         } catch (e) { /* reporting is best-effort */ }
       }
 
+      // Users on LitChat's ignore list get no hello or ack: either would tell
+      // someone the user is ignoring that they run LitChat.
+      function ignored(nick) {
+        try { return !!(window._litIgnore && window._litIgnore.has(nick)); } catch (e) { return false; }
+      }
+
       function onCaps(stanza, x, from) {
         var nick = nickOf(from);
         if (!nick) return;
@@ -1505,7 +1660,7 @@ function injectCaps() {
         if (kind === 'hello') {
           greeted[nick] = true;      // they opened; no need for us to greet them
           record(nick, version);
-          sendCaps(from, 'ack');     // reply to the exact JID we were given
+          if (!ignored(nick)) sendCaps(from, 'ack');   // reply to the exact JID we were given
         } else if (kind === 'ack') {
           record(nick, version);
         }
@@ -1515,6 +1670,11 @@ function injectCaps() {
       // return true on every path — including when something throws.
       function onMessage(stanza) {
         try {
+          // ejabberd bounces a stanza to an absent occupant (or one refusing PMs) as
+          // type='error' with our own <x t='hello'/> still inside and from= that
+          // occupant. It says nothing about them: without this check the bounce was
+          // taken for their hello, recorded them as a LitChat user and got acked.
+          if (stanza.getAttribute('type') === 'error') { stats.bounced = (stats.bounced || 0) + 1; return true; }
           var from = stanza.getAttribute('from');
           if (from) wireJid[nickOf(from)] = from;
           stats.msgsSeen++;
@@ -1526,7 +1686,7 @@ function injectCaps() {
           // beyond the people the user is actually talking to.
           if (from && hasBody(stanza) && stanza.getAttribute('type') === 'chat') {
             var nick = nickOf(from);
-            if (nick && !greeted[nick] && !peers[nick]) {
+            if (nick && !greeted[nick] && !peers[nick] && !ignored(nick)) {
               greeted[nick] = true;
               sendCaps(from, 'hello');
             }
@@ -1538,7 +1698,13 @@ function injectCaps() {
       function onPresence(stanza) {
         try {
           var from = stanza.getAttribute('from');
-          if (from) wireJid[nickOf(from)] = from;
+          var type = stanza.getAttribute('type');
+          if (!from || type === 'error') return true;
+          var nick = nickOf(from);
+          // Leaving one room must not leave the wire table pointing at a JID that no
+          // longer exists while they are still in another room.
+          if (type === 'unavailable') { if (wireJid[nick] === from) delete wireJid[nick]; }
+          else wireJid[nick] = from;
         } catch (e) { /* ignore */ }
         return true;
       }
@@ -1554,7 +1720,7 @@ function injectCaps() {
           if (slash === -1 && jid.indexOf('@conference.') !== -1) return;  // a real room
           var nick = slash !== -1 ? jid.slice(slash + 1).trim().toLowerCase()
                                   : unescapeNode(jid.split('@')[0]).trim().toLowerCase();
-          if (!nick || greeted[nick] || peers[nick]) return;
+          if (!nick || greeted[nick] || peers[nick] || ignored(nick)) return;
           var wire = wireJid[nick];
           if (!wire) return;   // no wire-form JID yet; the inbound path will cover it
           greeted[nick] = true;
@@ -1597,6 +1763,19 @@ function injectCaps() {
       }
 
       arm();
+      // Re-arm the moment Candy reports a (re)established session: Strophe drops
+      // the handlers on reconnect, and waiting for the poll left up to 10 s in
+      // which a peer's hello was lost for the whole session (neither side
+      // retries). The poll stays as a fallback.
+      try {
+        window.jQuery(Candy).on('candy:core.chat.connection.litcaps', function(e, args) {
+          var st = args && args.status;
+          if (st === Strophe.Status.CONNECTED || st === Strophe.Status.ATTACHED) {
+            arm();
+            setTimeout(arm, 1000);   // in case Strophe resets handlers after announcing
+          }
+        });
+      } catch (e) { /* the poll below still re-arms */ }
       setInterval(arm, 10000);
       sweepPanes();
 
@@ -1818,12 +1997,21 @@ function injectIgnore() {
       // server would keep blocking them in the one room where they were ignored.
       // Built from a fresh, successful GET (never from Candy's in-memory copy,
       // which is empty early in a session) and with all nicks in one write.
+      // Removals run one at a time: each reads the whole server list and writes it
+      // back, so a second unignore whose read came before the first one's write
+      // put the first nick back on the list.
+      var nativeQueue = Promise.resolve();
       function removeNative(nicks) {
+        nativeQueue = nativeQueue.then(function() {
+          return new Promise(function(done) { removeNativeNow(nicks, done); });
+        });
+      }
+      function removeNativeNow(nicks, done) {
         var gone = new Set(nicks.map(norm));
         getNative(function(vals) {
-          if (!vals) return;
+          if (!vals) return done();
           var keep = vals.filter(function(v) { return !gone.has(norm(resourceOf(v))); });
-          if (keep.length === vals.length) return;
+          if (keep.length === vals.length) return done();
           var iq = $iq({ type: 'set' }).c('query', { xmlns: PRIVACY }).c('list', { name: 'ignore' });
           if (keep.length) {
             keep.forEach(function(v, i) {
@@ -1832,16 +2020,25 @@ function injectIgnore() {
           } else {
             iq.c('item', { action: 'allow', order: '0' }).up();
           }
-          Candy.Core.getConnection().sendIQ(iq.tree(), function() {
-            try {
-              var mem = Candy.Core.getUser().getPrivacyList('ignore');
-              for (var i = mem.length - 1; i >= 0; i--) {
-                if (gone.has(norm(resourceOf(mem[i])))) mem.splice(i, 1);
-              }
-            } catch (e) {}
-          }, function() {
-            console.warn('[lit-ignore] could not update the native privacy list');
-          }, 10000);
+          // Same watchdog as getNative: a stalled session may call neither callback,
+          // which would hold up every later removal.
+          var finished = false;
+          var timer = setTimeout(finish, 15000);
+          function finish() { if (finished) return; finished = true; clearTimeout(timer); done(); }
+          try {
+            Candy.Core.getConnection().sendIQ(iq.tree(), function() {
+              try {
+                var mem = Candy.Core.getUser().getPrivacyList('ignore');
+                for (var i = mem.length - 1; i >= 0; i--) {
+                  if (gone.has(norm(resourceOf(mem[i])))) mem.splice(i, 1);
+                }
+              } catch (e) {}
+              finish();
+            }, function() {
+              console.warn('[lit-ignore] could not update the native privacy list');
+              finish();
+            }, 10000);
+          } catch (e) { finish(); }
         });
       }
 
@@ -1995,6 +2192,7 @@ function injectDMHistory() {
         // _litHistoryDone is only set once history is actually in the DOM (or
         // there is none); an earlier version set it up front, so a pane whose
         // message list wasn't built yet silently never got its history.
+        if (!pane._litOpenedAt) pane._litOpenedAt = Date.now();
         pane._litHistoryPending = true;
         try {
           await populatePaneInner(pane, username);
@@ -2013,13 +2211,10 @@ function injectDMHistory() {
           if (s !== -1) return jid.slice(s + 1);
           return jid.split('@')[0];
         }
+        // Our own nick, for 'sent' messages. The logged stanzas can't tell us:
+        // Candy sends messages without a from=, so this always fell back to "me".
         var myNick = null;
-        var sentMsg = messages.find(function(m) { return m.direction === 'sent'; });
-        if (sentMsg && sentMsg.from) {
-          // Own JID is user@server/CandyClient — nick is the local part before '@'
-          var at = sentMsg.from.indexOf('@');
-          myNick = at !== -1 ? sentMsg.from.slice(0, at) : sentMsg.from;
-        }
+        try { myNick = Candy.Core.getUser().getNick(); } catch (e) {}
 
         var msgPane = pane.querySelector('ul.message-pane, ul[class*="message"]');
         // Candy may not have finished building the pane — retry for a few seconds
@@ -2028,6 +2223,19 @@ function injectDMHistory() {
           msgPane = pane.querySelector('ul.message-pane, ul[class*="message"]');
         }
         if (!msgPane) return;
+
+        // The message that opened this pane is shown live below, and by the time
+        // history is fetched it is usually in the log as well: leave out recent
+        // entries whose text the pane already shows.
+        var liveText = Array.from(msgPane.children)
+          .filter(function(li) { return !li.classList.contains('lit-dm-history'); })
+          .map(function(li) { return li.textContent; }).join('\\n');
+        messages = messages.filter(function(m) {
+          if (!(Date.parse(m.ts) >= pane._litOpenedAt - 60000)) return true;
+          var body = unescXml(m.body || '').trim();
+          return !body || liveText.indexOf(body) === -1;
+        });
+        if (!messages.length) { pane._litHistoryDone = true; return; }
 
         var html = buildHistory(messages, myNick);
         msgPane.insertAdjacentHTML('afterbegin', html);
@@ -2106,6 +2314,27 @@ function nameColCSS(px) {
          `#candy .message-pane li>div{padding-left:${pad}px!important}`;
 }
 
+// The app menu's hidden Reload and Zoom shortcuts reach every window: on Windows
+// and Linux each child window without a menu of its own gets the app menu, and on
+// macOS the menu is shared. They act on the focused window (Electron passes it to
+// click); only the chat window reloads via disconnectAndReload and keeps its zoom
+// in settings. Before, Ctrl+R in a Stories or link window dropped the chat session.
+function isChatWindow(focused) {
+  return !focused || focused === win;
+}
+function reloadFocused(_item, focused) {
+  if (isChatWindow(focused)) disconnectAndReload();
+  else if (!focused.isDestroyed()) focused.webContents.reload();
+}
+function zoomFocused(delta) {
+  return (_item, focused) => {
+    if (isChatWindow(focused)) { adjustZoom(delta); return; }
+    if (focused.isDestroyed()) return;
+    const wc = focused.webContents;
+    wc.setZoomLevel(delta === 0 ? 0 : wc.getZoomLevel() + delta);
+  };
+}
+
 function adjustZoom(delta) {
   const level = delta === 0 ? 0 : win.webContents.getZoomLevel() + delta;
   win.webContents.setZoomLevel(level);
@@ -2144,667 +2373,670 @@ function removeLogoBg() {
   `).catch(() => {});
 }
 
+// Each emoji: [glyph, search keywords]. Serialised once here: it is about 2,000
+// entries, and rebuilding and stringifying it on every page load was wasted work.
+const EMOJI_CATS = [
+  { icon: '😊', title: 'Faces', emoji: [
+    ['😀','grin happy smile face'],['😃','happy smile open mouth'],['😄','grin squint happy'],
+    ['😁','grin teeth happy'],['😆','laugh squint happy'],['😅','sweat smile nervous'],
+    ['🤣','rofl rolling floor laughing'],['😂','joy tears laughing cry'],
+    ['🙂','smile slight'],['🙃','upside down smile'],['🙂‍↕️','nodding yes'],['🙂‍↔️','shaking no'],
+    ['😉','wink'],['😊','smile blush'],['😇','angel halo innocent'],
+    ['😍','heart eyes love adore'],['🤩','star eyes wow amazing starstruck'],
+    ['😘','kiss blow love'],['🥰','love hearts smiling'],['😋','yummy delicious tongue'],
+    ['😗','kissing'],['😙','kissing smiling eyes'],['😚','kissing closed eyes'],
+    ['🥹','holding back tears moved grateful'],['🥲','smiling tear bittersweet'],
+    ['🥸','disguised incognito glasses'],
+    ['😛','tongue out'],['😜','winking tongue'],['🤪','crazy zany silly'],['😝','tongue squint'],
+    ['🤑','money mouth rich'],['🤗','hug hugging arms'],['🤭','hand mouth giggle oops'],
+    ['🫣','peeking eye peek shy'],['🫢','gasp hand over mouth shocked'],
+    ['🫡','saluting face respect'],['🫠','melting dissolve'],
+    ['🫥','dotted line face invisible hidden'],['🫤','diagonal mouth meh unsure'],
+    ['🤫','shush quiet secret'],['🤔','thinking hmm ponder'],
+    ['🤐','zipper mouth silent zip'],['🤨','raised eyebrow suspicious'],
+    ['😐','neutral blank'],['😑','expressionless'],['😶','no mouth silent'],
+    ['😏','smirk sly'],['😒','unamused unhappy'],['🙄','eye roll annoyed'],
+    ['😬','grimace nervous'],['🤥','lying pinocchio'],['😌','relieved content'],
+    ['😔','pensive sad'],['😪','sleepy tired'],['🤤','drool hungry'],['😴','sleep zzz tired'],
+    ['😷','mask sick face'],['🤒','sick fever ill'],['🤕','injured bandage hurt'],
+    ['🤢','nausea sick gross'],['🤮','vomit puke sick'],['🤧','sneeze sick cold'],
+    ['🥵','hot sweating overheated'],['🥶','cold freezing ice'],['🥴','woozy drunk dizzy'],
+    ['😵','dizzy faint'],['😵‍💫','dizzy spiral eyes'],['😮‍💨','exhale sigh breathe relief'],
+    ['😶‍🌫️','face in clouds spaced out'],['🫩','bags under eyes tired exhausted'],
+    ['🤯','exploding head mind blown'],['🤠','cowboy hat western'],
+    ['🥳','party celebration festive'],['😎','cool sunglasses'],['🤓','nerd glasses smart'],
+    ['🧐','monocle fancy detective'],['😕','confused unsure'],['😟','worried anxious'],
+    ['🙁','slight frown sad'],['☹️','frown sad unhappy'],['😮','open mouth surprised'],
+    ['😯','hushed surprised'],['😲','astonished shocked'],['😳','flushed embarrassed red'],
+    ['🥺','pleading begging puppy eyes'],['😦','frowning open mouth'],['😧','anguished pain'],
+    ['😨','fearful scared afraid'],['😰','anxious sweat cold fear'],['😥','sad relieved'],
+    ['😢','cry tear sad'],['😭','sob crying loudly'],['😱','scream fear horror'],
+    ['😖','confounded frustrated'],['😣','persevere struggle pain'],['😞','disappointed sad'],
+    ['😓','sweat downcast'],['😩','weary tired exhausted'],['😫','tired drained'],
+    ['🥱','yawn tired bored'],['😤','steam nose triumph frustrated'],
+    ['😡','angry pouting rage mad'],['😠','angry mad'],['🤬','swear cursing angry'],
+    ['😈','devil evil smiling demon horns mischief imp satan'],
+    ['👿','devil angry imp evil horns demon goblin satan'],
+    ['💀','skull death dead'],['☠️','skull crossbones death poison danger'],
+    ['💩','poop shit'],['🤡','clown'],['👹','ogre oni japanese monster'],['👺','goblin oni demon red'],
+    ['👻','ghost boo spooky'],['👽','alien ufo extraterrestrial'],
+    ['👾','alien monster game space invader'],['🤖','robot'],
+    ['🫨','shaking face vibrate tremble'],
+    ['😺','cat grinning'],['😸','cat grin smile'],['😹','cat joy tears laugh'],
+    ['😻','cat heart eyes love'],['😼','cat smirk wry'],['😽','cat kiss'],
+    ['🙀','cat weary shocked'],['😿','cat cry sad'],['😾','cat pouting angry'],
+    ['🫪','distorted face anxiety panic shocked surprised'],
+    ['🫯','fight cloud argument brawl disagreement ruckus'],
+  ]},
+  { icon: '👋', title: 'Gestures', emoji: [
+    ['👋','wave hello goodbye'],['🤚','raised back hand stop'],
+    ['🖐️','hand five fingers spread'],['✋','raised hand stop high five'],
+    ['🖖','vulcan spock live long prosper'],['👌','ok okay perfect'],
+    ['🤌','pinched fingers italian chef kiss'],['🤏','pinching hand small'],
+    ['✌️','peace victory two fingers'],['🤞','crossed fingers luck hope'],
+    ['🤟','love you hand rock'],['🤘','horns rock metal sign'],
+    ['🤙','call me shaka hang loose'],['👈','point left'],['👉','point right'],
+    ['👆','point up'],['🖕','middle finger rude'],['👇','point down'],
+    ['☝️','index point up one'],['👍','thumbs up good yes like approve'],
+    ['👎','thumbs down bad no dislike'],['✊','fist bump raise power'],
+    ['👊','oncoming fist punch'],['🤛','left fist bump'],['🤜','right fist bump'],
+    ['👏','clap applause bravo'],['🙌','raising hands celebrate hooray'],
+    ['👐','open hands'],['🤲','palms up together'],['🤝','handshake deal'],
+    ['🙏','pray thank you please namaste'],['✍️','write pen sign'],
+    ['💅','nail polish fancy manicure'],['💪','flex muscle strong arm'],['🦾','mechanical arm prosthetic'],
+    ['👀','eyes look watching see'],['👁️','eye see'],['👄','lips mouth'],['💋','kiss lips'],
+    ['🫦','biting lip'],['🫶','heart hands love'],['🫰','finger snap'],
+    ['🫸','push right hand'],['🫷','push left hand'],
+  ]},
+  { icon: '👤', title: 'People', emoji: [
+    ['🤦','facepalm disbelief exasperation ugh'],['🤦‍♀️','woman facepalm'],['🤦‍♂️','man facepalm'],
+    ['🤷','shrug idk dunno whatever'],['🤷‍♀️','woman shrug'],['🤷‍♂️','man shrug'],
+    ['💁','info tipping hand sassy gossip'],['💁‍♀️','woman tipping hand sassy'],['💁‍♂️','man tipping hand'],
+    ['🙅','no gesture forbidden stop'],['🙅‍♀️','woman no gesture'],['🙅‍♂️','man no gesture'],
+    ['🙆','ok gesture yes'],['🙆‍♀️','woman ok gesture'],['🙆‍♂️','man ok gesture'],
+    ['🙋','raise hand question volunteer'],['🙋‍♀️','woman raise hand'],['🙋‍♂️','man raise hand'],
+    ['🙇','bow apology respect'],['🙇‍♀️','woman bowing'],['🙇‍♂️','man bowing'],
+    ['🙎','pout disappointed frown'],['🙍','frown annoyed disgruntled'],
+    ['💆','massage relaxed spa headache'],['💇','haircut barber salon'],
+    ['🤳','selfie phone camera'],['🕴️','suit levitate business person'],
+    ['👶','baby infant newborn'],['🧒','child kid young'],
+    ['👦','boy child son'],['👧','girl child daughter'],
+    ['🧑','person adult'],['👩','woman adult lady'],['👨','man adult'],
+    ['🧓','older person elderly grandparent'],['👴','old man elderly grandpa'],['👵','old woman elderly grandma'],
+    ['🧠','brain smart intelligent mind'],['🫀','anatomical heart organ cardiology'],
+    ['🫁','lungs breath breathe'],['🦷','tooth teeth dentist'],
+    ['🦻','ear hear accessibility'],['👂','ear hear listen'],['👃','nose smell sniff'],
+    ['🦵','leg kick knee'],['🦶','foot feet'],['👅','tongue lick taste'],
+    ['🫆','fingerprint detective clue identity'],['👣','footprints barefoot tracks'],
+    ['🫂','hug embrace comfort friendship'],['💏','kiss couple romance love'],
+    ['🧑‍🤝‍🧑','people holding hands friends couple'],
+    ['👤','person shadow silhouette user'],['👥','people group users'],['🗣️','speak talk voice'],
+    ['🧙','mage wizard witch magic fantasy'],['🧚','fairy fairytale fantasy myth'],
+    ['🧛','vampire blood dracula halloween'],['🧜','mermaid merman creature fairytale'],
+    ['🧝','elf fantasy enchantment'],['🧞','genie djinn jinn fantasy'],
+    ['🧟','zombie dead apocalypse halloween horror'],['🧌','troll monster fantasy'],['🥷','ninja assassin fighter'],
+    ['🛌','sleep bed rest goodnight'],['🤱','breastfeed baby nursing'],
+    ['🕵️','detective spy investigate mystery'],['👷','construction worker hardhat build'],
+    ['💂','guard soldier royal'],['🤴','prince royal crown fairytale'],['👸','princess royal crown fairytale'],
+    ['🦲','bald hairless'],['🦱','curly hair afro'],['🦰','red hair ginger redhead'],['🦳','white hair gray old'],
+  ]},
+  { icon: '❤️', title: 'Hearts', emoji: [
+    ['❤️','red heart love'],['🧡','orange heart'],['💛','yellow heart'],
+    ['💚','green heart'],['💙','blue heart'],['💜','purple heart'],
+    ['🩷','pink heart'],['🩵','light blue heart'],['🩶','grey gray heart'],
+    ['🖤','black heart dark evil'],['🤍','white heart pure'],['🤎','brown heart'],
+    ['💔','broken heart sad'],['❣️','heart exclamation'],['💕','two hearts'],
+    ['💞','revolving hearts'],['💓','beating heart'],['💗','growing heart'],
+    ['💖','sparkling heart'],['💘','heart arrow cupid love'],
+    ['💝','heart ribbon gift'],['💟','heart decoration'],
+    ['❤️‍🔥','heart fire passion desire'],['❤️‍🩹','mending heart heal repair'],
+    ['😍','heart eyes love adore'],['🥰','love hearts smiling'],['😘','kiss blow love'],
+    ['💑','couple love'],['👫','couple man woman'],['💌','love letter mail'],
+    ['💍','ring engagement wedding'],['💒','wedding chapel'],['🌹','rose flower love'],
+    ['🥀','wilted rose flower dead dying'],['🌷','tulip flower'],['💐','bouquet flowers'],
+    ['🎀','ribbon bow pink'],['🎁','gift present'],
+  ]},
+  { icon: '🐶', title: 'Animals', emoji: [
+    ['🐶','dog puppy'],['🐱','cat kitten'],['🐭','mouse'],['🐹','hamster'],
+    ['🐰','rabbit bunny'],['🦊','fox'],['🐻','bear'],['🐼','panda'],
+    ['🐨','koala'],['🐯','tiger'],['🦁','lion'],['🐮','cow moo'],
+    ['🐷','pig oink'],['🐸','frog'],['🐵','monkey'],['🙈','see no evil monkey'],
+    ['🙉','hear no evil monkey'],['🙊','speak no evil monkey'],
+    ['🐔','chicken hen'],['🐧','penguin'],['🐦','bird'],['🦆','duck'],
+    ['🦅','eagle'],['🦉','owl'],['🦇','bat'],['🐺','wolf'],
+    ['🐴','horse'],['🦄','unicorn magic'],['🐝','bee honey'],['🦋','butterfly'],
+    ['🐌','snail slow'],['🐞','ladybug beetle'],['🐜','ant'],['🐢','turtle slow'],
+    ['🐍','snake'],['🦎','lizard'],['🐙','octopus'],['🦑','squid'],
+    ['🦀','crab'],['🐡','blowfish'],['🐠','tropical fish'],['🐟','fish'],
+    ['🐬','dolphin'],['🐳','whale'],['🦈','shark'],['🦭','seal'],
+    ['🦓','zebra'],['🐘','elephant'],['🦏','rhinoceros rhino'],['🐪','camel'],
+    ['🦒','giraffe'],['🦬','bison buffalo'],['🐎','horse racing'],
+    ['🐑','sheep ewe'],['🐐','goat'],['🦌','deer'],
+    ['🐕','dog'],['🐩','poodle dog'],['🐈','cat'],
+    ['🦚','peacock'],['🦜','parrot'],['🕊️','dove peace bird'],
+    ['🐇','rabbit bunny'],['🦝','raccoon'],['🦦','otter'],
+    ['🐁','mouse rat'],['🐿️','chipmunk squirrel'],['🦔','hedgehog'],['🐾','paw print animal'],
+    ['🦋','butterfly'],['🐛','caterpillar bug'],['🦗','cricket bug'],['🦟','mosquito bug'],
+    ['🪿','goose bird'],['🦤','dodo bird extinct'],['🪶','feather bird light'],
+    ['🫏','donkey mule'],['🫎','moose elk deer'],['🪽','wing bird fly'],
+    ['🪼','jellyfish ocean sea'],['🐦‍⬛','black bird crow raven'],
+    ['🐻‍❄️','polar bear arctic'],['🐒','monkey'],['🐽','pig nose snout'],
+    ['🐤','baby chick yellow'],['🐣','hatching chick egg'],['🐥','chick bird front'],
+    ['🐗','boar wild pig'],['🐅','tiger big cat'],['🐆','leopard big cat spots'],
+    ['🦍','gorilla ape'],['🦧','orangutan ape primate'],['🦣','mammoth prehistoric elephant'],
+    ['🦛','hippopotamus hippo'],['🐫','two hump camel bactrian'],['🦘','kangaroo marsupial'],
+    ['🐃','water buffalo'],['🐂','ox bull'],['🐄','cow dairy'],['🐖','pig sow'],
+    ['🐏','ram sheep male'],['🦙','llama alpaca'],
+    ['🦮','guide dog service'],['🐕‍🦺','service dog'],['🐈‍⬛','black cat'],
+    ['🐓','rooster cock'],['🦃','turkey thanksgiving'],['🦢','swan elegant'],['🦩','flamingo pink'],
+    ['🦨','skunk smell stinky'],['🦡','badger honey'],['🦫','beaver dam'],['🦥','sloth slow lazy'],
+    ['🐀','rat rodent'],
+    ['🪱','worm earthworm'],['🪰','fly insect'],['🪲','beetle bug'],['🪳','cockroach roach'],
+    ['🕷️','spider arachnid'],['🕸️','spider web cobweb'],['🦂','scorpion arachnid'],
+    ['🦖','t-rex tyrannosaurus dinosaur'],['🦕','sauropod brontosaurus dinosaur'],
+    ['🦐','shrimp prawn'],['🦞','lobster seafood'],['🐊','crocodile alligator reptile'],
+    ['🐉','dragon mythical'],['🐲','dragon face'],['🐦‍🔥','phoenix firebird mythical'],
+    ['🫍','orca killer whale marine ocean'],
+  ]},
+  { icon: '🌺', title: 'Nature', emoji: [
+    ['💐','bouquet flowers'],['🌸','cherry blossom flower pink'],['💮','white flower'],
+    ['🌹','rose flower red'],['🥀','wilted rose flower dead dying'],['🌺','hibiscus flower'],
+    ['🌻','sunflower yellow'],['🌼','blossom flower yellow'],['🌷','tulip flower pink'],
+    ['🌱','seedling plant sprout grow'],['🌿','herb leaf plant green'],['☘️','shamrock clover ireland'],
+    ['🍀','four leaf clover luck'],['🍃','leaves wind'],['🍂','fallen leaf autumn'],
+    ['🍁','maple leaf autumn canada red'],['🌾','sheaf grain wheat'],['🌵','cactus desert'],
+    ['🎄','christmas tree holiday'],['🌲','evergreen tree pine'],['🌳','deciduous tree'],
+    ['🌴','palm tree tropical beach'],['🌙','crescent moon night'],['☀️','sun sunny warm'],
+    ['🌤️','partly cloudy sun'],['⛅','partly cloudy'],['🌦️','rain sun cloud'],
+    ['🌧️','rain cloud wet'],['🌩️','lightning storm'],['⛈️','thunderstorm'],
+    ['🌪️','tornado cyclone wind'],['❄️','snowflake cold winter ice'],
+    ['☃️','snowman winter snow'],['🌈','rainbow colorful'],['🌊','wave ocean sea water'],
+    ['🌋','volcano eruption fire'],['⛰️','mountain peak'],['🏔️','snow mountain peak'],
+    ['🏝️','island tropical beach'],['🌅','sunrise morning'],['🌄','mountain sunrise'],
+    ['⭐','star yellow'],['🌟','glowing star shine'],['✨','sparkle shine magic'],['💫','dizzy star spin'],
+    ['🌕','full moon'],['🌑','new moon dark night'],['🌠','shooting star wish'],
+    ['🌌','milky way galaxy space stars'],['🌀','cyclone spiral'],['🌬️','wind blow cold'],
+    ['💧','droplet water'],['💦','water splash'],['🫧','bubbles foam'],
+    ['🔥','fire flame hot'],['⚡','lightning bolt energy'],['☄️','comet meteor asteroid'],
+    ['🪻','hyacinth flower purple'],['🪷','lotus flower'],
+    ['🍄','mushroom fungus'],['🍄‍🟫','brown mushroom fungus'],
+    ['🐚','spiral shell seashell'],['🪸','coral reef ocean'],['🪨','rock stone'],
+    ['🪾','leafless tree bare'],['🪵','log wood timber'],['🪴','potted plant indoor'],
+    ['🎍','pine decoration bamboo'],['🎋','tanabata tree bamboo'],
+    ['🪺','nest with eggs bird'],['🪹','empty nest bird'],
+    ['🌞','sun with face sunny'],['🌝','full moon face'],['🌛','first quarter moon face'],
+    ['🌜','last quarter moon face'],['🌚','new moon face dark'],
+    ['🌖','waning gibbous moon'],['🌗','last quarter moon'],['🌘','waning crescent moon'],
+    ['🌒','waxing crescent moon'],['🌓','first quarter moon'],['🌔','waxing gibbous moon'],
+    ['🌎','globe earth americas'],['🌍','globe earth africa europe'],['🌏','globe earth asia'],
+    ['🪐','planet saturn ringed'],
+    ['🌥️','cloud sun partly'],['☁️','cloud overcast'],['🌨️','cloud snow snowing'],
+    ['⛄','snowman no snow'],['☔','umbrella rain'],['☂️','umbrella open'],['🌫️','fog mist haze'],
+    ['🐋','whale large ocean'],
+  ]},
+  { icon: '🍕', title: 'Food & Drink', emoji: [
+    ['🍎','apple red fruit'],['🍊','orange tangerine fruit'],['🍋','lemon yellow sour'],
+    ['🍇','grapes fruit purple'],['🍓','strawberry fruit red'],['🍒','cherry fruit red'],
+    ['🍑','peach fruit'],['🥭','mango tropical fruit'],['🍍','pineapple fruit tropical'],
+    ['🥝','kiwi fruit green'],['🍅','tomato red'],['🥦','broccoli green'],['🥬','leafy green vegetable'],
+    ['🥒','cucumber green'],['🌽','corn maize yellow'],['🥕','carrot orange'],['🥐','croissant bread pastry'],
+    ['🍞','bread loaf'],['🥖','baguette bread french'],['🧀','cheese'],['🥚','egg'],
+    ['🍳','egg frying cooking breakfast'],['🥞','pancakes stack breakfast'],['🧇','waffle breakfast'],
+    ['🥓','bacon breakfast'],['🥩','meat steak beef'],['🍗','chicken drumstick'],
+    ['🍖','meat bone'],['🌭','hot dog sausage'],['🍔','hamburger burger'],
+    ['🍟','french fries chips'],['🍕','pizza'],['🌮','taco mexican'],['🌯','burrito wrap'],
+    ['🥙','falafel wrap pita'],['🍱','bento box japanese'],['🍣','sushi japanese'],
+    ['🍤','shrimp fried tempura'],['🍜','noodles ramen soup'],['🍝','spaghetti pasta italian'],
+    ['🍛','curry rice spicy'],['🍚','rice bowl'],['🍙','rice ball onigiri japanese'],
+    ['🥮','mooncake chinese'],['🍡','dango sweet japanese'],['🧁','cupcake sweet'],
+    ['🍰','cake slice birthday'],['🎂','birthday cake celebrate'],['🍮','pudding custard flan'],
+    ['🍭','lollipop candy sweet'],['🍬','candy sweet'],['🍫','chocolate bar sweet'],
+    ['🍿','popcorn movie snack'],['🍩','doughnut donut sweet'],['🍪','cookie sweet bake'],
+    ['🌰','chestnut nut'],['🥜','peanut nut'],['🫛','pea pod vegetable green'],['🫚','ginger root spice'],['🍵','tea green cup hot'],
+    ['☕','coffee hot cup morning'],['🫖','teapot tea'],
+    ['🍺','beer mug drink'],['🍻','cheers beer clinking toast'],['🥂','champagne toast cheers celebrate'],
+    ['🍷','wine glass red drink'],['🥃','whiskey tumbler spirit drink'],['🍸','cocktail martini drink'],
+    ['🍹','tropical drink cocktail'],['🧃','juice box'],['🥤','cup straw drink soda'],
+    ['🧋','bubble tea boba drink'],['🍾','champagne bottle celebrate'],
+    ['🍏','green apple fruit'],['🍐','pear fruit'],['🍋‍🟩','lime green citrus'],
+    ['🍌','banana fruit'],['🍉','watermelon fruit'],['🫐','blueberries fruit'],['🍈','melon honeydew'],
+    ['🥥','coconut tropical'],['🍆','eggplant aubergine vegetable'],['🥑','avocado'],
+    ['🌶️','hot pepper chili spicy'],['🫑','bell pepper capsicum'],['🫒','olive'],
+    ['🧄','garlic'],['🧅','onion shallot'],['🥔','potato'],['🫜','root vegetable'],['🍠','sweet potato roasted'],
+    ['🥯','bagel bread'],['🥨','pretzel bread'],['🧈','butter dairy'],
+    ['🦴','bone dog'],['🫓','flatbread pita naan'],['🥪','sandwich'],['🧆','falafel'],['🫔','tamale wrap'],
+    ['🥗','salad green'],['🥘','paella shallow pan stew'],['🫕','fondue pot'],
+    ['🥫','canned food tin'],['🫙','jar preserve'],['🍲','stew pot food'],
+    ['🥟','dumpling gyoza'],['🦪','oyster seafood'],
+    ['🍘','rice cracker'],['🍥','fish cake swirl narutomaki'],['🥠','fortune cookie'],
+    ['🍢','oden skewer'],['🍧','shaved ice dessert'],['🍨','ice cream dessert'],
+    ['🍦','soft serve ice cream'],['🥧','pie shortcake dessert'],
+    ['🫘','beans legumes'],['🍯','honey pot sweet'],
+    ['🥛','milk glass drink'],['🫗','pouring liquid drink'],['🍼','baby bottle milk'],
+    ['🧉','mate drink herbal'],['🍶','sake japanese rice wine'],
+    ['🧊','ice cube cold'],['🥄','spoon utensil'],['🍴','fork knife utensil'],
+    ['🍽️','fork knife plate utensil'],['🥣','bowl spoon cereal'],['🥡','takeout box chinese'],
+    ['🥢','chopsticks asian'],['🧂','salt shaker seasoning'],
+  ]},
+  { icon: '🎉', title: 'Fun & Activities', emoji: [
+    ['🎉','party celebrate confetti'],['🎊','confetti ball celebrate'],
+    ['🎈','balloon party'],['🎁','gift present wrap'],['🎀','ribbon bow'],
+    ['🎆','fireworks celebrate'],['🎇','sparkler firework'],
+    ['🎭','theater drama masks arts'],['🎨','art paint palette creative'],
+    ['🎪','circus tent performance'],['🎢','roller coaster theme park'],
+    ['🎡','ferris wheel fair'],['🎠','carousel merry go round'],
+    ['🎯','bullseye target dart aim'],['🎳','bowling pins'],['🎲','dice game chance'],
+    ['🎮','game controller video gaming'],['🎰','slot machine gamble luck'],
+    ['🃏','joker card game wild'],['🀄','mahjong game tiles'],['♟️','chess pawn strategy'],
+    ['🎸','guitar music rock'],['🎹','piano keyboard music'],['🎻','violin music strings'],
+    ['🥁','drum music percussion'],['🎺','trumpet music brass'],['🪊','trombone brass instrument jazz slide music'],['🪗','accordion music'],['🪈','flute music woodwind'],['🪇','maracas music shaker'],
+    ['🎤','microphone sing karaoke'],['🎧','headphones music listen'],
+    ['🎬','clapper film movie action'],['🎟️','ticket event admission'],
+    ['🏆','trophy win champion'],['🥇','gold medal first place'],
+    ['🥈','silver medal second place'],['🥉','bronze medal third place'],['🏅','medal award'],
+    ['⚽','soccer football sport'],['🏀','basketball sport'],['🏈','football american sport'],
+    ['⚾','baseball sport'],['🎾','tennis sport'],['🏸','badminton sport'],
+    ['🏊','swimming swim sport'],['🏄','surf wave sport'],['🚴','cycling bike sport'],
+    ['🧘','yoga meditate calm'],['🤸','gymnastics cartwheel'],
+    ['💃','dance woman'],['🕺','dance man'],
+    ['🎃','halloween pumpkin jack lantern spooky'],['🎄','christmas tree holiday'],
+    ['🎑','moon viewing japanese'],['🎐','wind chime'],['🧨','firecracker chinese new year'],
+    ['🪅','piñata party'],['🪆','nesting doll matryoshka russian'],['🪄','magic wand trick'],
+    ['🥎','softball baseball sport'],['🏐','volleyball sport'],['🏉','rugby football sport'],
+    ['🥏','flying disc frisbee'],['🎱','billiards pool eight ball'],['🪀','yo-yo toy'],
+    ['🏓','table tennis ping pong'],['🏒','ice hockey stick puck'],['🏑','field hockey stick'],
+    ['🥍','lacrosse stick'],['🏏','cricket bat ball'],['🪃','boomerang throw'],
+    ['🥅','goal net sport'],['⛳','golf hole flag'],['🪁','slingshot catapult'],
+    ['🛝','playground slide'],['🏹','bow arrow archery'],['🎣','fishing rod fish'],
+    ['🤿','diving mask snorkel scuba'],['🥊','boxing glove punch'],['🥋','martial arts kimono karate'],
+    ['🎽','running shirt athletics'],['🛹','skateboard skate'],['🛼','roller skate'],
+    ['🛷','sled sledge'],['⛸️','ice skate figure skating'],['🥌','curling stone'],
+    ['🎿','ski skiing snow'],['⛷️','skier skiing'],['🏂','snowboarder snowboard'],
+    ['🪂','parachute skydive'],['🏋️','weight lifting gym'],['🤼','wrestling sport'],
+    ['⛹️','basketball bouncing sport'],['🤺','fencing sword sport'],['🤾','handball sport'],
+    ['🏌️','golf golfer'],['🏇','horse racing jockey'],['🤽','water polo sport'],
+    ['🚣','rowing boat row'],['🧗','climbing rock wall'],['🚵','mountain biking cycling'],
+    ['🎖️','military medal award'],['🏵️','rosette award decoration'],['🎗️','ribbon awareness'],
+    ['🎫','ticket stub event'],['🤹','juggling circus performance'],['🩰','ballet shoe dance'],
+    ['🫟','splatter liquid'],['🎼','musical score sheet music'],['🪘','long drum bongo'],
+    ['🎷','saxophone sax jazz'],['🪕','banjo string music'],['🪉','harp string music'],
+    ['🧩','puzzle piece jigsaw'],
+  ]},
+  { icon: '💫', title: 'Symbols', emoji: [
+    ['✅','check mark done yes correct'],['❌','cross mark no wrong incorrect'],
+    ['❓','question mark unknown'],['❗','exclamation mark important'],['‼️','double exclamation urgent'],
+    ['💯','hundred percent perfect score'],['🔥','fire hot trending lit'],['⚡','lightning bolt fast energy'],
+    ['💧','water drop'],['💨','dash wind blow'],['💎','diamond gem jewel precious'],
+    ['🔮','crystal ball magic fortune'],['🧿','nazar evil eye amulet protection'],
+    ['💡','light bulb idea'],['🕯️','candle flame light romantic'],['⚠️','warning caution danger'],
+    ['🚫','no prohibited banned'],['⛔','stop no entry'],['🔞','no under 18 adult explicit'],
+    ['💤','sleep zzz tired'],['💢','anger symbol frustrated'],['💥','explosion boom impact'],
+    ['💦','water sweat splash'],['💫','dizzy star spin'],
+    ['💬','speech bubble chat message'],['💭','thought bubble thinking'],['🗯️','anger bubble shout'],
+    ['✉️','envelope mail letter send'],['📩','email incoming'],
+    ['📱','phone mobile cell'],['💻','laptop computer'],['⌚','watch clock time'],
+    ['📷','camera photo picture'],['🔑','key unlock access'],['🔒','lock secure private'],
+    ['🔔','bell notification alert'],['📢','loudspeaker announce'],
+    ['♥️','heart suit card'],['♠️','spade suit card'],
+    ['♦️','diamond suit card'],['♣️','club suit card'],
+    ['🔴','red circle'],['🟠','orange circle'],['🟡','yellow circle'],
+    ['🟢','green circle'],['🔵','blue circle'],['🟣','purple circle'],
+    ['⚫','black circle'],['⚪','white circle'],
+    ['🏳️','white flag surrender'],['🏴','black flag pirate'],['🚩','red flag warning'],
+    ['🆗','ok button'],['🆙','up button'],['🆒','cool button'],['🆕','new button fresh'],
+    ['🆓','free button gratis'],['🔅','dim brightness low'],['🔆','bright brightness high'],
+    ['📶','signal bars wifi'],['🛜','wireless wifi signal'],['♾️','infinity forever'],['⚜️','fleur de lis gold'],
+    ['🪯','khanda sikh symbol'],['🪭','folding fan hand'],['🪮','hair pick comb afro'],
+    ['🔱','trident symbol poseidon'],['☯️','yin yang balance'],['☮️','peace symbol'],
+    ['✝️','cross christian'],['☪️','star crescent muslim'],['🕉️','om hindu'],
+    ['☸️','dharma wheel buddhist'],['✡️','star of david jewish'],
+    ['🔯','dotted six-pointed star'],['🕎','menorah hanukkah jewish'],
+    ['☦️','orthodox cross christian'],['🛐','place of worship religion'],
+    ['⛎','ophiuchus zodiac'],['♈','aries zodiac'],['♉','taurus zodiac'],
+    ['♊','gemini zodiac'],['♋','cancer zodiac'],['♌','leo zodiac'],
+    ['♍','virgo zodiac'],['♎','libra zodiac'],['♏','scorpio zodiac'],
+    ['♐','sagittarius zodiac'],['♑','capricorn zodiac'],['♒','aquarius zodiac'],
+    ['♓','pisces zodiac'],
+    ['🆔','id button'],['⚛️','atom science'],['☢️','radioactive hazard'],['☣️','biohazard'],
+    ['📴','phone off'],['📳','vibration mode'],
+    ['🈶','japanese not free'],['🈚','japanese free'],['🈸','japanese apply'],
+    ['🈺','japanese open'],['🈷️','japanese monthly'],['✴️','eight pointed star'],
+    ['🆚','vs versus'],['🉐','japanese bargain'],['㊙️','japanese secret'],
+    ['㊗️','japanese congratulations'],['🈴','japanese passing'],['🈵','japanese no vacancy'],
+    ['🈹','japanese discount'],['🈲','japanese prohibited'],
+    ['🅰️','blood type a'],['🅱️','blood type b'],['🆎','ab blood type'],
+    ['🆑','cl button'],['🅾️','blood type o'],['🆘','sos emergency'],
+    ['⭕','hollow red circle'],['🛑','stop sign octagon'],['📛','name badge'],
+    ['♨️','hot springs onsen'],['🚷','no pedestrians'],['🚯','no littering'],
+    ['🚳','no bicycles'],['🚱','non-potable water'],['📵','no mobile phones'],
+    ['🚭','no smoking'],['❕','white exclamation'],['❔','white question'],['⁉️','exclamation question'],
+    ['〽️','part alternation mark'],['🚸','children crossing'],
+    ['🔰','beginner japanese'],['♻️','recycling recycle'],
+    ['🈯','japanese reserved'],['💹','chart yen'],['❇️','sparkle star'],
+    ['✳️','eight spoked asterisk'],['❎','cross mark button'],['🌐','globe internet web'],
+    ['💠','diamond blue'],['Ⓜ️','circled m metro'],
+    ['🏧','atm cash machine'],['🚾','water closet wc restroom'],
+    ['♿','wheelchair accessible disability'],['🅿️','parking'],['🛗','elevator lift'],
+    ['🈳','japanese vacancy'],['🈂️','japanese service charge'],
+    ['🛂','passport control'],['🛃','customs'],['🛄','baggage claim'],['🛅','left luggage'],
+    ['🚹','mens bathroom'],['🚺','womens bathroom'],['🚼','baby bathroom'],
+    ['🚻','restroom bathroom'],['🚮','litter bin'],['🎦','cinema film'],
+    ['🔣','input symbols'],['ℹ️','information'],['🔤','abc letters'],
+    ['🔡','abc lowercase'],['🔠','abc uppercase'],['🆖','ng not good'],
+    ['0️⃣','zero keycap'],['1️⃣','one keycap'],['2️⃣','two keycap'],
+    ['3️⃣','three keycap'],['4️⃣','four keycap'],['5️⃣','five keycap'],
+    ['6️⃣','six keycap'],['7️⃣','seven keycap'],['8️⃣','eight keycap'],
+    ['9️⃣','nine keycap'],['🔟','ten keycap'],['🔢','1234 numbers'],
+    ['#️⃣','hash keycap number'],['*️⃣','asterisk keycap'],
+    ['⏏️','eject button'],['▶️','play button'],['⏸️','pause button'],
+    ['⏯️','play pause toggle'],['⏹️','stop button'],['⏺️','record button'],
+    ['⏭️','next track skip'],['⏮️','previous track'],['⏩','fast forward'],
+    ['⏪','rewind fast back'],['⏫','fast up'],['⏬','fast down'],
+    ['◀️','reverse left'],['🔼','up button'],['🔽','down button'],
+    ['➡️','right arrow'],['⬅️','left arrow'],['⬆️','up arrow'],['⬇️','down arrow'],
+    ['↗️','up right arrow'],['↘️','down right arrow'],['↙️','down left arrow'],['↖️','up left arrow'],
+    ['↕️','up down arrow'],['↔️','left right arrow'],
+    ['↪️','left arrow curving right'],['↩️','right arrow curving left'],
+    ['⤴️','right arrow curving up'],['⤵️','right arrow curving down'],
+    ['🔀','shuffle random'],['🔁','repeat loop'],['🔂','repeat once'],
+    ['🔄','counterclockwise refresh'],['🔃','clockwise arrows'],
+    ['🎵','musical note'],['🎶','musical notes'],
+    ['➕','plus add'],['➖','minus subtract'],['➗','divide division'],
+    ['✖️','multiply times cross'],['🟰','equals sign'],['💲','dollar sign'],
+    ['💱','currency exchange'],['™️','trademark tm'],['©️','copyright'],['®️','registered'],
+    ['〰️','wavy dash'],['➰','curly loop'],['➿','double curly loop'],
+    ['🔚','end back arrow'],['🔙','back arrow'],['🔛','on arrow'],
+    ['🔝','top arrow'],['🔜','soon arrow'],['✔️','check mark heavy'],['☑️','check box tick'],
+    ['🔘','radio button'],
+    ['🟤','brown circle'],['🔺','red triangle up'],['🔻','red triangle down'],
+    ['🔸','small orange diamond'],['🔹','small blue diamond'],
+    ['🔶','large orange diamond'],['🔷','large blue diamond'],
+    ['🔳','white square button'],['🔲','black square button'],
+    ['▪️','black small square'],['▫️','white small square'],
+    ['◾','black medium small square'],['◽','white medium small square'],
+    ['◼️','black medium square'],['◻️','white medium square'],
+    ['⬛','black large square'],['⬜','white large square'],
+    ['🟧','orange square'],['🟦','blue square'],['🟥','red square'],
+    ['🟫','brown square'],['🟪','purple square'],['🟩','green square'],['🟨','yellow square'],
+    ['🔈','speaker low'],['🔇','muted speaker'],['🔉','speaker medium'],
+    ['🔊','speaker loud volume'],['🔕','bell muted no'],['📣','megaphone cheer'],
+    ['🗨️','speech bubble left'],
+    ['🎴','flower playing card'],
+    ['🕐','one oclock time'],['🕑','two oclock time'],['🕒','three oclock time'],
+    ['🕓','four oclock time'],['🕔','five oclock time'],['🕕','six oclock time'],
+    ['🕖','seven oclock time'],['🕗','eight oclock time'],['🕘','nine oclock time'],
+    ['🕙','ten oclock time'],['🕚','eleven oclock time'],['🕛','twelve oclock time'],
+    ['🕜','one thirty time'],['🕝','two thirty time'],['🕞','three thirty time'],
+    ['🕟','four thirty time'],['🕠','five thirty time'],['🕡','six thirty time'],
+    ['🕢','seven thirty time'],['🕣','eight thirty time'],['🕤','nine thirty time'],
+    ['🕥','ten thirty time'],['🕦','eleven thirty time'],['🕧','twelve thirty time'],
+    ['♀️','female sign woman'],['♂️','male sign man'],['⚧','transgender symbol'],
+    ['⚕️','medical symbol caduceus'],
+  ]},
+  { icon: '📱', title: 'Objects', emoji: [
+    ['⌚','watch clock wrist'],['📱','phone mobile cell'],['📲','phone arrow call'],
+    ['💻','laptop computer'],['⌨️','keyboard type'],['🖥️','desktop monitor computer'],
+    ['🖨️','printer'],['🖱️','mouse computer'],['🖲️','trackball'],
+    ['🕹️','joystick game controller'],['🗜️','clamp compression'],
+    ['💽','minidisc floppy old'],['💾','floppy disk save old'],['💿','cd disc'],
+    ['📀','dvd disc'],['📼','videocassette vhs tape'],
+    ['📷','camera photo'],['📸','camera flash selfie'],['📹','video camera film'],
+    ['🎥','movie camera cinema'],['📽️','film projector cinema'],['🎞️','film strip frames'],
+    ['📞','telephone receiver'],['☎️','telephone old rotary'],['📟','pager beeper'],
+    ['📠','fax machine'],['📺','television tv screen'],['📻','radio'],
+    ['🎙️','studio microphone podcast'],['🎚️','level slider audio'],['🎛️','control knobs audio'],
+    ['🧭','compass navigation'],['⏱️','stopwatch timer'],['⏲️','timer clock'],
+    ['⏰','alarm clock wake'],['🕰️','mantelpiece clock'],['⌛','hourglass done'],
+    ['⏳','hourglass sand time'],['📡','satellite dish antenna signal'],
+    ['🔋','battery charge'],['🪫','low battery dead'],['🔌','plug electric power'],
+    ['💡','light bulb idea'],['🔦','flashlight torch'],['🕯️','candle flame light'],
+    ['🪔','oil lamp diya'],['🧯','fire extinguisher safety'],['🛢️','oil drum barrel'],
+    ['💸','money wings flying cash'],['💵','dollar bill usd'],['💴','yen bill jpy'],
+    ['💶','euro bill eur'],['💷','pound sterling gbp'],['🪙','coin money'],
+    ['💰','money bag cash'],['💳','credit card payment'],['🪪','id card identity badge'],
+    ['💎','gem diamond jewel'],['🪎','treasure chest gems gold loot wealth prize'],['⚖️','balance scale justice'],['🪜','ladder climb'],
+    ['🧰','toolbox tools'],['🪛','screwdriver tool'],['🔧','wrench spanner tool'],
+    ['🔨','hammer tool'],['⚒️','hammer pick tool'],['🛠️','hammer wrench repair'],
+    ['⛏️','pick axe mine'],['🪏','trowel garden'],['🪚','saw wood carpentry'],
+    ['🔩','bolt nut screw'],['⚙️','gear cog settings'],['🪤','mousetrap snap'],
+    ['🧱','brick wall building'],['⛓️','chain link'],['⛓️‍💥','broken chain free freedom'],['🧲','magnet attract'],
+    ['🔫','gun pistol water squirt'],['💣','bomb explosion'],['🪓','axe hatchet chop'],
+    ['🔪','knife kitchen dagger'],['🗡️','dagger sword'],['⚔️','crossed swords battle'],
+    ['🛡️','shield protect defend'],['🚬','cigarette smoking'],
+    ['⚰️','coffin funeral death'],['🪦','gravestone tombstone rip'],
+    ['⚱️','urn funeral ashes'],['🏺','amphora ancient vase'],
+    ['🔮','crystal ball magic fortune'],['📿','prayer beads rosary'],
+    ['🧿','nazar evil eye amulet'],['🪬','hamsa hand protection'],['💈','barber pole hair'],
+    ['⚗️','alembic chemistry flask'],['🔭','telescope astronomy space'],
+    ['🔬','microscope science lab'],['🕳️','hole empty'],
+    ['🩻','x-ray scan medical'],['🩹','bandage plaster wound'],['🩺','stethoscope doctor'],
+    ['💊','pill medicine tablet drug'],['💉','syringe injection needle'],
+    ['🩸','blood drop medical'],['🧬','dna genetics'],
+    ['🦠','microbe germ bacteria virus'],['🧫','petri dish lab culture'],
+    ['🧪','test tube lab experiment'],['🌡️','thermometer temperature fever'],
+    ['🧹','broom sweep clean'],['🪠','plunger toilet unclog'],
+    ['🧺','basket laundry'],['🧻','toilet paper roll'],['🚽','toilet bathroom'],
+    ['🚰','faucet tap water'],['🚿','shower bathroom'],['🛁','bathtub bath'],
+    ['🧼','soap clean wash'],['🪥','toothbrush teeth'],['🪒','razor shave'],
+    ['🧽','sponge clean scrub'],['🪣','bucket pail water'],['🧴','lotion cream bottle'],
+    ['🛎️','bell service hotel'],['🔑','key unlock door'],['🗝️','old key antique'],
+    ['🚪','door entry exit'],['🪑','chair seat furniture'],['🛋️','couch sofa furniture'],
+    ['🛏️','bed sleep furniture'],['🧸','teddy bear toy stuffed'],
+    ['🖼️','picture frame art painting'],['🪞','mirror reflection'],['🪟','window'],
+    ['🛍️','shopping bags retail'],['🛒','shopping cart trolley'],
+    ['🎈','balloon party'],['🎏','carp streamer decoration'],['🎎','japanese dolls hina'],
+    ['🏮','red lantern chinese'],['🪩','disco ball dance party'],['🧧','red envelope hongbao'],
+    ['✉️','envelope mail letter'],['📩','email incoming'],['📨','incoming envelope'],
+    ['📧','email electronic mail'],['📥','inbox tray'],['📤','outbox tray'],
+    ['📦','package box parcel'],['🏷️','label tag price'],['🪧','placard sign'],
+    ['📪','mailbox empty closed'],['📫','mailbox full closed'],
+    ['📬','mailbox full open'],['📭','mailbox empty open'],
+    ['📮','postbox pillar red'],['📯','postal horn bugle'],
+    ['📜','scroll ancient document'],['📃','page curl document'],['📄','page document'],
+    ['📑','bookmark tabs document'],['🧾','receipt bill payment'],
+    ['📊','bar chart graph data'],['📈','chart up growth'],['📉','chart down decline'],
+    ['🗒️','notepad spiral memo'],['🗓️','calendar spiral planner'],
+    ['📆','tearoff calendar date'],['📅','calendar date'],['🗑️','wastebasket trash delete'],
+    ['📇','card index rolodex'],['🗃️','card file box'],['🗳️','ballot box vote'],
+    ['🗄️','file cabinet drawer'],['📋','clipboard document'],
+    ['📁','file folder'],['📂','open folder files'],['🗂️','card index dividers'],
+    ['🗞️','newspaper rolled'],['📰','newspaper press'],
+    ['📓','notebook'],['📔','notebook cover'],['📒','ledger book'],
+    ['📕','book red closed'],['📗','book green'],['📘','book blue'],
+    ['📙','book orange'],['📚','books stack library'],['📖','open book read'],
+    ['🔖','bookmark'],['🧷','safety pin'],['🔗','link chain hyperlink'],
+    ['📎','paperclip attach'],['🖇️','paperclips linked'],
+    ['📐','triangular ruler geometry'],['📏','ruler measure'],['🧮','abacus calculate'],
+    ['📌','pushpin pinned map'],['📍','round pushpin location'],['✂️','scissors cut'],
+    ['🖊️','pen write'],['🖋️','fountain pen write'],['✒️','black nib pen'],
+    ['🖌️','paintbrush art'],['🖍️','crayon color draw'],['📝','memo note write'],
+    ['✏️','pencil write draw'],['🔍','magnifying glass search left'],
+    ['🔎','magnifying glass search right'],['🔏','locked pen'],
+    ['🔐','locked key secure'],['🔒','locked secure'],['🔓','unlocked open'],
+  ]},
+  { icon: '✈️', title: 'Travel & Places', emoji: [
+    ['🚗','automobile car driving vehicle'],['🚕','taxi cab car'],['🚙','car suv automobile'],['🛻','pickup truck'],
+    ['🚐','minibus van'],['🚌','bus transit'],['🚎','trolleybus'],
+    ['🏎️','racing car formula one'],['🚓','police car cop'],['🚑','ambulance emergency'],
+    ['🚒','fire truck engine'],['🚚','delivery truck'],['🚛','articulated lorry semi truck'],
+    ['🚜','tractor farm'],['🛴','kick scooter'],['🚲','bicycle bike'],
+    ['🛵','motor scooter moped'],['🏍️','motorcycle motorbike'],['🛺','auto rickshaw tuk tuk'],
+    ['🛞','wheel tire'],['🚨','siren police light emergency'],
+    ['🚔','oncoming police car'],['🚍','oncoming bus'],['🚘','oncoming car'],['🚖','oncoming taxi'],
+    ['🦯','white cane blind mobility'],['🦽','manual wheelchair disability'],
+    ['🦼','motorized wheelchair disability'],['🩼','crutch mobility aid'],
+    ['🚡','aerial tramway cable car'],['🚠','mountain cableway'],['🚟','suspension railway'],
+    ['🚃','railway car train'],['🚋','tram car'],['🚞','mountain railway'],
+    ['🚝','monorail'],['🚄','bullet train shinkansen high speed'],['🚅','bullet train fast'],
+    ['🚈','light rail'],['🚂','steam locomotive train'],['🚆','train'],
+    ['🚇','metro subway underground'],['🚊','tram streetcar'],['🚉','station train'],
+    ['✈️','airplane plane flight travel'],['🛫','takeoff departure airplane'],
+    ['🛬','landing arrival airplane'],['🛩️','small plane aircraft'],
+    ['💺','seat airplane chair'],['🛰️','satellite space orbit'],
+    ['🚀','rocket space launch'],['🛸','ufo flying saucer'],['🚁','helicopter'],
+    ['🛶','canoe kayak boat'],['⛵','sailboat sailing'],['🚤','speedboat motorboat'],
+    ['🛥️','motor boat'],['🛳️','passenger ship cruise'],['⛴️','ferry boat'],
+    ['🚢','ship cruise liner'],['🛟','life ring preserver safety'],
+    ['⚓','anchor ship port'],['🪝','hook crane'],['⛽','fuel pump gas station'],
+    ['🚧','construction barrier roadwork'],['🚦','traffic light vertical'],
+    ['🚥','traffic light horizontal'],['🚏','bus stop'],['🗺️','world map travel'],
+    ['🗿','moai easter island statue'],['🗽','statue of liberty new york'],
+    ['🗼','tokyo tower japan'],['🏰','castle european'],['🏯','japanese castle'],
+    ['🏟️','stadium arena sports'],['⛲','fountain park'],['⛱️','umbrella beach sun'],
+    ['🏖️','beach sand ocean'],['🏜️','desert dry arid'],['🗻','mount fuji japan'],
+    ['🏕️','camping tent outdoors'],['⛺','tent camping'],
+    ['🏠','house home'],['🏡','house garden home'],['🏘️','houses neighborhood'],
+    ['🏚️','derelict house abandoned'],['🛖','hut cabin'],['🏗️','building construction'],
+    ['🏭','factory industrial'],['🏢','office building'],['🏬','department store shopping'],
+    ['🏣','japanese post office'],['🏤','post office'],['🏥','hospital medical'],
+    ['🏦','bank finance'],['🏨','hotel lodging'],['🏪','convenience store shop'],
+    ['🏫','school education'],['🏩','love hotel'],['🏛️','classical building pillars'],
+    ['⛪','church christian'],['🕌','mosque islam muslim'],['🕍','synagogue jewish'],
+    ['🛕','hindu temple'],['🕋','kaaba mecca islam'],['⛩️','shinto shrine japanese'],
+    ['🛤️','railway track'],['🛣️','motorway highway road'],['🗾','japan map island'],
+    ['🏞️','national park landscape'],['🌇','sunset city buildings'],
+    ['🌆','city at dusk buildings'],['🏙️','cityscape skyline'],
+    ['🌃','night city stars'],['🌉','bridge night city'],['🌁','foggy bridge'],
+  ]},
+  { icon: '👗', title: 'Clothing', emoji: [
+    ['🧥','coat jacket outerwear'],['🥼','lab coat doctor'],['🦺','safety vest hi-vis'],
+    ['👔','necktie dress shirt suit'],['👗','dress woman'],['👘','kimono japanese'],
+    ['🥻','sari india'],['👙','bikini swimwear'],['🩱','one-piece swimsuit'],
+    ['👚','womens top clothes'],['👕','t-shirt tee'],['👖','jeans pants denim'],
+    ['🩲','briefs underwear'],['🩳','shorts'],
+    ['👠','high heel shoe stiletto'],['👡','sandal womens shoe'],['👢','boot womans'],
+    ['👞','oxford dress shoe mens'],['👟','sneaker trainer running shoe'],
+    ['🥾','hiking boot trail'],['🩴','thong sandal flip flop'],['🥿','flat shoe ballet'],
+    ['🧦','socks'],['🧤','gloves mittens'],['🧣','scarf'],
+    ['🎩','top hat fancy'],['🧢','baseball cap hat billed'],['👒','sun hat womans'],
+    ['🎓','graduation cap mortarboard'],['⛑️','rescue helmet hard hat'],['🪖','military helmet'],
+    ['👑','crown king queen royal'],
+    ['👓','glasses spectacles'],['🕶️','sunglasses cool shades'],['🥽','goggles safety'],
+    ['👜','handbag purse'],['👛','coin purse wallet'],['👝','clutch bag pouch'],
+    ['💼','briefcase work business'],['🎒','backpack rucksack school'],['🧳','luggage suitcase travel'],
+    ['🌂','umbrella closed rain'],
+    ['🪢','knot rope'],['🧶','yarn ball wool knit'],['🧵','thread sewing needle'],['🪡','sewing needle thread'],
+  ]},
+  { icon: '🚩', title: 'Flags', emoji: [
+    ['🏳️','white flag surrender'],['🏴','black flag'],['🏴‍☠️','pirate flag skull crossbones jolly roger'],
+    ['🏁','chequered flag racing finish'],['🚩','red flag warning'],
+    ['🏳️‍🌈','rainbow flag pride lgbtq gay'],['🏳️‍⚧️','transgender flag trans pride'],
+    ['🎌','crossed flags japan'],
+    ['🇺🇳','united nations un'],
+    ['🇦🇫','afghanistan'],['🇦🇽','aland islands'],['🇦🇱','albania'],['🇩🇿','algeria'],
+    ['🇦🇸','american samoa'],['🇦🇩','andorra'],['🇦🇴','angola'],['🇦🇮','anguilla'],
+    ['🇦🇶','antarctica'],['🇦🇬','antigua barbuda'],['🇦🇷','argentina'],
+    ['🇦🇲','armenia'],['🇦🇼','aruba'],['🇦🇺','australia'],['🇦🇹','austria'],['🇦🇿','azerbaijan'],
+    ['🇧🇸','bahamas'],['🇧🇭','bahrain'],['🇧🇩','bangladesh'],['🇧🇧','barbados'],
+    ['🇧🇾','belarus'],['🇧🇪','belgium'],['🇧🇿','belize'],['🇧🇯','benin'],['🇧🇲','bermuda'],
+    ['🇧🇹','bhutan'],['🇧🇴','bolivia'],['🇧🇦','bosnia herzegovina'],['🇧🇼','botswana'],
+    ['🇧🇷','brazil'],['🇮🇴','british indian ocean territory'],['🇻🇬','british virgin islands'],
+    ['🇧🇳','brunei'],['🇧🇬','bulgaria'],['🇧🇫','burkina faso'],['🇧🇮','burundi'],
+    ['🇰🇭','cambodia'],['🇨🇲','cameroon'],['🇨🇦','canada'],['🇮🇨','canary islands'],
+    ['🇨🇻','cape verde cabo verde'],['🇧🇶','caribbean netherlands'],['🇰🇾','cayman islands'],
+    ['🇨🇫','central african republic car'],['🇹🇩','chad'],['🇨🇱','chile'],['🇨🇳','china'],
+    ['🇨🇽','christmas island'],['🇨🇨','cocos keeling islands'],['🇨🇴','colombia'],
+    ['🇰🇲','comoros'],['🇨🇬','congo republic'],['🇨🇩','congo democratic republic drc'],
+    ['🇨🇰','cook islands'],['🇨🇷','costa rica'],['🇨🇮','ivory coast cote divoire'],
+    ['🇭🇷','croatia'],['🇨🇺','cuba'],['🇨🇼','curacao'],['🇨🇾','cyprus'],['🇨🇿','czech czechia'],
+    ['🇩🇰','denmark'],['🇩🇯','djibouti'],['🇩🇲','dominica'],['🇩🇴','dominican republic'],
+    ['🇪🇨','ecuador'],['🇪🇬','egypt'],['🇸🇻','el salvador'],['🇬🇶','equatorial guinea'],
+    ['🇪🇷','eritrea'],['🇪🇪','estonia'],['🇸🇿','eswatini swaziland'],['🇪🇹','ethiopia'],
+    ['🇪🇺','european union eu europe'],
+    ['🇫🇰','falkland islands malvinas'],['🇫🇴','faroe islands'],['🇫🇯','fiji'],
+    ['🇫🇮','finland'],['🇫🇷','france'],['🇬🇫','french guiana'],['🇵🇫','french polynesia'],
+    ['🇹🇫','french southern territories'],
+    ['🇬🇦','gabon'],['🇬🇲','gambia'],['🇬🇪','georgia'],['🇩🇪','germany'],['🇬🇭','ghana'],
+    ['🇬🇮','gibraltar'],['🇬🇷','greece'],['🇬🇱','greenland'],['🇬🇩','grenada'],
+    ['🇬🇵','guadeloupe'],['🇬🇺','guam'],['🇬🇹','guatemala'],['🇬🇬','guernsey'],
+    ['🇬🇳','guinea'],['🇬🇼','guinea-bissau'],['🇬🇾','guyana'],
+    ['🇭🇹','haiti'],['🇭🇳','honduras'],['🇭🇰','hong kong'],['🇭🇺','hungary'],
+    ['🇮🇸','iceland'],['🇮🇳','india'],['🇮🇩','indonesia'],['🇮🇷','iran'],['🇮🇶','iraq'],
+    ['🇮🇪','ireland'],['🇮🇲','isle of man'],['🇮🇱','israel'],['🇮🇹','italy'],
+    ['🇯🇲','jamaica'],['🇯🇵','japan'],['🇯🇪','jersey'],['🇯🇴','jordan'],
+    ['🇰🇿','kazakhstan'],['🇰🇪','kenya'],['🇰🇮','kiribati'],['🇽🇰','kosovo'],
+    ['🇰🇼','kuwait'],['🇰🇬','kyrgyzstan'],
+    ['🇱🇦','laos'],['🇱🇻','latvia'],['🇱🇧','lebanon'],['🇱🇸','lesotho'],['🇱🇷','liberia'],
+    ['🇱🇾','libya'],['🇱🇮','liechtenstein'],['🇱🇹','lithuania'],['🇱🇺','luxembourg'],
+    ['🇲🇴','macao macau'],['🇲🇰','north macedonia'],['🇲🇬','madagascar'],['🇲🇼','malawi'],
+    ['🇲🇾','malaysia'],['🇲🇻','maldives'],['🇲🇱','mali'],['🇲🇹','malta'],
+    ['🇲🇭','marshall islands'],['🇲🇶','martinique'],['🇲🇷','mauritania'],['🇲🇺','mauritius'],
+    ['🇾🇹','mayotte'],['🇲🇽','mexico'],['🇫🇲','micronesia'],['🇲🇩','moldova'],
+    ['🇲🇨','monaco'],['🇲🇳','mongolia'],['🇲🇪','montenegro'],['🇲🇸','montserrat'],
+    ['🇲🇦','morocco'],['🇲🇿','mozambique'],['🇲🇲','myanmar burma'],
+    ['🇳🇦','namibia'],['🇳🇷','nauru'],['🇳🇵','nepal'],['🇳🇱','netherlands holland'],
+    ['🇳🇨','new caledonia'],['🇳🇿','new zealand'],['🇳🇮','nicaragua'],['🇳🇪','niger'],
+    ['🇳🇬','nigeria'],['🇳🇺','niue'],['🇳🇫','norfolk island'],['🇰🇵','north korea'],
+    ['🇲🇵','northern mariana islands'],['🇳🇴','norway'],
+    ['🇴🇲','oman'],
+    ['🇵🇰','pakistan'],['🇵🇼','palau'],['🇵🇸','palestine'],['🇵🇦','panama'],
+    ['🇵🇬','papua new guinea png'],['🇵🇾','paraguay'],['🇵🇪','peru'],['🇵🇭','philippines'],
+    ['🇵🇳','pitcairn islands'],['🇵🇱','poland'],['🇵🇹','portugal'],['🇵🇷','puerto rico'],
+    ['🇶🇦','qatar'],
+    ['🇷🇪','reunion'],['🇷🇴','romania'],['🇷🇺','russia'],['🇷🇼','rwanda'],
+    ['🇧🇱','saint barthelemy'],['🇸🇭','saint helena'],['🇰🇳','saint kitts nevis'],
+    ['🇱🇨','saint lucia'],['🇵🇲','saint pierre miquelon'],['🇻🇨','saint vincent grenadines'],
+    ['🇼🇸','samoa'],['🇸🇲','san marino'],['🇸🇹','sao tome principe'],['🇨🇶','sark'],
+    ['🇸🇦','saudi arabia'],['🇸🇳','senegal'],['🇷🇸','serbia'],['🇸🇨','seychelles'],
+    ['🇸🇱','sierra leone'],['🇸🇬','singapore'],['🇸🇽','sint maarten'],['🇸🇰','slovakia'],
+    ['🇸🇮','slovenia'],['🇸🇧','solomon islands'],['🇸🇴','somalia'],['🇿🇦','south africa'],
+    ['🇬🇸','south georgia south sandwich islands'],['🇰🇷','south korea'],['🇸🇸','south sudan'],
+    ['🇪🇸','spain'],['🇱🇰','sri lanka'],['🇸🇩','sudan'],['🇸🇷','suriname'],
+    ['🇸🇪','sweden'],['🇨🇭','switzerland'],['🇸🇾','syria'],
+    ['🇹🇼','taiwan'],['🇹🇯','tajikistan'],['🇹🇿','tanzania'],['🇹🇭','thailand'],
+    ['🇹🇱','timor-leste east timor'],['🇹🇬','togo'],['🇹🇰','tokelau'],['🇹🇴','tonga'],
+    ['🇹🇹','trinidad tobago'],['🇹🇳','tunisia'],['🇹🇷','turkey turkiye'],
+    ['🇹🇲','turkmenistan'],['🇹🇨','turks caicos islands'],['🇹🇻','tuvalu'],
+    ['🇺🇬','uganda'],['🇺🇦','ukraine'],['🇦🇪','united arab emirates uae'],
+    ['🇬🇧','united kingdom uk britain'],['🏴󠁧󠁢󠁥󠁮󠁧󠁿','england'],['🏴󠁧󠁢󠁳󠁣󠁴󠁿','scotland'],['🏴󠁧󠁢󠁷󠁬󠁳󠁿','wales'],
+    ['🇺🇸','united states usa america'],['🇻🇮','us virgin islands'],['🇺🇲','us outlying islands'],
+    ['🇺🇾','uruguay'],['🇺🇿','uzbekistan'],
+    ['🇻🇺','vanuatu'],['🇻🇦','vatican city holy see'],['🇻🇪','venezuela'],['🇻🇳','vietnam'],
+    ['🇼🇫','wallis futuna'],['🇪🇭','western sahara'],
+    ['🇾🇪','yemen'],
+    ['🇿🇲','zambia'],['🇿🇼','zimbabwe'],
+    ['🇦🇨','ascension island'],['🇧🇻','bouvet island'],['🇨🇵','clipperton island'],
+    ['🇪🇦','ceuta melilla'],['🇩🇬','diego garcia'],['🇭🇲','heard mcdonald islands'],
+    ['🇲🇫','saint martin'],['🇸🇯','svalbard jan mayen'],['🇹🇦','tristan da cunha'],
+  ]},
+  { icon: 'ツ', title: 'Text Art', type: 'text', emoji: [
+    ['╰⋃╯',                          'penis'],
+    ['(ᶅ͒)',                           'vagina'],
+    ['（ ͜•人 ͜•）',                   'boobs'],
+    ['（ ͜.人 ͜.）',                   'large boobs'],
+    ['( . 人 . )',                     'saggy boobs'],
+    ['(‿ˠ‿)',                          'ass'],
+    ['𝔾𝕆𝕆𝔻 𝔹𝕆𝕐',                  'good boy'],
+    ['𝔾𝕆𝕆𝔻 𝔾𝕀ℝ𝕃',                 'good girl'],
+    ['b( • )( • )bies',               'boobies'],
+    ['𝒫𝓁ℯ𝒶𝓈ℯ 𝒹𝒶𝒹𝒹𝓎',             'please daddy'],
+    ['✨ 𝓦𝓮𝓵𝓬𝓸𝓂𝓮 ✨',              'welcome'],
+    ['★𝒲ℯ𝓉 𝒹𝓇ℯ𝒶𝓂𝓈★',             'wet dreams'],
+    ['¯\\_(ツ)_/¯',                   'ascii shrug'],
+    ['ᕦ(ò_óˇ)ᕤ',                     'flex'],
+    ['⚞^. .^⚟',                      'ascii cat'],
+    ['𝄃𝄂𝄀𝄁𝄃𝄂𝄂𝄃',                  'barcode'],
+    ['𒅌',                             'ascii shark'],
+    ['𝓴𝓲𝓼𝓼 𝓶𝒆 𝓹𝓵𝒆𝓪𝓼𝒆',          'kiss me please'],
+    ['¡ᶠᶸᶜᵏᵧₒᵤ!',                    'fuck you'],
+    ['ℬ𝒾𝓽𝓬𝒽',                       'bitch'],
+    ['𓆩🖤𓆪',                         'winged heart'],
+    ['I ♡ ( . )( . )',                'i love boobs'],
+    ['(,,•᷄ࡇ•᷅ ,,)?',               'confused'],
+    ['kiss my ( ㅅ )',                 'kiss my ass'],
+    ['⁶🤷⁷',                          '67'],
+    ['♡𝑰 𝒍𝒐𝒗𝒆 𝒚𝒐𝒖𝒖♡',             'i love you'],
+    ['₊𖥔 ℓo͟v͟ꫀ ყoυ! ۪ ׄ໑୧ ׅ𖥔ׄ', 'love you'],
+    ['꧁Good morning ꧂',              'good morning'],
+    ['ه 🅾 𝐈𝐧𝐬𝐭𝐚𝐠𝐫𝐚𝐦 ★',          'instagram'],
+    ['𝓑𝓮𝓼𝓽𝓲𝓮🌹',                    'bestie'],
+    ['୧⍤⃝💐',                        'carrying flowers'],
+    ['𝐆𝐨𝐨𝐝 𝐍.ᐟ𝐠𝐡𝐭✨️🌛',           'good night'],
+  ]},
+];
+const EMOJI_CATS_JSON = JSON.stringify(EMOJI_CATS);
+
 function injectEmojiPicker() {
-  // Each emoji: [glyph, search keywords]
-  const CATS = [
-    { icon: '😊', title: 'Faces', emoji: [
-      ['😀','grin happy smile face'],['😃','happy smile open mouth'],['😄','grin squint happy'],
-      ['😁','grin teeth happy'],['😆','laugh squint happy'],['😅','sweat smile nervous'],
-      ['🤣','rofl rolling floor laughing'],['😂','joy tears laughing cry'],
-      ['🙂','smile slight'],['🙃','upside down smile'],['🙂‍↕️','nodding yes'],['🙂‍↔️','shaking no'],
-      ['😉','wink'],['😊','smile blush'],['😇','angel halo innocent'],
-      ['😍','heart eyes love adore'],['🤩','star eyes wow amazing starstruck'],
-      ['😘','kiss blow love'],['🥰','love hearts smiling'],['😋','yummy delicious tongue'],
-      ['😗','kissing'],['😙','kissing smiling eyes'],['😚','kissing closed eyes'],
-      ['🥹','holding back tears moved grateful'],['🥲','smiling tear bittersweet'],
-      ['🥸','disguised incognito glasses'],
-      ['😛','tongue out'],['😜','winking tongue'],['🤪','crazy zany silly'],['😝','tongue squint'],
-      ['🤑','money mouth rich'],['🤗','hug hugging arms'],['🤭','hand mouth giggle oops'],
-      ['🫣','peeking eye peek shy'],['🫢','gasp hand over mouth shocked'],
-      ['🫡','saluting face respect'],['🫠','melting dissolve'],
-      ['🫥','dotted line face invisible hidden'],['🫤','diagonal mouth meh unsure'],
-      ['🤫','shush quiet secret'],['🤔','thinking hmm ponder'],
-      ['🤐','zipper mouth silent zip'],['🤨','raised eyebrow suspicious'],
-      ['😐','neutral blank'],['😑','expressionless'],['😶','no mouth silent'],
-      ['😏','smirk sly'],['😒','unamused unhappy'],['🙄','eye roll annoyed'],
-      ['😬','grimace nervous'],['🤥','lying pinocchio'],['😌','relieved content'],
-      ['😔','pensive sad'],['😪','sleepy tired'],['🤤','drool hungry'],['😴','sleep zzz tired'],
-      ['😷','mask sick face'],['🤒','sick fever ill'],['🤕','injured bandage hurt'],
-      ['🤢','nausea sick gross'],['🤮','vomit puke sick'],['🤧','sneeze sick cold'],
-      ['🥵','hot sweating overheated'],['🥶','cold freezing ice'],['🥴','woozy drunk dizzy'],
-      ['😵','dizzy faint'],['😵‍💫','dizzy spiral eyes'],['😮‍💨','exhale sigh breathe relief'],
-      ['😶‍🌫️','face in clouds spaced out'],['🫩','bags under eyes tired exhausted'],
-      ['🤯','exploding head mind blown'],['🤠','cowboy hat western'],
-      ['🥳','party celebration festive'],['😎','cool sunglasses'],['🤓','nerd glasses smart'],
-      ['🧐','monocle fancy detective'],['😕','confused unsure'],['😟','worried anxious'],
-      ['🙁','slight frown sad'],['☹️','frown sad unhappy'],['😮','open mouth surprised'],
-      ['😯','hushed surprised'],['😲','astonished shocked'],['😳','flushed embarrassed red'],
-      ['🥺','pleading begging puppy eyes'],['😦','frowning open mouth'],['😧','anguished pain'],
-      ['😨','fearful scared afraid'],['😰','anxious sweat cold fear'],['😥','sad relieved'],
-      ['😢','cry tear sad'],['😭','sob crying loudly'],['😱','scream fear horror'],
-      ['😖','confounded frustrated'],['😣','persevere struggle pain'],['😞','disappointed sad'],
-      ['😓','sweat downcast'],['😩','weary tired exhausted'],['😫','tired drained'],
-      ['🥱','yawn tired bored'],['😤','steam nose triumph frustrated'],
-      ['😡','angry pouting rage mad'],['😠','angry mad'],['🤬','swear cursing angry'],
-      ['😈','devil evil smiling demon horns mischief imp satan'],
-      ['👿','devil angry imp evil horns demon goblin satan'],
-      ['💀','skull death dead'],['☠️','skull crossbones death poison danger'],
-      ['💩','poop shit'],['🤡','clown'],['👹','ogre oni japanese monster'],['👺','goblin oni demon red'],
-      ['👻','ghost boo spooky'],['👽','alien ufo extraterrestrial'],
-      ['👾','alien monster game space invader'],['🤖','robot'],
-      ['🫨','shaking face vibrate tremble'],
-      ['😺','cat grinning'],['😸','cat grin smile'],['😹','cat joy tears laugh'],
-      ['😻','cat heart eyes love'],['😼','cat smirk wry'],['😽','cat kiss'],
-      ['🙀','cat weary shocked'],['😿','cat cry sad'],['😾','cat pouting angry'],
-      ['🫪','distorted face anxiety panic shocked surprised'],
-      ['🫯','fight cloud argument brawl disagreement ruckus'],
-    ]},
-    { icon: '👋', title: 'Gestures', emoji: [
-      ['👋','wave hello goodbye'],['🤚','raised back hand stop'],
-      ['🖐️','hand five fingers spread'],['✋','raised hand stop high five'],
-      ['🖖','vulcan spock live long prosper'],['👌','ok okay perfect'],
-      ['🤌','pinched fingers italian chef kiss'],['🤏','pinching hand small'],
-      ['✌️','peace victory two fingers'],['🤞','crossed fingers luck hope'],
-      ['🤟','love you hand rock'],['🤘','horns rock metal sign'],
-      ['🤙','call me shaka hang loose'],['👈','point left'],['👉','point right'],
-      ['👆','point up'],['🖕','middle finger rude'],['👇','point down'],
-      ['☝️','index point up one'],['👍','thumbs up good yes like approve'],
-      ['👎','thumbs down bad no dislike'],['✊','fist bump raise power'],
-      ['👊','oncoming fist punch'],['🤛','left fist bump'],['🤜','right fist bump'],
-      ['👏','clap applause bravo'],['🙌','raising hands celebrate hooray'],
-      ['👐','open hands'],['🤲','palms up together'],['🤝','handshake deal'],
-      ['🙏','pray thank you please namaste'],['✍️','write pen sign'],
-      ['💅','nail polish fancy manicure'],['💪','flex muscle strong arm'],['🦾','mechanical arm prosthetic'],
-      ['👀','eyes look watching see'],['👁️','eye see'],['👄','lips mouth'],['💋','kiss lips'],
-      ['🫦','biting lip'],['🫶','heart hands love'],['🫰','finger snap'],
-      ['🫸','push right hand'],['🫷','push left hand'],
-    ]},
-    { icon: '👤', title: 'People', emoji: [
-      ['🤦','facepalm disbelief exasperation ugh'],['🤦‍♀️','woman facepalm'],['🤦‍♂️','man facepalm'],
-      ['🤷','shrug idk dunno whatever'],['🤷‍♀️','woman shrug'],['🤷‍♂️','man shrug'],
-      ['💁','info tipping hand sassy gossip'],['💁‍♀️','woman tipping hand sassy'],['💁‍♂️','man tipping hand'],
-      ['🙅','no gesture forbidden stop'],['🙅‍♀️','woman no gesture'],['🙅‍♂️','man no gesture'],
-      ['🙆','ok gesture yes'],['🙆‍♀️','woman ok gesture'],['🙆‍♂️','man ok gesture'],
-      ['🙋','raise hand question volunteer'],['🙋‍♀️','woman raise hand'],['🙋‍♂️','man raise hand'],
-      ['🙇','bow apology respect'],['🙇‍♀️','woman bowing'],['🙇‍♂️','man bowing'],
-      ['🙎','pout disappointed frown'],['🙍','frown annoyed disgruntled'],
-      ['💆','massage relaxed spa headache'],['💇','haircut barber salon'],
-      ['🤳','selfie phone camera'],['🕴️','suit levitate business person'],
-      ['👶','baby infant newborn'],['🧒','child kid young'],
-      ['👦','boy child son'],['👧','girl child daughter'],
-      ['🧑','person adult'],['👩','woman adult lady'],['👨','man adult'],
-      ['🧓','older person elderly grandparent'],['👴','old man elderly grandpa'],['👵','old woman elderly grandma'],
-      ['🧠','brain smart intelligent mind'],['🫀','anatomical heart organ cardiology'],
-      ['🫁','lungs breath breathe'],['🦷','tooth teeth dentist'],
-      ['🦻','ear hear accessibility'],['👂','ear hear listen'],['👃','nose smell sniff'],
-      ['🦵','leg kick knee'],['🦶','foot feet'],['👅','tongue lick taste'],
-      ['🫆','fingerprint detective clue identity'],['👣','footprints barefoot tracks'],
-      ['🫂','hug embrace comfort friendship'],['💏','kiss couple romance love'],
-      ['🧑‍🤝‍🧑','people holding hands friends couple'],
-      ['👤','person shadow silhouette user'],['👥','people group users'],['🗣️','speak talk voice'],
-      ['🧙','mage wizard witch magic fantasy'],['🧚','fairy fairytale fantasy myth'],
-      ['🧛','vampire blood dracula halloween'],['🧜','mermaid merman creature fairytale'],
-      ['🧝','elf fantasy enchantment'],['🧞','genie djinn jinn fantasy'],
-      ['🧟','zombie dead apocalypse halloween horror'],['🧌','troll monster fantasy'],['🥷','ninja assassin fighter'],
-      ['🛌','sleep bed rest goodnight'],['🤱','breastfeed baby nursing'],
-      ['🕵️','detective spy investigate mystery'],['👷','construction worker hardhat build'],
-      ['💂','guard soldier royal'],['🤴','prince royal crown fairytale'],['👸','princess royal crown fairytale'],
-      ['🦲','bald hairless'],['🦱','curly hair afro'],['🦰','red hair ginger redhead'],['🦳','white hair gray old'],
-    ]},
-    { icon: '❤️', title: 'Hearts', emoji: [
-      ['❤️','red heart love'],['🧡','orange heart'],['💛','yellow heart'],
-      ['💚','green heart'],['💙','blue heart'],['💜','purple heart'],
-      ['🩷','pink heart'],['🩵','light blue heart'],['🩶','grey gray heart'],
-      ['🖤','black heart dark evil'],['🤍','white heart pure'],['🤎','brown heart'],
-      ['💔','broken heart sad'],['❣️','heart exclamation'],['💕','two hearts'],
-      ['💞','revolving hearts'],['💓','beating heart'],['💗','growing heart'],
-      ['💖','sparkling heart'],['💘','heart arrow cupid love'],
-      ['💝','heart ribbon gift'],['💟','heart decoration'],
-      ['❤️‍🔥','heart fire passion desire'],['❤️‍🩹','mending heart heal repair'],
-      ['😍','heart eyes love adore'],['🥰','love hearts smiling'],['😘','kiss blow love'],
-      ['💑','couple love'],['👫','couple man woman'],['💌','love letter mail'],
-      ['💍','ring engagement wedding'],['💒','wedding chapel'],['🌹','rose flower love'],
-      ['🥀','wilted rose flower dead dying'],['🌷','tulip flower'],['💐','bouquet flowers'],
-      ['🎀','ribbon bow pink'],['🎁','gift present'],
-    ]},
-    { icon: '🐶', title: 'Animals', emoji: [
-      ['🐶','dog puppy'],['🐱','cat kitten'],['🐭','mouse'],['🐹','hamster'],
-      ['🐰','rabbit bunny'],['🦊','fox'],['🐻','bear'],['🐼','panda'],
-      ['🐨','koala'],['🐯','tiger'],['🦁','lion'],['🐮','cow moo'],
-      ['🐷','pig oink'],['🐸','frog'],['🐵','monkey'],['🙈','see no evil monkey'],
-      ['🙉','hear no evil monkey'],['🙊','speak no evil monkey'],
-      ['🐔','chicken hen'],['🐧','penguin'],['🐦','bird'],['🦆','duck'],
-      ['🦅','eagle'],['🦉','owl'],['🦇','bat'],['🐺','wolf'],
-      ['🐴','horse'],['🦄','unicorn magic'],['🐝','bee honey'],['🦋','butterfly'],
-      ['🐌','snail slow'],['🐞','ladybug beetle'],['🐜','ant'],['🐢','turtle slow'],
-      ['🐍','snake'],['🦎','lizard'],['🐙','octopus'],['🦑','squid'],
-      ['🦀','crab'],['🐡','blowfish'],['🐠','tropical fish'],['🐟','fish'],
-      ['🐬','dolphin'],['🐳','whale'],['🦈','shark'],['🦭','seal'],
-      ['🦓','zebra'],['🐘','elephant'],['🦏','rhinoceros rhino'],['🐪','camel'],
-      ['🦒','giraffe'],['🦬','bison buffalo'],['🐎','horse racing'],
-      ['🐑','sheep ewe'],['🐐','goat'],['🦌','deer'],
-      ['🐕','dog'],['🐩','poodle dog'],['🐈','cat'],
-      ['🦚','peacock'],['🦜','parrot'],['🕊️','dove peace bird'],
-      ['🐇','rabbit bunny'],['🦝','raccoon'],['🦦','otter'],
-      ['🐁','mouse rat'],['🐿️','chipmunk squirrel'],['🦔','hedgehog'],['🐾','paw print animal'],
-      ['🦋','butterfly'],['🐛','caterpillar bug'],['🦗','cricket bug'],['🦟','mosquito bug'],
-      ['🪿','goose bird'],['🦤','dodo bird extinct'],['🪶','feather bird light'],
-      ['🫏','donkey mule'],['🫎','moose elk deer'],['🪽','wing bird fly'],
-      ['🪼','jellyfish ocean sea'],['🐦‍⬛','black bird crow raven'],
-      ['🐻‍❄️','polar bear arctic'],['🐒','monkey'],['🐽','pig nose snout'],
-      ['🐤','baby chick yellow'],['🐣','hatching chick egg'],['🐥','chick bird front'],
-      ['🐗','boar wild pig'],['🐅','tiger big cat'],['🐆','leopard big cat spots'],
-      ['🦍','gorilla ape'],['🦧','orangutan ape primate'],['🦣','mammoth prehistoric elephant'],
-      ['🦛','hippopotamus hippo'],['🐫','two hump camel bactrian'],['🦘','kangaroo marsupial'],
-      ['🐃','water buffalo'],['🐂','ox bull'],['🐄','cow dairy'],['🐖','pig sow'],
-      ['🐏','ram sheep male'],['🦙','llama alpaca'],
-      ['🦮','guide dog service'],['🐕‍🦺','service dog'],['🐈‍⬛','black cat'],
-      ['🐓','rooster cock'],['🦃','turkey thanksgiving'],['🦢','swan elegant'],['🦩','flamingo pink'],
-      ['🦨','skunk smell stinky'],['🦡','badger honey'],['🦫','beaver dam'],['🦥','sloth slow lazy'],
-      ['🐀','rat rodent'],
-      ['🪱','worm earthworm'],['🪰','fly insect'],['🪲','beetle bug'],['🪳','cockroach roach'],
-      ['🕷️','spider arachnid'],['🕸️','spider web cobweb'],['🦂','scorpion arachnid'],
-      ['🦖','t-rex tyrannosaurus dinosaur'],['🦕','sauropod brontosaurus dinosaur'],
-      ['🦐','shrimp prawn'],['🦞','lobster seafood'],['🐊','crocodile alligator reptile'],
-      ['🐉','dragon mythical'],['🐲','dragon face'],['🐦‍🔥','phoenix firebird mythical'],
-      ['🫍','orca killer whale marine ocean'],
-    ]},
-    { icon: '🌺', title: 'Nature', emoji: [
-      ['💐','bouquet flowers'],['🌸','cherry blossom flower pink'],['💮','white flower'],
-      ['🌹','rose flower red'],['🥀','wilted rose flower dead dying'],['🌺','hibiscus flower'],
-      ['🌻','sunflower yellow'],['🌼','blossom flower yellow'],['🌷','tulip flower pink'],
-      ['🌱','seedling plant sprout grow'],['🌿','herb leaf plant green'],['☘️','shamrock clover ireland'],
-      ['🍀','four leaf clover luck'],['🍃','leaves wind'],['🍂','fallen leaf autumn'],
-      ['🍁','maple leaf autumn canada red'],['🌾','sheaf grain wheat'],['🌵','cactus desert'],
-      ['🎄','christmas tree holiday'],['🌲','evergreen tree pine'],['🌳','deciduous tree'],
-      ['🌴','palm tree tropical beach'],['🌙','crescent moon night'],['☀️','sun sunny warm'],
-      ['🌤️','partly cloudy sun'],['⛅','partly cloudy'],['🌦️','rain sun cloud'],
-      ['🌧️','rain cloud wet'],['🌩️','lightning storm'],['⛈️','thunderstorm'],
-      ['🌪️','tornado cyclone wind'],['❄️','snowflake cold winter ice'],
-      ['☃️','snowman winter snow'],['🌈','rainbow colorful'],['🌊','wave ocean sea water'],
-      ['🌋','volcano eruption fire'],['⛰️','mountain peak'],['🏔️','snow mountain peak'],
-      ['🏝️','island tropical beach'],['🌅','sunrise morning'],['🌄','mountain sunrise'],
-      ['⭐','star yellow'],['🌟','glowing star shine'],['✨','sparkle shine magic'],['💫','dizzy star spin'],
-      ['🌕','full moon'],['🌑','new moon dark night'],['🌠','shooting star wish'],
-      ['🌌','milky way galaxy space stars'],['🌀','cyclone spiral'],['🌬️','wind blow cold'],
-      ['💧','droplet water'],['💦','water splash'],['🫧','bubbles foam'],
-      ['🔥','fire flame hot'],['⚡','lightning bolt energy'],['☄️','comet meteor asteroid'],
-      ['🪻','hyacinth flower purple'],['🪷','lotus flower'],
-      ['🍄','mushroom fungus'],['🍄‍🟫','brown mushroom fungus'],
-      ['🐚','spiral shell seashell'],['🪸','coral reef ocean'],['🪨','rock stone'],
-      ['🪾','leafless tree bare'],['🪵','log wood timber'],['🪴','potted plant indoor'],
-      ['🎍','pine decoration bamboo'],['🎋','tanabata tree bamboo'],
-      ['🪺','nest with eggs bird'],['🪹','empty nest bird'],
-      ['🌞','sun with face sunny'],['🌝','full moon face'],['🌛','first quarter moon face'],
-      ['🌜','last quarter moon face'],['🌚','new moon face dark'],
-      ['🌖','waning gibbous moon'],['🌗','last quarter moon'],['🌘','waning crescent moon'],
-      ['🌒','waxing crescent moon'],['🌓','first quarter moon'],['🌔','waxing gibbous moon'],
-      ['🌎','globe earth americas'],['🌍','globe earth africa europe'],['🌏','globe earth asia'],
-      ['🪐','planet saturn ringed'],
-      ['🌥️','cloud sun partly'],['☁️','cloud overcast'],['🌨️','cloud snow snowing'],
-      ['⛄','snowman no snow'],['☔','umbrella rain'],['☂️','umbrella open'],['🌫️','fog mist haze'],
-      ['🐋','whale large ocean'],
-    ]},
-    { icon: '🍕', title: 'Food & Drink', emoji: [
-      ['🍎','apple red fruit'],['🍊','orange tangerine fruit'],['🍋','lemon yellow sour'],
-      ['🍇','grapes fruit purple'],['🍓','strawberry fruit red'],['🍒','cherry fruit red'],
-      ['🍑','peach fruit'],['🥭','mango tropical fruit'],['🍍','pineapple fruit tropical'],
-      ['🥝','kiwi fruit green'],['🍅','tomato red'],['🥦','broccoli green'],['🥬','leafy green vegetable'],
-      ['🥒','cucumber green'],['🌽','corn maize yellow'],['🥕','carrot orange'],['🥐','croissant bread pastry'],
-      ['🍞','bread loaf'],['🥖','baguette bread french'],['🧀','cheese'],['🥚','egg'],
-      ['🍳','egg frying cooking breakfast'],['🥞','pancakes stack breakfast'],['🧇','waffle breakfast'],
-      ['🥓','bacon breakfast'],['🥩','meat steak beef'],['🍗','chicken drumstick'],
-      ['🍖','meat bone'],['🌭','hot dog sausage'],['🍔','hamburger burger'],
-      ['🍟','french fries chips'],['🍕','pizza'],['🌮','taco mexican'],['🌯','burrito wrap'],
-      ['🥙','falafel wrap pita'],['🍱','bento box japanese'],['🍣','sushi japanese'],
-      ['🍤','shrimp fried tempura'],['🍜','noodles ramen soup'],['🍝','spaghetti pasta italian'],
-      ['🍛','curry rice spicy'],['🍚','rice bowl'],['🍙','rice ball onigiri japanese'],
-      ['🥮','mooncake chinese'],['🍡','dango sweet japanese'],['🧁','cupcake sweet'],
-      ['🍰','cake slice birthday'],['🎂','birthday cake celebrate'],['🍮','pudding custard flan'],
-      ['🍭','lollipop candy sweet'],['🍬','candy sweet'],['🍫','chocolate bar sweet'],
-      ['🍿','popcorn movie snack'],['🍩','doughnut donut sweet'],['🍪','cookie sweet bake'],
-      ['🌰','chestnut nut'],['🥜','peanut nut'],['🫛','pea pod vegetable green'],['🫚','ginger root spice'],['🍵','tea green cup hot'],
-      ['☕','coffee hot cup morning'],['🫖','teapot tea'],
-      ['🍺','beer mug drink'],['🍻','cheers beer clinking toast'],['🥂','champagne toast cheers celebrate'],
-      ['🍷','wine glass red drink'],['🥃','whiskey tumbler spirit drink'],['🍸','cocktail martini drink'],
-      ['🍹','tropical drink cocktail'],['🧃','juice box'],['🥤','cup straw drink soda'],
-      ['🧋','bubble tea boba drink'],['🍾','champagne bottle celebrate'],
-      ['🍏','green apple fruit'],['🍐','pear fruit'],['🍋‍🟩','lime green citrus'],
-      ['🍌','banana fruit'],['🍉','watermelon fruit'],['🫐','blueberries fruit'],['🍈','melon honeydew'],
-      ['🥥','coconut tropical'],['🍆','eggplant aubergine vegetable'],['🥑','avocado'],
-      ['🌶️','hot pepper chili spicy'],['🫑','bell pepper capsicum'],['🫒','olive'],
-      ['🧄','garlic'],['🧅','onion shallot'],['🥔','potato'],['🫜','root vegetable'],['🍠','sweet potato roasted'],
-      ['🥯','bagel bread'],['🥨','pretzel bread'],['🧈','butter dairy'],
-      ['🦴','bone dog'],['🫓','flatbread pita naan'],['🥪','sandwich'],['🧆','falafel'],['🫔','tamale wrap'],
-      ['🥗','salad green'],['🥘','paella shallow pan stew'],['🫕','fondue pot'],
-      ['🥫','canned food tin'],['🫙','jar preserve'],['🍲','stew pot food'],
-      ['🥟','dumpling gyoza'],['🦪','oyster seafood'],
-      ['🍘','rice cracker'],['🍥','fish cake swirl narutomaki'],['🥠','fortune cookie'],
-      ['🍢','oden skewer'],['🍧','shaved ice dessert'],['🍨','ice cream dessert'],
-      ['🍦','soft serve ice cream'],['🥧','pie shortcake dessert'],
-      ['🫘','beans legumes'],['🍯','honey pot sweet'],
-      ['🥛','milk glass drink'],['🫗','pouring liquid drink'],['🍼','baby bottle milk'],
-      ['🧉','mate drink herbal'],['🍶','sake japanese rice wine'],
-      ['🧊','ice cube cold'],['🥄','spoon utensil'],['🍴','fork knife utensil'],
-      ['🍽️','fork knife plate utensil'],['🥣','bowl spoon cereal'],['🥡','takeout box chinese'],
-      ['🥢','chopsticks asian'],['🧂','salt shaker seasoning'],
-    ]},
-    { icon: '🎉', title: 'Fun & Activities', emoji: [
-      ['🎉','party celebrate confetti'],['🎊','confetti ball celebrate'],
-      ['🎈','balloon party'],['🎁','gift present wrap'],['🎀','ribbon bow'],
-      ['🎆','fireworks celebrate'],['🎇','sparkler firework'],
-      ['🎭','theater drama masks arts'],['🎨','art paint palette creative'],
-      ['🎪','circus tent performance'],['🎢','roller coaster theme park'],
-      ['🎡','ferris wheel fair'],['🎠','carousel merry go round'],
-      ['🎯','bullseye target dart aim'],['🎳','bowling pins'],['🎲','dice game chance'],
-      ['🎮','game controller video gaming'],['🎰','slot machine gamble luck'],
-      ['🃏','joker card game wild'],['🀄','mahjong game tiles'],['♟️','chess pawn strategy'],
-      ['🎸','guitar music rock'],['🎹','piano keyboard music'],['🎻','violin music strings'],
-      ['🥁','drum music percussion'],['🎺','trumpet music brass'],['🪊','trombone brass instrument jazz slide music'],['🪗','accordion music'],['🪈','flute music woodwind'],['🪇','maracas music shaker'],
-      ['🎤','microphone sing karaoke'],['🎧','headphones music listen'],
-      ['🎬','clapper film movie action'],['🎟️','ticket event admission'],
-      ['🏆','trophy win champion'],['🥇','gold medal first place'],
-      ['🥈','silver medal second place'],['🥉','bronze medal third place'],['🏅','medal award'],
-      ['⚽','soccer football sport'],['🏀','basketball sport'],['🏈','football american sport'],
-      ['⚾','baseball sport'],['🎾','tennis sport'],['🏸','badminton sport'],
-      ['🏊','swimming swim sport'],['🏄','surf wave sport'],['🚴','cycling bike sport'],
-      ['🧘','yoga meditate calm'],['🤸','gymnastics cartwheel'],
-      ['💃','dance woman'],['🕺','dance man'],
-      ['🎃','halloween pumpkin jack lantern spooky'],['🎄','christmas tree holiday'],
-      ['🎑','moon viewing japanese'],['🎐','wind chime'],['🧨','firecracker chinese new year'],
-      ['🪅','piñata party'],['🪆','nesting doll matryoshka russian'],['🪄','magic wand trick'],
-      ['🥎','softball baseball sport'],['🏐','volleyball sport'],['🏉','rugby football sport'],
-      ['🥏','flying disc frisbee'],['🎱','billiards pool eight ball'],['🪀','yo-yo toy'],
-      ['🏓','table tennis ping pong'],['🏒','ice hockey stick puck'],['🏑','field hockey stick'],
-      ['🥍','lacrosse stick'],['🏏','cricket bat ball'],['🪃','boomerang throw'],
-      ['🥅','goal net sport'],['⛳','golf hole flag'],['🪁','slingshot catapult'],
-      ['🛝','playground slide'],['🏹','bow arrow archery'],['🎣','fishing rod fish'],
-      ['🤿','diving mask snorkel scuba'],['🥊','boxing glove punch'],['🥋','martial arts kimono karate'],
-      ['🎽','running shirt athletics'],['🛹','skateboard skate'],['🛼','roller skate'],
-      ['🛷','sled sledge'],['⛸️','ice skate figure skating'],['🥌','curling stone'],
-      ['🎿','ski skiing snow'],['⛷️','skier skiing'],['🏂','snowboarder snowboard'],
-      ['🪂','parachute skydive'],['🏋️','weight lifting gym'],['🤼','wrestling sport'],
-      ['⛹️','basketball bouncing sport'],['🤺','fencing sword sport'],['🤾','handball sport'],
-      ['🏌️','golf golfer'],['🏇','horse racing jockey'],['🤽','water polo sport'],
-      ['🚣','rowing boat row'],['🧗','climbing rock wall'],['🚵','mountain biking cycling'],
-      ['🎖️','military medal award'],['🏵️','rosette award decoration'],['🎗️','ribbon awareness'],
-      ['🎫','ticket stub event'],['🤹','juggling circus performance'],['🩰','ballet shoe dance'],
-      ['🫟','splatter liquid'],['🎼','musical score sheet music'],['🪘','long drum bongo'],
-      ['🎷','saxophone sax jazz'],['🪕','banjo string music'],['🪉','harp string music'],
-      ['🧩','puzzle piece jigsaw'],
-    ]},
-    { icon: '💫', title: 'Symbols', emoji: [
-      ['✅','check mark done yes correct'],['❌','cross mark no wrong incorrect'],
-      ['❓','question mark unknown'],['❗','exclamation mark important'],['‼️','double exclamation urgent'],
-      ['💯','hundred percent perfect score'],['🔥','fire hot trending lit'],['⚡','lightning bolt fast energy'],
-      ['💧','water drop'],['💨','dash wind blow'],['💎','diamond gem jewel precious'],
-      ['🔮','crystal ball magic fortune'],['🧿','nazar evil eye amulet protection'],
-      ['💡','light bulb idea'],['🕯️','candle flame light romantic'],['⚠️','warning caution danger'],
-      ['🚫','no prohibited banned'],['⛔','stop no entry'],['🔞','no under 18 adult explicit'],
-      ['💤','sleep zzz tired'],['💢','anger symbol frustrated'],['💥','explosion boom impact'],
-      ['💦','water sweat splash'],['💫','dizzy star spin'],
-      ['💬','speech bubble chat message'],['💭','thought bubble thinking'],['🗯️','anger bubble shout'],
-      ['✉️','envelope mail letter send'],['📩','email incoming'],
-      ['📱','phone mobile cell'],['💻','laptop computer'],['⌚','watch clock time'],
-      ['📷','camera photo picture'],['🔑','key unlock access'],['🔒','lock secure private'],
-      ['🔔','bell notification alert'],['📢','loudspeaker announce'],
-      ['♥️','heart suit card'],['♠️','spade suit card'],
-      ['♦️','diamond suit card'],['♣️','club suit card'],
-      ['🔴','red circle'],['🟠','orange circle'],['🟡','yellow circle'],
-      ['🟢','green circle'],['🔵','blue circle'],['🟣','purple circle'],
-      ['⚫','black circle'],['⚪','white circle'],
-      ['🏳️','white flag surrender'],['🏴','black flag pirate'],['🚩','red flag warning'],
-      ['🆗','ok button'],['🆙','up button'],['🆒','cool button'],['🆕','new button fresh'],
-      ['🆓','free button gratis'],['🔅','dim brightness low'],['🔆','bright brightness high'],
-      ['📶','signal bars wifi'],['🛜','wireless wifi signal'],['♾️','infinity forever'],['⚜️','fleur de lis gold'],
-      ['🪯','khanda sikh symbol'],['🪭','folding fan hand'],['🪮','hair pick comb afro'],
-      ['🔱','trident symbol poseidon'],['☯️','yin yang balance'],['☮️','peace symbol'],
-      ['✝️','cross christian'],['☪️','star crescent muslim'],['🕉️','om hindu'],
-      ['☸️','dharma wheel buddhist'],['✡️','star of david jewish'],
-      ['🔯','dotted six-pointed star'],['🕎','menorah hanukkah jewish'],
-      ['☦️','orthodox cross christian'],['🛐','place of worship religion'],
-      ['⛎','ophiuchus zodiac'],['♈','aries zodiac'],['♉','taurus zodiac'],
-      ['♊','gemini zodiac'],['♋','cancer zodiac'],['♌','leo zodiac'],
-      ['♍','virgo zodiac'],['♎','libra zodiac'],['♏','scorpio zodiac'],
-      ['♐','sagittarius zodiac'],['♑','capricorn zodiac'],['♒','aquarius zodiac'],
-      ['♓','pisces zodiac'],
-      ['🆔','id button'],['⚛️','atom science'],['☢️','radioactive hazard'],['☣️','biohazard'],
-      ['📴','phone off'],['📳','vibration mode'],
-      ['🈶','japanese not free'],['🈚','japanese free'],['🈸','japanese apply'],
-      ['🈺','japanese open'],['🈷️','japanese monthly'],['✴️','eight pointed star'],
-      ['🆚','vs versus'],['🉐','japanese bargain'],['㊙️','japanese secret'],
-      ['㊗️','japanese congratulations'],['🈴','japanese passing'],['🈵','japanese no vacancy'],
-      ['🈹','japanese discount'],['🈲','japanese prohibited'],
-      ['🅰️','blood type a'],['🅱️','blood type b'],['🆎','ab blood type'],
-      ['🆑','cl button'],['🅾️','blood type o'],['🆘','sos emergency'],
-      ['⭕','hollow red circle'],['🛑','stop sign octagon'],['📛','name badge'],
-      ['♨️','hot springs onsen'],['🚷','no pedestrians'],['🚯','no littering'],
-      ['🚳','no bicycles'],['🚱','non-potable water'],['📵','no mobile phones'],
-      ['🚭','no smoking'],['❕','white exclamation'],['❔','white question'],['⁉️','exclamation question'],
-      ['〽️','part alternation mark'],['🚸','children crossing'],
-      ['🔰','beginner japanese'],['♻️','recycling recycle'],
-      ['🈯','japanese reserved'],['💹','chart yen'],['❇️','sparkle star'],
-      ['✳️','eight spoked asterisk'],['❎','cross mark button'],['🌐','globe internet web'],
-      ['💠','diamond blue'],['Ⓜ️','circled m metro'],
-      ['🏧','atm cash machine'],['🚾','water closet wc restroom'],
-      ['♿','wheelchair accessible disability'],['🅿️','parking'],['🛗','elevator lift'],
-      ['🈳','japanese vacancy'],['🈂️','japanese service charge'],
-      ['🛂','passport control'],['🛃','customs'],['🛄','baggage claim'],['🛅','left luggage'],
-      ['🚹','mens bathroom'],['🚺','womens bathroom'],['🚼','baby bathroom'],
-      ['🚻','restroom bathroom'],['🚮','litter bin'],['🎦','cinema film'],
-      ['🔣','input symbols'],['ℹ️','information'],['🔤','abc letters'],
-      ['🔡','abc lowercase'],['🔠','abc uppercase'],['🆖','ng not good'],
-      ['0️⃣','zero keycap'],['1️⃣','one keycap'],['2️⃣','two keycap'],
-      ['3️⃣','three keycap'],['4️⃣','four keycap'],['5️⃣','five keycap'],
-      ['6️⃣','six keycap'],['7️⃣','seven keycap'],['8️⃣','eight keycap'],
-      ['9️⃣','nine keycap'],['🔟','ten keycap'],['🔢','1234 numbers'],
-      ['#️⃣','hash keycap number'],['*️⃣','asterisk keycap'],
-      ['⏏️','eject button'],['▶️','play button'],['⏸️','pause button'],
-      ['⏯️','play pause toggle'],['⏹️','stop button'],['⏺️','record button'],
-      ['⏭️','next track skip'],['⏮️','previous track'],['⏩','fast forward'],
-      ['⏪','rewind fast back'],['⏫','fast up'],['⏬','fast down'],
-      ['◀️','reverse left'],['🔼','up button'],['🔽','down button'],
-      ['➡️','right arrow'],['⬅️','left arrow'],['⬆️','up arrow'],['⬇️','down arrow'],
-      ['↗️','up right arrow'],['↘️','down right arrow'],['↙️','down left arrow'],['↖️','up left arrow'],
-      ['↕️','up down arrow'],['↔️','left right arrow'],
-      ['↪️','left arrow curving right'],['↩️','right arrow curving left'],
-      ['⤴️','right arrow curving up'],['⤵️','right arrow curving down'],
-      ['🔀','shuffle random'],['🔁','repeat loop'],['🔂','repeat once'],
-      ['🔄','counterclockwise refresh'],['🔃','clockwise arrows'],
-      ['🎵','musical note'],['🎶','musical notes'],
-      ['➕','plus add'],['➖','minus subtract'],['➗','divide division'],
-      ['✖️','multiply times cross'],['🟰','equals sign'],['💲','dollar sign'],
-      ['💱','currency exchange'],['™️','trademark tm'],['©️','copyright'],['®️','registered'],
-      ['〰️','wavy dash'],['➰','curly loop'],['➿','double curly loop'],
-      ['🔚','end back arrow'],['🔙','back arrow'],['🔛','on arrow'],
-      ['🔝','top arrow'],['🔜','soon arrow'],['✔️','check mark heavy'],['☑️','check box tick'],
-      ['🔘','radio button'],
-      ['🟤','brown circle'],['🔺','red triangle up'],['🔻','red triangle down'],
-      ['🔸','small orange diamond'],['🔹','small blue diamond'],
-      ['🔶','large orange diamond'],['🔷','large blue diamond'],
-      ['🔳','white square button'],['🔲','black square button'],
-      ['▪️','black small square'],['▫️','white small square'],
-      ['◾','black medium small square'],['◽','white medium small square'],
-      ['◼️','black medium square'],['◻️','white medium square'],
-      ['⬛','black large square'],['⬜','white large square'],
-      ['🟧','orange square'],['🟦','blue square'],['🟥','red square'],
-      ['🟫','brown square'],['🟪','purple square'],['🟩','green square'],['🟨','yellow square'],
-      ['🔈','speaker low'],['🔇','muted speaker'],['🔉','speaker medium'],
-      ['🔊','speaker loud volume'],['🔕','bell muted no'],['📣','megaphone cheer'],
-      ['🗨️','speech bubble left'],
-      ['🎴','flower playing card'],
-      ['🕐','one oclock time'],['🕑','two oclock time'],['🕒','three oclock time'],
-      ['🕓','four oclock time'],['🕔','five oclock time'],['🕕','six oclock time'],
-      ['🕖','seven oclock time'],['🕗','eight oclock time'],['🕘','nine oclock time'],
-      ['🕙','ten oclock time'],['🕚','eleven oclock time'],['🕛','twelve oclock time'],
-      ['🕜','one thirty time'],['🕝','two thirty time'],['🕞','three thirty time'],
-      ['🕟','four thirty time'],['🕠','five thirty time'],['🕡','six thirty time'],
-      ['🕢','seven thirty time'],['🕣','eight thirty time'],['🕤','nine thirty time'],
-      ['🕥','ten thirty time'],['🕦','eleven thirty time'],['🕧','twelve thirty time'],
-      ['♀️','female sign woman'],['♂️','male sign man'],['⚧','transgender symbol'],
-      ['⚕️','medical symbol caduceus'],
-    ]},
-    { icon: '📱', title: 'Objects', emoji: [
-      ['⌚','watch clock wrist'],['📱','phone mobile cell'],['📲','phone arrow call'],
-      ['💻','laptop computer'],['⌨️','keyboard type'],['🖥️','desktop monitor computer'],
-      ['🖨️','printer'],['🖱️','mouse computer'],['🖲️','trackball'],
-      ['🕹️','joystick game controller'],['🗜️','clamp compression'],
-      ['💽','minidisc floppy old'],['💾','floppy disk save old'],['💿','cd disc'],
-      ['📀','dvd disc'],['📼','videocassette vhs tape'],
-      ['📷','camera photo'],['📸','camera flash selfie'],['📹','video camera film'],
-      ['🎥','movie camera cinema'],['📽️','film projector cinema'],['🎞️','film strip frames'],
-      ['📞','telephone receiver'],['☎️','telephone old rotary'],['📟','pager beeper'],
-      ['📠','fax machine'],['📺','television tv screen'],['📻','radio'],
-      ['🎙️','studio microphone podcast'],['🎚️','level slider audio'],['🎛️','control knobs audio'],
-      ['🧭','compass navigation'],['⏱️','stopwatch timer'],['⏲️','timer clock'],
-      ['⏰','alarm clock wake'],['🕰️','mantelpiece clock'],['⌛','hourglass done'],
-      ['⏳','hourglass sand time'],['📡','satellite dish antenna signal'],
-      ['🔋','battery charge'],['🪫','low battery dead'],['🔌','plug electric power'],
-      ['💡','light bulb idea'],['🔦','flashlight torch'],['🕯️','candle flame light'],
-      ['🪔','oil lamp diya'],['🧯','fire extinguisher safety'],['🛢️','oil drum barrel'],
-      ['💸','money wings flying cash'],['💵','dollar bill usd'],['💴','yen bill jpy'],
-      ['💶','euro bill eur'],['💷','pound sterling gbp'],['🪙','coin money'],
-      ['💰','money bag cash'],['💳','credit card payment'],['🪪','id card identity badge'],
-      ['💎','gem diamond jewel'],['🪎','treasure chest gems gold loot wealth prize'],['⚖️','balance scale justice'],['🪜','ladder climb'],
-      ['🧰','toolbox tools'],['🪛','screwdriver tool'],['🔧','wrench spanner tool'],
-      ['🔨','hammer tool'],['⚒️','hammer pick tool'],['🛠️','hammer wrench repair'],
-      ['⛏️','pick axe mine'],['🪏','trowel garden'],['🪚','saw wood carpentry'],
-      ['🔩','bolt nut screw'],['⚙️','gear cog settings'],['🪤','mousetrap snap'],
-      ['🧱','brick wall building'],['⛓️','chain link'],['⛓️‍💥','broken chain free freedom'],['🧲','magnet attract'],
-      ['🔫','gun pistol water squirt'],['💣','bomb explosion'],['🪓','axe hatchet chop'],
-      ['🔪','knife kitchen dagger'],['🗡️','dagger sword'],['⚔️','crossed swords battle'],
-      ['🛡️','shield protect defend'],['🚬','cigarette smoking'],
-      ['⚰️','coffin funeral death'],['🪦','gravestone tombstone rip'],
-      ['⚱️','urn funeral ashes'],['🏺','amphora ancient vase'],
-      ['🔮','crystal ball magic fortune'],['📿','prayer beads rosary'],
-      ['🧿','nazar evil eye amulet'],['🪬','hamsa hand protection'],['💈','barber pole hair'],
-      ['⚗️','alembic chemistry flask'],['🔭','telescope astronomy space'],
-      ['🔬','microscope science lab'],['🕳️','hole empty'],
-      ['🩻','x-ray scan medical'],['🩹','bandage plaster wound'],['🩺','stethoscope doctor'],
-      ['💊','pill medicine tablet drug'],['💉','syringe injection needle'],
-      ['🩸','blood drop medical'],['🧬','dna genetics'],
-      ['🦠','microbe germ bacteria virus'],['🧫','petri dish lab culture'],
-      ['🧪','test tube lab experiment'],['🌡️','thermometer temperature fever'],
-      ['🧹','broom sweep clean'],['🪠','plunger toilet unclog'],
-      ['🧺','basket laundry'],['🧻','toilet paper roll'],['🚽','toilet bathroom'],
-      ['🚰','faucet tap water'],['🚿','shower bathroom'],['🛁','bathtub bath'],
-      ['🧼','soap clean wash'],['🪥','toothbrush teeth'],['🪒','razor shave'],
-      ['🧽','sponge clean scrub'],['🪣','bucket pail water'],['🧴','lotion cream bottle'],
-      ['🛎️','bell service hotel'],['🔑','key unlock door'],['🗝️','old key antique'],
-      ['🚪','door entry exit'],['🪑','chair seat furniture'],['🛋️','couch sofa furniture'],
-      ['🛏️','bed sleep furniture'],['🧸','teddy bear toy stuffed'],
-      ['🖼️','picture frame art painting'],['🪞','mirror reflection'],['🪟','window'],
-      ['🛍️','shopping bags retail'],['🛒','shopping cart trolley'],
-      ['🎈','balloon party'],['🎏','carp streamer decoration'],['🎎','japanese dolls hina'],
-      ['🏮','red lantern chinese'],['🪩','disco ball dance party'],['🧧','red envelope hongbao'],
-      ['✉️','envelope mail letter'],['📩','email incoming'],['📨','incoming envelope'],
-      ['📧','email electronic mail'],['📥','inbox tray'],['📤','outbox tray'],
-      ['📦','package box parcel'],['🏷️','label tag price'],['🪧','placard sign'],
-      ['📪','mailbox empty closed'],['📫','mailbox full closed'],
-      ['📬','mailbox full open'],['📭','mailbox empty open'],
-      ['📮','postbox pillar red'],['📯','postal horn bugle'],
-      ['📜','scroll ancient document'],['📃','page curl document'],['📄','page document'],
-      ['📑','bookmark tabs document'],['🧾','receipt bill payment'],
-      ['📊','bar chart graph data'],['📈','chart up growth'],['📉','chart down decline'],
-      ['🗒️','notepad spiral memo'],['🗓️','calendar spiral planner'],
-      ['📆','tearoff calendar date'],['📅','calendar date'],['🗑️','wastebasket trash delete'],
-      ['📇','card index rolodex'],['🗃️','card file box'],['🗳️','ballot box vote'],
-      ['🗄️','file cabinet drawer'],['📋','clipboard document'],
-      ['📁','file folder'],['📂','open folder files'],['🗂️','card index dividers'],
-      ['🗞️','newspaper rolled'],['📰','newspaper press'],
-      ['📓','notebook'],['📔','notebook cover'],['📒','ledger book'],
-      ['📕','book red closed'],['📗','book green'],['📘','book blue'],
-      ['📙','book orange'],['📚','books stack library'],['📖','open book read'],
-      ['🔖','bookmark'],['🧷','safety pin'],['🔗','link chain hyperlink'],
-      ['📎','paperclip attach'],['🖇️','paperclips linked'],
-      ['📐','triangular ruler geometry'],['📏','ruler measure'],['🧮','abacus calculate'],
-      ['📌','pushpin pinned map'],['📍','round pushpin location'],['✂️','scissors cut'],
-      ['🖊️','pen write'],['🖋️','fountain pen write'],['✒️','black nib pen'],
-      ['🖌️','paintbrush art'],['🖍️','crayon color draw'],['📝','memo note write'],
-      ['✏️','pencil write draw'],['🔍','magnifying glass search left'],
-      ['🔎','magnifying glass search right'],['🔏','locked pen'],
-      ['🔐','locked key secure'],['🔒','locked secure'],['🔓','unlocked open'],
-    ]},
-    { icon: '✈️', title: 'Travel & Places', emoji: [
-      ['🚗','automobile car driving vehicle'],['🚕','taxi cab car'],['🚙','car suv automobile'],['🛻','pickup truck'],
-      ['🚐','minibus van'],['🚌','bus transit'],['🚎','trolleybus'],
-      ['🏎️','racing car formula one'],['🚓','police car cop'],['🚑','ambulance emergency'],
-      ['🚒','fire truck engine'],['🚚','delivery truck'],['🚛','articulated lorry semi truck'],
-      ['🚜','tractor farm'],['🛴','kick scooter'],['🚲','bicycle bike'],
-      ['🛵','motor scooter moped'],['🏍️','motorcycle motorbike'],['🛺','auto rickshaw tuk tuk'],
-      ['🛞','wheel tire'],['🚨','siren police light emergency'],
-      ['🚔','oncoming police car'],['🚍','oncoming bus'],['🚘','oncoming car'],['🚖','oncoming taxi'],
-      ['🦯','white cane blind mobility'],['🦽','manual wheelchair disability'],
-      ['🦼','motorized wheelchair disability'],['🩼','crutch mobility aid'],
-      ['🚡','aerial tramway cable car'],['🚠','mountain cableway'],['🚟','suspension railway'],
-      ['🚃','railway car train'],['🚋','tram car'],['🚞','mountain railway'],
-      ['🚝','monorail'],['🚄','bullet train shinkansen high speed'],['🚅','bullet train fast'],
-      ['🚈','light rail'],['🚂','steam locomotive train'],['🚆','train'],
-      ['🚇','metro subway underground'],['🚊','tram streetcar'],['🚉','station train'],
-      ['✈️','airplane plane flight travel'],['🛫','takeoff departure airplane'],
-      ['🛬','landing arrival airplane'],['🛩️','small plane aircraft'],
-      ['💺','seat airplane chair'],['🛰️','satellite space orbit'],
-      ['🚀','rocket space launch'],['🛸','ufo flying saucer'],['🚁','helicopter'],
-      ['🛶','canoe kayak boat'],['⛵','sailboat sailing'],['🚤','speedboat motorboat'],
-      ['🛥️','motor boat'],['🛳️','passenger ship cruise'],['⛴️','ferry boat'],
-      ['🚢','ship cruise liner'],['🛟','life ring preserver safety'],
-      ['⚓','anchor ship port'],['🪝','hook crane'],['⛽','fuel pump gas station'],
-      ['🚧','construction barrier roadwork'],['🚦','traffic light vertical'],
-      ['🚥','traffic light horizontal'],['🚏','bus stop'],['🗺️','world map travel'],
-      ['🗿','moai easter island statue'],['🗽','statue of liberty new york'],
-      ['🗼','tokyo tower japan'],['🏰','castle european'],['🏯','japanese castle'],
-      ['🏟️','stadium arena sports'],['⛲','fountain park'],['⛱️','umbrella beach sun'],
-      ['🏖️','beach sand ocean'],['🏜️','desert dry arid'],['🗻','mount fuji japan'],
-      ['🏕️','camping tent outdoors'],['⛺','tent camping'],
-      ['🏠','house home'],['🏡','house garden home'],['🏘️','houses neighborhood'],
-      ['🏚️','derelict house abandoned'],['🛖','hut cabin'],['🏗️','building construction'],
-      ['🏭','factory industrial'],['🏢','office building'],['🏬','department store shopping'],
-      ['🏣','japanese post office'],['🏤','post office'],['🏥','hospital medical'],
-      ['🏦','bank finance'],['🏨','hotel lodging'],['🏪','convenience store shop'],
-      ['🏫','school education'],['🏩','love hotel'],['🏛️','classical building pillars'],
-      ['⛪','church christian'],['🕌','mosque islam muslim'],['🕍','synagogue jewish'],
-      ['🛕','hindu temple'],['🕋','kaaba mecca islam'],['⛩️','shinto shrine japanese'],
-      ['🛤️','railway track'],['🛣️','motorway highway road'],['🗾','japan map island'],
-      ['🏞️','national park landscape'],['🌇','sunset city buildings'],
-      ['🌆','city at dusk buildings'],['🏙️','cityscape skyline'],
-      ['🌃','night city stars'],['🌉','bridge night city'],['🌁','foggy bridge'],
-    ]},
-    { icon: '👗', title: 'Clothing', emoji: [
-      ['🧥','coat jacket outerwear'],['🥼','lab coat doctor'],['🦺','safety vest hi-vis'],
-      ['👔','necktie dress shirt suit'],['👗','dress woman'],['👘','kimono japanese'],
-      ['🥻','sari india'],['👙','bikini swimwear'],['🩱','one-piece swimsuit'],
-      ['👚','womens top clothes'],['👕','t-shirt tee'],['👖','jeans pants denim'],
-      ['🩲','briefs underwear'],['🩳','shorts'],
-      ['👠','high heel shoe stiletto'],['👡','sandal womens shoe'],['👢','boot womans'],
-      ['👞','oxford dress shoe mens'],['👟','sneaker trainer running shoe'],
-      ['🥾','hiking boot trail'],['🩴','thong sandal flip flop'],['🥿','flat shoe ballet'],
-      ['🧦','socks'],['🧤','gloves mittens'],['🧣','scarf'],
-      ['🎩','top hat fancy'],['🧢','baseball cap hat billed'],['👒','sun hat womans'],
-      ['🎓','graduation cap mortarboard'],['⛑️','rescue helmet hard hat'],['🪖','military helmet'],
-      ['👑','crown king queen royal'],
-      ['👓','glasses spectacles'],['🕶️','sunglasses cool shades'],['🥽','goggles safety'],
-      ['👜','handbag purse'],['👛','coin purse wallet'],['👝','clutch bag pouch'],
-      ['💼','briefcase work business'],['🎒','backpack rucksack school'],['🧳','luggage suitcase travel'],
-      ['🌂','umbrella closed rain'],
-      ['🪢','knot rope'],['🧶','yarn ball wool knit'],['🧵','thread sewing needle'],['🪡','sewing needle thread'],
-    ]},
-    { icon: '🚩', title: 'Flags', emoji: [
-      ['🏳️','white flag surrender'],['🏴','black flag'],['🏴‍☠️','pirate flag skull crossbones jolly roger'],
-      ['🏁','chequered flag racing finish'],['🚩','red flag warning'],
-      ['🏳️‍🌈','rainbow flag pride lgbtq gay'],['🏳️‍⚧️','transgender flag trans pride'],
-      ['🎌','crossed flags japan'],
-      ['🇺🇳','united nations un'],
-      ['🇦🇫','afghanistan'],['🇦🇽','aland islands'],['🇦🇱','albania'],['🇩🇿','algeria'],
-      ['🇦🇸','american samoa'],['🇦🇩','andorra'],['🇦🇴','angola'],['🇦🇮','anguilla'],
-      ['🇦🇶','antarctica'],['🇦🇬','antigua barbuda'],['🇦🇷','argentina'],
-      ['🇦🇲','armenia'],['🇦🇼','aruba'],['🇦🇺','australia'],['🇦🇹','austria'],['🇦🇿','azerbaijan'],
-      ['🇧🇸','bahamas'],['🇧🇭','bahrain'],['🇧🇩','bangladesh'],['🇧🇧','barbados'],
-      ['🇧🇾','belarus'],['🇧🇪','belgium'],['🇧🇿','belize'],['🇧🇯','benin'],['🇧🇲','bermuda'],
-      ['🇧🇹','bhutan'],['🇧🇴','bolivia'],['🇧🇦','bosnia herzegovina'],['🇧🇼','botswana'],
-      ['🇧🇷','brazil'],['🇮🇴','british indian ocean territory'],['🇻🇬','british virgin islands'],
-      ['🇧🇳','brunei'],['🇧🇬','bulgaria'],['🇧🇫','burkina faso'],['🇧🇮','burundi'],
-      ['🇰🇭','cambodia'],['🇨🇲','cameroon'],['🇨🇦','canada'],['🇮🇨','canary islands'],
-      ['🇨🇻','cape verde cabo verde'],['🇧🇶','caribbean netherlands'],['🇰🇾','cayman islands'],
-      ['🇨🇫','central african republic car'],['🇹🇩','chad'],['🇨🇱','chile'],['🇨🇳','china'],
-      ['🇨🇽','christmas island'],['🇨🇨','cocos keeling islands'],['🇨🇴','colombia'],
-      ['🇰🇲','comoros'],['🇨🇬','congo republic'],['🇨🇩','congo democratic republic drc'],
-      ['🇨🇰','cook islands'],['🇨🇷','costa rica'],['🇨🇮','ivory coast cote divoire'],
-      ['🇭🇷','croatia'],['🇨🇺','cuba'],['🇨🇼','curacao'],['🇨🇾','cyprus'],['🇨🇿','czech czechia'],
-      ['🇩🇰','denmark'],['🇩🇯','djibouti'],['🇩🇲','dominica'],['🇩🇴','dominican republic'],
-      ['🇪🇨','ecuador'],['🇪🇬','egypt'],['🇸🇻','el salvador'],['🇬🇶','equatorial guinea'],
-      ['🇪🇷','eritrea'],['🇪🇪','estonia'],['🇸🇿','eswatini swaziland'],['🇪🇹','ethiopia'],
-      ['🇪🇺','european union eu europe'],
-      ['🇫🇰','falkland islands malvinas'],['🇫🇴','faroe islands'],['🇫🇯','fiji'],
-      ['🇫🇮','finland'],['🇫🇷','france'],['🇬🇫','french guiana'],['🇵🇫','french polynesia'],
-      ['🇹🇫','french southern territories'],
-      ['🇬🇦','gabon'],['🇬🇲','gambia'],['🇬🇪','georgia'],['🇩🇪','germany'],['🇬🇭','ghana'],
-      ['🇬🇮','gibraltar'],['🇬🇷','greece'],['🇬🇱','greenland'],['🇬🇩','grenada'],
-      ['🇬🇵','guadeloupe'],['🇬🇺','guam'],['🇬🇹','guatemala'],['🇬🇬','guernsey'],
-      ['🇬🇳','guinea'],['🇬🇼','guinea-bissau'],['🇬🇾','guyana'],
-      ['🇭🇹','haiti'],['🇭🇳','honduras'],['🇭🇰','hong kong'],['🇭🇺','hungary'],
-      ['🇮🇸','iceland'],['🇮🇳','india'],['🇮🇩','indonesia'],['🇮🇷','iran'],['🇮🇶','iraq'],
-      ['🇮🇪','ireland'],['🇮🇲','isle of man'],['🇮🇱','israel'],['🇮🇹','italy'],
-      ['🇯🇲','jamaica'],['🇯🇵','japan'],['🇯🇪','jersey'],['🇯🇴','jordan'],
-      ['🇰🇿','kazakhstan'],['🇰🇪','kenya'],['🇰🇮','kiribati'],['🇽🇰','kosovo'],
-      ['🇰🇼','kuwait'],['🇰🇬','kyrgyzstan'],
-      ['🇱🇦','laos'],['🇱🇻','latvia'],['🇱🇧','lebanon'],['🇱🇸','lesotho'],['🇱🇷','liberia'],
-      ['🇱🇾','libya'],['🇱🇮','liechtenstein'],['🇱🇹','lithuania'],['🇱🇺','luxembourg'],
-      ['🇲🇴','macao macau'],['🇲🇰','north macedonia'],['🇲🇬','madagascar'],['🇲🇼','malawi'],
-      ['🇲🇾','malaysia'],['🇲🇻','maldives'],['🇲🇱','mali'],['🇲🇹','malta'],
-      ['🇲🇭','marshall islands'],['🇲🇶','martinique'],['🇲🇷','mauritania'],['🇲🇺','mauritius'],
-      ['🇾🇹','mayotte'],['🇲🇽','mexico'],['🇫🇲','micronesia'],['🇲🇩','moldova'],
-      ['🇲🇨','monaco'],['🇲🇳','mongolia'],['🇲🇪','montenegro'],['🇲🇸','montserrat'],
-      ['🇲🇦','morocco'],['🇲🇿','mozambique'],['🇲🇲','myanmar burma'],
-      ['🇳🇦','namibia'],['🇳🇷','nauru'],['🇳🇵','nepal'],['🇳🇱','netherlands holland'],
-      ['🇳🇨','new caledonia'],['🇳🇿','new zealand'],['🇳🇮','nicaragua'],['🇳🇪','niger'],
-      ['🇳🇬','nigeria'],['🇳🇺','niue'],['🇳🇫','norfolk island'],['🇰🇵','north korea'],
-      ['🇲🇵','northern mariana islands'],['🇳🇴','norway'],
-      ['🇴🇲','oman'],
-      ['🇵🇰','pakistan'],['🇵🇼','palau'],['🇵🇸','palestine'],['🇵🇦','panama'],
-      ['🇵🇬','papua new guinea png'],['🇵🇾','paraguay'],['🇵🇪','peru'],['🇵🇭','philippines'],
-      ['🇵🇳','pitcairn islands'],['🇵🇱','poland'],['🇵🇹','portugal'],['🇵🇷','puerto rico'],
-      ['🇶🇦','qatar'],
-      ['🇷🇪','reunion'],['🇷🇴','romania'],['🇷🇺','russia'],['🇷🇼','rwanda'],
-      ['🇧🇱','saint barthelemy'],['🇸🇭','saint helena'],['🇰🇳','saint kitts nevis'],
-      ['🇱🇨','saint lucia'],['🇵🇲','saint pierre miquelon'],['🇻🇨','saint vincent grenadines'],
-      ['🇼🇸','samoa'],['🇸🇲','san marino'],['🇸🇹','sao tome principe'],['🇨🇶','sark'],
-      ['🇸🇦','saudi arabia'],['🇸🇳','senegal'],['🇷🇸','serbia'],['🇸🇨','seychelles'],
-      ['🇸🇱','sierra leone'],['🇸🇬','singapore'],['🇸🇽','sint maarten'],['🇸🇰','slovakia'],
-      ['🇸🇮','slovenia'],['🇸🇧','solomon islands'],['🇸🇴','somalia'],['🇿🇦','south africa'],
-      ['🇬🇸','south georgia south sandwich islands'],['🇰🇷','south korea'],['🇸🇸','south sudan'],
-      ['🇪🇸','spain'],['🇱🇰','sri lanka'],['🇸🇩','sudan'],['🇸🇷','suriname'],
-      ['🇸🇪','sweden'],['🇨🇭','switzerland'],['🇸🇾','syria'],
-      ['🇹🇼','taiwan'],['🇹🇯','tajikistan'],['🇹🇿','tanzania'],['🇹🇭','thailand'],
-      ['🇹🇱','timor-leste east timor'],['🇹🇬','togo'],['🇹🇰','tokelau'],['🇹🇴','tonga'],
-      ['🇹🇹','trinidad tobago'],['🇹🇳','tunisia'],['🇹🇷','turkey turkiye'],
-      ['🇹🇲','turkmenistan'],['🇹🇨','turks caicos islands'],['🇹🇻','tuvalu'],
-      ['🇺🇬','uganda'],['🇺🇦','ukraine'],['🇦🇪','united arab emirates uae'],
-      ['🇬🇧','united kingdom uk britain'],['🏴󠁧󠁢󠁥󠁮󠁧󠁿','england'],['🏴󠁧󠁢󠁳󠁣󠁴󠁿','scotland'],['🏴󠁧󠁢󠁷󠁬󠁳󠁿','wales'],
-      ['🇺🇸','united states usa america'],['🇻🇮','us virgin islands'],['🇺🇲','us outlying islands'],
-      ['🇺🇾','uruguay'],['🇺🇿','uzbekistan'],
-      ['🇻🇺','vanuatu'],['🇻🇦','vatican city holy see'],['🇻🇪','venezuela'],['🇻🇳','vietnam'],
-      ['🇼🇫','wallis futuna'],['🇪🇭','western sahara'],
-      ['🇾🇪','yemen'],
-      ['🇿🇲','zambia'],['🇿🇼','zimbabwe'],
-      ['🇦🇨','ascension island'],['🇧🇻','bouvet island'],['🇨🇵','clipperton island'],
-      ['🇪🇦','ceuta melilla'],['🇩🇬','diego garcia'],['🇭🇲','heard mcdonald islands'],
-      ['🇲🇫','saint martin'],['🇸🇯','svalbard jan mayen'],['🇹🇦','tristan da cunha'],
-    ]},
-    { icon: 'ツ', title: 'Text Art', type: 'text', emoji: [
-      ['╰⋃╯',                          'penis'],
-      ['(ᶅ͒)',                           'vagina'],
-      ['（ ͜•人 ͜•）',                   'boobs'],
-      ['（ ͜.人 ͜.）',                   'large boobs'],
-      ['( . 人 . )',                     'saggy boobs'],
-      ['(‿ˠ‿)',                          'ass'],
-      ['𝔾𝕆𝕆𝔻 𝔹𝕆𝕐',                  'good boy'],
-      ['𝔾𝕆𝕆𝔻 𝔾𝕀ℝ𝕃',                 'good girl'],
-      ['b( • )( • )bies',               'boobies'],
-      ['𝒫𝓁ℯ𝒶𝓈ℯ 𝒹𝒶𝒹𝒹𝓎',             'please daddy'],
-      ['✨ 𝓦𝓮𝓵𝓬𝓸𝓂𝓮 ✨',              'welcome'],
-      ['★𝒲ℯ𝓉 𝒹𝓇ℯ𝒶𝓂𝓈★',             'wet dreams'],
-      ['¯\\_(ツ)_/¯',                   'ascii shrug'],
-      ['ᕦ(ò_óˇ)ᕤ',                     'flex'],
-      ['⚞^. .^⚟',                      'ascii cat'],
-      ['𝄃𝄂𝄀𝄁𝄃𝄂𝄂𝄃',                  'barcode'],
-      ['𒅌',                             'ascii shark'],
-      ['𝓴𝓲𝓼𝓼 𝓶𝒆 𝓹𝓵𝒆𝓪𝓼𝒆',          'kiss me please'],
-      ['¡ᶠᶸᶜᵏᵧₒᵤ!',                    'fuck you'],
-      ['ℬ𝒾𝓽𝓬𝒽',                       'bitch'],
-      ['𓆩🖤𓆪',                         'winged heart'],
-      ['I ♡ ( . )( . )',                'i love boobs'],
-      ['(,,•᷄ࡇ•᷅ ,,)?',               'confused'],
-      ['kiss my ( ㅅ )',                 'kiss my ass'],
-      ['⁶🤷⁷',                          '67'],
-      ['♡𝑰 𝒍𝒐𝒗𝒆 𝒚𝒐𝒖𝒖♡',             'i love you'],
-      ['₊𖥔 ℓo͟v͟ꫀ ყoυ! ۪ ׄ໑୧ ׅ𖥔ׄ', 'love you'],
-      ['꧁Good morning ꧂',              'good morning'],
-      ['ه 🅾 𝐈𝐧𝐬𝐭𝐚𝐠𝐫𝐚𝐦 ★',          'instagram'],
-      ['𝓑𝓮𝓼𝓽𝓲𝓮🌹',                    'bestie'],
-      ['୧⍤⃝💐',                        'carrying flowers'],
-      ['𝐆𝐨𝐨𝐝 𝐍.ᐟ𝐠𝐡𝐭✨️🌛',           'good night'],
-    ]},
-  ];
 
   const showFavEmoji = settings.prefs?.showFavEmoji !== false;
   win.webContents.executeJavaScript(`(function() {
@@ -2813,7 +3045,7 @@ function injectEmojiPicker() {
     // Sync server-side preference to localStorage
     localStorage.setItem('lit_emoji_favs_on', ${JSON.stringify(showFavEmoji ? '1' : '0')});
 
-    var CATS = ${JSON.stringify(CATS)};
+    var CATS = ${EMOJI_CATS_JSON};
 
     var s = document.createElement('style');
     s.textContent =
@@ -3055,7 +3287,12 @@ function injectEmojiPicker() {
         return;
       }
       var rect = triggerEl.getBoundingClientRect();
-      var pw = 308, ph = 336;
+      // Measure the real size: a hard-coded 308px (the CSS says 340px) let the
+      // picker's right edge run off-screen next to the window's right edge.
+      picker.style.visibility = 'hidden';
+      picker.style.display = 'flex';
+      var pw = picker.offsetWidth, ph = picker.offsetHeight;
+      picker.style.visibility = '';
       var top  = rect.top - ph - 6;
       if (top < 8) top = rect.bottom + 6;
       var left = rect.left + rect.width / 2 - pw / 2;
@@ -3081,6 +3318,9 @@ function injectEmojiPicker() {
     }
 
     document.addEventListener('click', function(e) {
+      // Closed already: nothing to do. This runs for every click in the app, and
+      // used to rebuild the whole emoji grid each time.
+      if (picker.style.display !== 'flex') return;
       if (!picker.contains(e.target) && e.target.id !== 'lit-emoji-trigger') {
         picker.style.display = 'none';
         searchInput.value = '';
@@ -3253,8 +3493,28 @@ function waitForChatReady() {
   `).catch(() => 'error');
 }
 
+// Joins and the Rooms window's list read all drive Candy's single room-panel
+// modal (and the one quiet-panel timer); run concurrently, one would close the
+// modal under another. They go through this queue one at a time. The time cap
+// keeps a call whose page was reloaded mid-way from blocking the queue for good.
+let roomPanelQueue = Promise.resolve();
+function withRoomPanel(fn, fallback, capMs = 60_000) {
+  const run = roomPanelQueue.then(() => new Promise(resolve => {
+    const timer = setTimeout(() => resolve(fallback), capMs);
+    Promise.resolve().then(fn).then(
+      v => { clearTimeout(timer); resolve(v); },
+      () => { clearTimeout(timer); resolve(fallback); });
+  }));
+  roomPanelQueue = run;
+  return run;
+}
+
 // Resolves true once the room's tab is in the room bar, false if the join gave up.
 function joinRoom(jid) {
+  return withRoomPanel(() => joinRoomNow(jid), false);
+}
+
+function joinRoomNow(jid) {
   return win.webContents.executeJavaScript(
     `${QUIET_ROOM_PANEL_JS}
      new Promise(function(resolve) {
@@ -3267,7 +3527,22 @@ function joinRoom(jid) {
          resolve(true); return;
        }
 
-       function dismiss() { window.__litQuietRoomPanel(false); }
+       // Any Candy dialog other than our (hidden) room list: a status or nick
+       // dialog the user has open, or Candy reporting on this join (banned, room
+       // full, password needed). Those are the user's to see, never ours to hide.
+       function foreignModalUp() {
+         var modal = document.getElementById('chat-modal');
+         if (!modal || getComputedStyle(modal).display === 'none') return false;
+         return !modal.querySelector('ul.simplePaginationChatRoomList');
+       }
+       function reveal() {
+         clearTimeout(window.__litQuietRoomPanelTimer);
+         document.body.classList.remove('lit-quiet-roompanel');
+       }
+       function dismiss() {
+         if (foreignModalUp()) reveal();
+         else window.__litQuietRoomPanel(false);
+       }
 
        function waitForTab(timeoutMs) {
          var deadline = Date.now() + (timeoutMs || 8000);
@@ -3350,6 +3625,9 @@ function joinRoom(jid) {
              if (document.querySelector('li[data-roomjid=' + JSON.stringify(jid) + '] a.label')) {
                clearInterval(poll); dismiss(); resolve(true); return;
              }
+             // Candy answered the join with a dialog: show it now rather than after
+             // the timeout, and keep watching in case the join still goes through.
+             if (foreignModalUp()) { reveal(); if (tries++ > 80) { clearInterval(poll); resolve(false); } return; }
              if (++tries > 80) {
                console.warn('[join] tab never appeared after click for:', jid);
                clearInterval(poll); dismiss(); resolve(false); return;
@@ -3377,14 +3655,44 @@ function joinRoom(jid) {
          }, 100);
        }
 
-       tryViaUI();
+       // Don't open the room list over another dialog (it would be hidden with
+       // it and then closed): wait for it to go, and give up if it stays.
+       var waitStart = Date.now();
+       (function whenClear() {
+         if (!foreignModalUp()) { tryViaUI(); return; }
+         if (Date.now() - waitStart > 20000) {
+           console.warn('[join] another dialog stayed open; not joining', jid);
+           resolve(false); return;
+         }
+         setTimeout(whenClear, 200);
+       })();
      })`
   ).then(Boolean, () => false);
 }
 
+// Link windows show whatever anyone in chat links to, and every window.open from
+// them lands here too. Only web pages open: the main process would otherwise load
+// file:, litpic: or custom-scheme URLs that the requesting page could not open
+// itself. The cap stops a page from spawning windows in a loop.
+const MAX_LINK_WINDOWS = 12;
+const linkWindows = new Set();
+
+function urlProtocol(u) {
+  try { return new URL(u).protocol; } catch { return null; }
+}
+
+// Hands a link to the OS. Only web and mail links: a page could otherwise name
+// file:, smb: or any protocol handler installed on the system.
+function openExternalSafe(u) {
+  if (['http:', 'https:', 'mailto:'].includes(urlProtocol(u))) shell.openExternal(u).catch(() => {});
+}
+
 function openLinkWindow(url) {
-  let title;
-  try { title = new URL(url).hostname; } catch { title = 'Link'; }
+  const protocol = urlProtocol(url);
+  if (protocol === 'mailto:') { openExternalSafe(url); return; }
+  if (protocol !== 'http:' && protocol !== 'https:') { console.warn('[links] not opening', url.slice(0, 100)); return; }
+  if (linkWindows.size >= MAX_LINK_WINDOWS) { console.warn('[links] too many link windows open'); return; }
+  const title = new URL(url).hostname;
   const w = new BrowserWindow({
     width: 900,
     height: 700,
@@ -3397,7 +3705,9 @@ function openLinkWindow(url) {
       partition: PARTITION, // same session = already logged in
     },
   });
-  w.loadURL(url);
+  linkWindows.add(w);
+  w.on('closed', () => linkWindows.delete(w));
+  w.loadURL(url).catch(() => {});   // failed loads and downloads show in the window itself
   wireLinkContents(w.webContents, w);
   w.webContents.on('will-navigate', (_e, navUrl) => {
     // Allow navigation within the child window (browsing around the site)
@@ -3421,7 +3731,7 @@ function wireLinkContents(wc, hostWin) {
     if (params.linkURL) {
       template.push(
         { label: 'Open Link in New Window', click: () => openLinkWindow(params.linkURL) },
-        { label: 'Open Link in Browser', click: () => shell.openExternal(params.linkURL) },
+        { label: 'Open Link in Browser', click: () => openExternalSafe(params.linkURL) },
         { label: 'Copy Link Address', click: () => clipboard.writeText(params.linkURL) },
       );
     }
@@ -3478,7 +3788,7 @@ function wireLinkContents(wc, hostWin) {
       { label: 'Back', enabled: wc.canGoBack(), click: () => wc.goBack() },
       { label: 'Forward', enabled: wc.canGoForward(), click: () => wc.goForward() },
       { label: 'Reload', click: () => wc.reload() },
-      { label: 'Open This Page in Browser', click: () => shell.openExternal(wc.getURL()) },
+      { label: 'Open This Page in Browser', click: () => openExternalSafe(wc.getURL()) },
     );
     sep();
     template.push({ label: 'Inspect Element', click: () => wc.inspectElement(params.x, params.y) });
@@ -3622,10 +3932,10 @@ function openRoomManager() {
   });
   roomWin.loadFile('rooms.html');
   roomWin.webContents.once('did-finish-load', () => injectDialogTheme(roomWin.webContents));
-  roomWin.on('closed', () => { roomWin = null; createAppMenu(); }); // refresh menu on close
+  roomWin.on('closed', () => { roomWin = null; });
 }
 
-ipcMain.handle('rooms:list', async () => {
+ipcMain.handle('rooms:list', () => withRoomPanel(async () => {
   try {
     // Open the room panel invisibly, read the list, close it again. If the
     // user has the native panel open themselves, read it and leave it alone.
@@ -3659,21 +3969,39 @@ ipcMain.handle('rooms:list', async () => {
       })
     `);
   } catch { return []; }
-});
+}, []));
 
-ipcMain.on('rooms:join',  (_e, jid) => { win.show(); win.focus(); joinRoom(jid); });
+ipcMain.on('rooms:join',  (_e, jid) => { restoreMainWindow(); joinRoom(jid); });
 ipcMain.on('ui:openRooms', () => openRoomManager());
 
 // Errors caught in the chat page (see injectStanzaGuard), appended to
 // <profile>/page-errors.log so a user can send it with a bug report.
 const PAGE_ERRORS_FILE = path.join(PROFILE_DIR, 'page-errors.log');
+// The same error tends to repeat for every stanza of a burst (e.g. groupchat
+// lines for a room just left), and each used to cost a synchronous stat and
+// append. Now each distinct error is written at most once a minute, with a count
+// of the repeats in between, and the writes are asynchronous and in order.
+const pageErrorsSeen = new Map();   // "what|error" → { last, repeats }
+let pageErrorWrites = Promise.resolve();
 ipcMain.on('page:error', (_e, info) => {
   try {
-    try {
-      if (fs.statSync(PAGE_ERRORS_FILE).size > 512 * 1024) fs.renameSync(PAGE_ERRORS_FILE, PAGE_ERRORS_FILE + '.old');
-    } catch { /* no file yet */ }
-    const line = JSON.stringify({ at: new Date().toISOString(), version: app.getVersion(), ...info });
-    fs.appendFileSync(PAGE_ERRORS_FILE, line + '\n');
+    const key = `${info?.what}|${info?.error}`;
+    const now = Date.now();
+    const seen = pageErrorsSeen.get(key);
+    if (seen && now - seen.last < 60_000) { seen.repeats++; return; }
+    const repeats = seen ? seen.repeats : 0;
+    pageErrorsSeen.delete(key);
+    pageErrorsSeen.set(key, { last: now, repeats: 0 });
+    if (pageErrorsSeen.size > 200) pageErrorsSeen.delete(pageErrorsSeen.keys().next().value);
+    const line = JSON.stringify({ at: new Date(now).toISOString(), version: app.getVersion(), ...info,
+      ...(repeats ? { repeatsInLastMinute: repeats } : {}) });
+    pageErrorWrites = pageErrorWrites.then(async () => {
+      try {
+        if ((await fs.promises.stat(PAGE_ERRORS_FILE)).size > 512 * 1024)
+          await fs.promises.rename(PAGE_ERRORS_FILE, PAGE_ERRORS_FILE + '.old');
+      } catch { /* no file yet */ }
+      await fs.promises.appendFile(PAGE_ERRORS_FILE, line + '\n');
+    }).catch(() => { /* logging must never break the app */ });
   } catch { /* logging must never break the app */ }
 });
 ipcMain.on('ui:openLogs',  () => openLogViewer());
@@ -3721,10 +4049,36 @@ const picpubLiveTokens = new Map();   // token → ms timestamp of last confirma
 const PICPUB_LIVE_TTL_MS = 10 * 60 * 1000;
 const PICPUB_CHECK_BUDGET_MS = 3000;  // max total wait before history renders regardless
 
-ipcMain.handle('logs:dmHistory', async (_e, username) => {
+// The log viewer's deletes (see rewriteLogs for why they run here).
+ipcMain.handle('logs:deleteMessages', (_e, sigs) => {
+  if (!Array.isArray(sigs)) return false;
+  const sigSet = new Set(sigs.filter(x => typeof x === 'string'));
+  rewriteLogs(m => !sigSet.has(msgSig(m)));
+  return true;
+});
+ipcMain.handle('logs:deleteGroup', (_e, username, room) => {
+  if (typeof username !== 'string' || !username || (room !== null && typeof room !== 'string')) return false;
+  const target = username.toLowerCase();
+  rewriteLogs(m => {
+    if (peerName(m) !== target) return true;
+    if (room === null) return roomOf(m) !== null;   // keep non-DMs
+    return roomOf(m) !== room;                       // keep other rooms
+  });
+  return true;
+});
+
+// The IPC calls that hand out DM history or act on our PicPub albums answer only
+// the chat page itself (preload.js exposes them nowhere else either).
+function fromChatPage(e) {
+  try { return new URL(e.senderFrame.url).hostname === 'chat.literotica.com'; }
+  catch { return false; }
+}
+
+ipcMain.handle('logs:dmHistory', async (e, username) => {
+  if (!fromChatPage(e)) return [];
   const msgs = messagesWithPeer(username);
   const now = Date.now() / 1000;
-  const photoRe = /\u{1F4F7} View photo: https:\/\/picpub\.art\/v\/([a-f0-9]+)(?:\?[^#\s"'<>]*)?#([\w.]+)/u;
+  const photoRe = /\u{1F4F7} View photo: https:\/\/picpub\.art\/v\/([a-f0-9]+)(?:\?[^#\s"'<>]*)?#(\w+(?:\.\w+)*)/u;
   // Copy before annotating: the log store hands out its cached objects.
   const recent = msgs.slice(-100).map(m => ({ ...m }));
   const toCheck = new Set();
@@ -3764,21 +4118,20 @@ ipcMain.handle('logs:dmHistory', async (_e, username) => {
     }
   }
   // Attach thumbnail source for expired photo messages
-  for (const m of recent) {
-    if (!m._photoExpired) continue;
+  await Promise.all(recent.map(async m => {
+    if (!m._photoExpired) return;
     const match = photoRe.exec(m.body || '');
-    if (!match) continue;
+    if (!match) return;
     const hash = match[2];
     const meta = photoMeta[hash];
     const isVideo = /\.(mp4|webm|mov|mkv|avi)$/i.test(hash);
     if (!isVideo && meta?.nativeUrl) {
       m._thumbSrc = `https://picpub.art/96x96/${hash}`;
     } else if (!isVideo) {
-      const thumbFile = path.join(THUMBS_DIR, hash + '.jpg');
-      if (fs.existsSync(thumbFile))
-        m._thumbSrc = 'data:image/jpeg;base64,' + fs.readFileSync(thumbFile).toString('base64');
+      const src = await thumbDataUrl(hash);
+      if (src) m._thumbSrc = src;
     }
-  }
+  }));
   return recent;
 });
 
@@ -3794,14 +4147,12 @@ ipcMain.handle('rooms:setFavourite', (_e, jid, name, val) => {
   };
   else delete settings.favourites[jid];
   saveSettings();
-  createAppMenu();
 });
 
 ipcMain.handle('rooms:setAutoJoin', (_e, jid, val) => {
   if (!settings.favourites?.[jid]) return;
   settings.favourites[jid].autoJoin = val;
   saveSettings();
-  createAppMenu();
 });
 
 ipcMain.handle('rooms:setNotifyJoin', (_e, jid, val) => {
@@ -3817,21 +4168,60 @@ ipcMain.handle('rooms:setNotifyMessage', (_e, jid, val) => {
 });
 
 
+// Inserts the theme, user.css and size CSS into the chat page, removing what the
+// previous run inserted. Runs are queued: page load and theme or text-size
+// changes used to interleave on cssKeys, and the keys that got lost left an old
+// theme or font size layered under the new one until the next reload. Removing
+// keys from before a reload is a harmless no-op.
+let cssQueue = Promise.resolve();
+function applyPageCss() {
+  const run = cssQueue.then(async () => {
+    const old = cssKeys;
+    cssKeys = [];
+    for (const k of old) await win.webContents.removeInsertedCSS(k).catch(() => {});
+    const theme = settings.theme || 'dark';
+    // Themes that supply their own CSS (everything except the bare 'light' which needs none)
+    const CUSTOM_LIGHT = new Set(['solarized-light', 'warm-rose', 'blue-steel', 'sage', 'lavender']);
+    if (theme !== 'light') {
+      // Always inject the bundled theme first so app updates reach everyone
+      const themePath = getThemeFile(theme);
+      if (fs.existsSync(themePath))
+        cssKeys.push(await win.webContents.insertCSS(fs.readFileSync(themePath, 'utf8')));
+    }
+    // Then layer the user's personal overrides on top — with every theme; plain
+    // Light (which has no theme file) used to skip them.
+    if (fs.existsSync(USER_CSS))
+      cssKeys.push(await win.webContents.insertCSS(fs.readFileSync(USER_CSS, 'utf8')));
+    if (theme !== 'light') {
+      // Remove the baked-in white background from the logo PNG via canvas pixel manipulation.
+      // CSS mix-blend-mode cannot cross GPU compositing layer boundaries so JS is required.
+      removeLogoBg();
+    }
+    // For dark-background themes, force the logo SVG paths white regardless of
+    // whether the Literotica site itself has dark_theme active (they're independent).
+    // Light themes handle logo colour in their own CSS.
+    if (theme !== 'light' && !CUSTOM_LIGHT.has(theme)) {
+      cssKeys.push(await win.webContents.insertCSS(
+        '#headerLogo path{fill:white!important}' +
+        '#headerLogo .logo__l,#headerLogo .logo__r{fill:#4a89f3!important}'
+      ));
+    }
+    const fsPx = settings.prefs?.fontSize;
+    if (fsPx && fsPx !== 15)
+      cssKeys.push(await win.webContents.insertCSS(fontSizeCSS(fsPx)));
+    const nameW = settings.prefs?.nameColWidth ?? DEFAULT_NAME_WIDTH;
+    if (nameW !== 110)
+      cssKeys.push(await win.webContents.insertCSS(nameColCSS(nameW)));
+  }).catch(e => console.error('[theme] could not apply CSS:', e.message));
+  cssQueue = run;
+  return run;
+}
+
 async function setTheme(theme) {
   settings.theme = theme;
   saveSettings();
-  for (const k of cssKeys) await win.webContents.removeInsertedCSS(k).catch(() => {});
-  cssKeys = [];
-  // Themes that supply their own CSS (everything except the bare 'light' which needs none)
-  const CUSTOM_LIGHT = new Set(['solarized-light', 'warm-rose', 'blue-steel', 'sage', 'lavender']);
-  if (theme !== 'light') {
-    const themePath = getThemeFile(theme);
-    if (fs.existsSync(themePath))
-      cssKeys.push(await win.webContents.insertCSS(fs.readFileSync(themePath, 'utf8')));
-    if (fs.existsSync(USER_CSS))
-      cssKeys.push(await win.webContents.insertCSS(fs.readFileSync(USER_CSS, 'utf8')));
-    removeLogoBg();
-  } else {
+  await applyPageCss();
+  if (theme === 'light') {
     // Restore original logo src if we previously replaced it
     win.webContents.executeJavaScript(`
       (function() {
@@ -3840,20 +4230,6 @@ async function setTheme(theme) {
       })();
     `).catch(() => {});
   }
-  // White logo override only for dark themes; light themes handle logo colour in their own CSS
-  if (theme !== 'light' && !CUSTOM_LIGHT.has(theme)) {
-    cssKeys.push(await win.webContents.insertCSS(
-      '#headerLogo path{fill:white!important}' +
-      '#headerLogo .logo__l,#headerLogo .logo__r{fill:#4a89f3!important}'
-    ));
-  }
-  const fsPx = settings.prefs?.fontSize;
-  if (fsPx && fsPx !== 15)
-    cssKeys.push(await win.webContents.insertCSS(fontSizeCSS(fsPx)));
-  const nameW = settings.prefs?.nameColWidth ?? DEFAULT_NAME_WIDTH;
-  if (nameW !== 110)
-    cssKeys.push(await win.webContents.insertCSS(nameColCSS(nameW)));
-
   // Re-inject nav buttons with updated theme colours
   await win.webContents.executeJavaScript(
     `var e=document.getElementById('lit-nav-btns');if(e)e.remove();`
@@ -3874,7 +4250,8 @@ function switchProfile(id) {
     message: `Switch to "${name}"?`,
     detail: 'The app will restart to load the new profile.',
   }).then(({ response }) => {
-    if (response !== 0) return;
+    // Electron already moved the radio check to the clicked profile; put it back.
+    if (response !== 0) { createAppMenu(); return; }
     if (CLI_PROFILE) {
       // Relaunch replacing the --profile arg so this window switches profiles
       const baseArgs = process.argv.slice(1).filter((a, i, arr) =>
@@ -3882,8 +4259,7 @@ function switchProfile(id) {
       );
       app.relaunch({ args: [...baseArgs, '--profile', id] });
     } else {
-      profiles.active = id;
-      saveProfiles(profiles);
+      updateProfiles(p => { p.active = id; });
       app.relaunch();
     }
     app.quit();
@@ -3913,11 +4289,13 @@ function createProfile() {
   const onName = (_e, name) => {
     if (!name || !name.trim()) return;
     name = name.trim();
-    let id = slugify(name);
-    let n = 2;
-    while (profiles.list[id]) id = `${slugify(name)}-${n++}`;
-    profiles.list[id] = { name };
-    saveProfiles(profiles);
+    let id;
+    updateProfiles(p => {
+      id = slugify(name);
+      let n = 2;
+      while (p.list[id]) id = `${slugify(name)}-${n++}`;
+      p.list[id] = { name };
+    });
     fs.mkdirSync(path.join(BASE_USERDATA, 'profiles', id), { recursive: true });
     createAppMenu();
   };
@@ -3931,7 +4309,10 @@ function playNotificationSound() {
   win.webContents.executeJavaScript(`
     (function() {
       try {
-        var ctx = new AudioContext();
+        // One context for every chime: a new one each time was never closed, and
+        // each kept an audio output stream and rendering thread alive.
+        var ctx = window.__litChimeCtx || (window.__litChimeCtx = new AudioContext());
+        if (ctx.state === 'suspended') ctx.resume();
         [523.25, 659.25].forEach(function(freq, i) {
           var osc = ctx.createOscillator();
           var gain = ctx.createGain();
@@ -3958,12 +4339,16 @@ function sendNotification({ title, body }) {
     // Electron's Notification silently fails on many Linux setups; prefer notify-send.
     // Pass D-Bus session env vars so notify-send can reach the notification daemon.
     const env = Object.assign({}, process.env);
-    execFile('notify-send', ['--app-name=Lit Chat', title, body], { env }, err => {
+    // '--' ends the options: title and body are remote text, and a DM of "--help"
+    // or "-w" was parsed as an option (no notification, or one that blocks).
+    execFile('notify-send', ['--app-name=Lit Chat', '--', title, body], { env }, err => {
       if (err) {
         // notify-send failed — fall back to Electron
         if (Notification.isSupported()) {
-          const n = new Notification({ title, body });
-          n.on('click', () => { win.show(); win.focus(); });
+          // silent: the chime above is the sound (and respects its setting);
+          // otherwise Windows and macOS played theirs as well.
+          const n = new Notification({ title, body, silent: true });
+          n.on('click', restoreMainWindow);   // also un-minimizes (show() alone left it minimized)
           n.show();
         }
       }
@@ -3972,8 +4357,8 @@ function sendNotification({ title, body }) {
   }
 
   if (Notification.isSupported()) {
-    const n = new Notification({ title, body });
-    n.on('click', () => { win.show(); win.focus(); });
+    const n = new Notification({ title, body, silent: true });   // see above
+    n.on('click', restoreMainWindow);   // also un-minimizes (show() alone left it minimized)
     n.show();
   }
 }
@@ -4028,13 +4413,27 @@ function buildPhotoAlbumsSubmenu() {
             detail: 'This removes all photos from the album. Shared links will stop working.',
           });
           if (response !== 0) return;
+          // Keep the owner token unless PicPub confirms the album is gone: without
+          // it the album can't be deleted later, and its links stay live until expiry.
+          let error = null;
           try {
-            await picpubFetch(`https://picpub.art/v/api/albums/${token}`, {
+            const res = await picpubFetch(`https://picpub.art/v/api/albums/${token}`, {
               method: 'DELETE',
               headers: { 'X-Owner-Token': album.ownerToken },
             });
-          } catch { /* already gone */ }
-          invalidateDMAlbum(partner);
+            if (!res.ok && res.status !== 404 && res.status !== 410) error = `PicPub answered ${res.status} ${res.statusText}`.trim();
+          } catch (e) {
+            error = friendlyFetchError(e);
+          }
+          if (error) {
+            require('electron').dialog.showMessageBox(win, {
+              type: 'error',
+              message: `Couldn't delete the album for ${partner}.`,
+              detail: `${error}\n\nThe album is still listed, so you can try again.`,
+            });
+            return;
+          }
+          invalidateDMAlbum(partner, token);
           createAppMenu();
         }},
       ],
@@ -4086,27 +4485,32 @@ function promptDialog(targetWin, label, defaultValue = '') {
 }
 
 // ── Watched users ────────────────────────────────────────────────────────────
+// The main process owns the watch list: `watchList` is the live copy, and every
+// change (the menu, or the log viewer via watch:set) goes through here and is
+// saved. It used to be re-read from disk on every presence batch and menu build
+// to catch the log viewer writing the file behind main's back.
 function watchUser(name) {
   const u = (name || '').trim().toLowerCase();
-  if (!u) return false;
-  const set = loadWatchList();
-  if (set.has(u)) return false;
-  set.add(u);
-  saveWatchList(set);
-  watchList = set;
+  if (!u || watchList.has(u)) return false;
+  watchList.add(u);
+  saveWatchList(watchList);
   createAppMenu();
   return true;
 }
 
 function unwatchUser(name) {
   const u = (name || '').trim().toLowerCase();
-  const set = loadWatchList();
-  if (!set.delete(u)) return;
-  saveWatchList(set);
-  watchList = set;
+  if (!watchList.delete(u)) return;
+  saveWatchList(watchList);
   onlineWatched.delete(u);
   createAppMenu();
 }
+
+ipcMain.handle('watch:set', (_e, name, watched) => {
+  if (typeof name !== 'string') return false;
+  if (watched) watchUser(name); else unwatchUser(name);
+  return watchList.has(name.trim().toLowerCase());
+});
 
 // Prompt for a username (pre-filled with a best guess) and add it to the watch list.
 async function addWatchedUserViaPrompt(targetWin, prefill = '') {
@@ -4179,7 +4583,7 @@ function buildIgnoredUsersSubmenu() {
 }
 
 function buildWatchedUsersSubmenu() {
-  const users = [...loadWatchList()].sort();
+  const users = [...watchList].sort();
   const items = users.length
     ? users.map((u) => ({
         label: u,
@@ -4495,14 +4899,14 @@ function createAppMenu() {
             // Portable builds can't update themselves in place — link to releases instead.
             return {
               label: 'Get Updates on GitHub…',
-              click: () => require('electron').shell.openExternal('https://github.com/joeuser12/litchat/releases/latest'),
+              click: () => shell.openExternal(`${RELEASES_URL}/latest`).catch(() => {}),
             };
           }
           if (process.platform === 'darwin') {
             // No auto-update on macOS (requires a signed app) — link to releases instead.
             return {
               label: 'Get Updates on GitHub…',
-              click: () => require('electron').shell.openExternal('https://github.com/joeuser12/litchat/releases/latest'),
+              click: () => shell.openExternal(`${RELEASES_URL}/latest`).catch(() => {}),
             };
           }
           if (updateState === 'ready')       return { label: `Install Update (${updateVersion})…`, click: () => _autoUpdater.quitAndInstall() };
@@ -4510,6 +4914,7 @@ function createAppMenu() {
           if (updateState === 'checking')    return { label: 'Checking for Updates…', enabled: false };
           return { label: 'Check for Updates', click: () => _autoUpdater?.checkForUpdates().catch(() => {}) };
         })(),
+        { label: 'What\'s New…', click: () => shell.openExternal(RELEASES_URL).catch(() => {}) },
         {
           label: 'About Lit Chat',
           click: () => {
@@ -4523,13 +4928,13 @@ function createAppMenu() {
           },
         },
         { type: 'separator' },
-        { label: 'Reload',    accelerator: 'CmdOrCtrl+R',       click: () => disconnectAndReload(), visible: false },
-        { label: 'ZoomIn',    accelerator: 'CmdOrCtrl+shift+=', click: () => adjustZoom(+0.5), visible: false },
-        { label: 'ZoomIn2',   accelerator: 'CmdOrCtrl+=',       click: () => adjustZoom(+0.5), visible: false },
-        { label: 'ZoomOut',   accelerator: 'CmdOrCtrl+shift+-', click: () => adjustZoom(-0.5), visible: false },
-        { label: 'ZoomOut2',  accelerator: 'CmdOrCtrl+-',       click: () => adjustZoom(-0.5), visible: false },
-        { label: 'ZoomReset', accelerator: 'CmdOrCtrl+shift+0', click: () => adjustZoom(0),    visible: false },
-        { label: 'ZoomReset2',accelerator: 'CmdOrCtrl+0',       click: () => adjustZoom(0),    visible: false },
+        { label: 'Reload',    accelerator: 'CmdOrCtrl+R',       click: reloadFocused,     visible: false },
+        { label: 'ZoomIn',    accelerator: 'CmdOrCtrl+shift+=', click: zoomFocused(+0.5), visible: false },
+        { label: 'ZoomIn2',   accelerator: 'CmdOrCtrl+=',       click: zoomFocused(+0.5), visible: false },
+        { label: 'ZoomOut',   accelerator: 'CmdOrCtrl+shift+-', click: zoomFocused(-0.5), visible: false },
+        { label: 'ZoomOut2',  accelerator: 'CmdOrCtrl+-',       click: zoomFocused(-0.5), visible: false },
+        { label: 'ZoomReset', accelerator: 'CmdOrCtrl+shift+0', click: zoomFocused(0),    visible: false },
+        { label: 'ZoomReset2',accelerator: 'CmdOrCtrl+0',       click: zoomFocused(0),    visible: false },
         { label: 'DevTools',  click: () => win.webContents.openDevTools() },
         { label: 'Quit',      accelerator: 'CmdOrCtrl+Q', click: () => app.quit() },
       ],
@@ -4608,10 +5013,10 @@ function setupAutoUpdater() {
     updateState = 'downloading';
     updateVersion = info.version;
     createAppMenu();
-    new Notification({
+    sendNotification({
       title: 'Update downloading',
       body: `Lit Chat ${info.version} is downloading in the background.`,
-    }).show();
+    });
   });
 
   autoUpdater.on('update-not-available', () => {
@@ -4624,16 +5029,19 @@ function setupAutoUpdater() {
     updateVersion = info.version;
     createAppMenu();
     const { dialog } = require('electron');
+    // Any button closes the box; after What's New the Install Update menu item
+    // is still there.
     dialog.showMessageBox(win, {
       type: 'info',
-      buttons: ['Restart & Update', 'Later'],
+      buttons: ['Restart & Update', 'What\'s New', 'Later'],
       defaultId: 0,
-      cancelId: 1,
+      cancelId: 2,
       title: 'Update Ready',
       message: `Lit Chat ${info.version} is ready to install.`,
       detail: 'Restart now to apply the update, or install it the next time you quit.',
     }).then(({ response }) => {
       if (response === 0) autoUpdater.quitAndInstall();
+      if (response === 1) shell.openExternal(`${RELEASES_URL}/tag/v${info.version}`).catch(() => {});
     });
   });
 
@@ -4643,9 +5051,13 @@ function setupAutoUpdater() {
     createAppMenu();
   });
 
-  // Check on startup, then every 4 hours
+  // Check on startup, then every 4 hours until an update is downloaded. With the
+  // update already on disk, electron-updater re-fires update-available and
+  // update-downloaded on each check, which would repeat the notification and dialog.
   autoUpdater.checkForUpdates().catch(() => {});
-  setInterval(() => autoUpdater.checkForUpdates().catch(() => {}), 4 * 60 * 60 * 1000);
+  setInterval(() => {
+    if (updateState !== 'ready') autoUpdater.checkForUpdates().catch(() => {});
+  }, 4 * 60 * 60 * 1000);
 }
 
 // ── PicPub photo sharing ─────────────────────────────────────────────────────
@@ -4665,10 +5077,12 @@ function picpubFetch(url, opts = {}, timeoutMs = PICPUB_TIMEOUT_MS) {
   return net.fetch(url, { ...opts, signal: opts.signal || AbortSignal.timeout(timeoutMs) });
 }
 
-function invalidateDMAlbum(partnerUsername) {
-  const token = settings.dmAlbumsByPartner?.[partnerUsername];
+// Forgets one album, by default the partner's current one. The partner mapping is
+// only dropped if it still points at that album: a new album may have replaced it
+// while a dialog or request was pending.
+function invalidateDMAlbum(partnerUsername, token = settings.dmAlbumsByPartner?.[partnerUsername]) {
   if (token && settings.picpubAlbums) delete settings.picpubAlbums[token];
-  if (settings.dmAlbumsByPartner) delete settings.dmAlbumsByPartner[partnerUsername];
+  if (token && settings.dmAlbumsByPartner?.[partnerUsername] === token) delete settings.dmAlbumsByPartner[partnerUsername];
   saveSettings();
 }
 
@@ -4714,30 +5128,44 @@ async function createDMAlbum(partnerUsername) {
   return { token: data.token, ownerToken: data.owner_token, viewUrl: data.view_url };
 }
 
-async function uploadToAlbum(album, chunks, filename, mimeType) {
+// The multipart body for an upload, built once from the received chunks. Each
+// chunk is released as soon as it is copied, so memory peaks at about one copy
+// of the file (Buffer.concat held the chunks and the body, two copies, and a
+// retry into a new album made a third). A retry reuses the same body.
+function buildUploadBody(chunks, filename, mimeType) {
   const ct = mimeType || 'application/octet-stream';
   const boundary = '----LitPicBoundary' + Date.now().toString(16);
   const CRLF = '\r\n';
-  // One concat straight from the received chunks into the wire body — this is
-  // the only whole-file copy the main process makes.
-  const bodyBuf = Buffer.concat([
-    Buffer.from(
-      `--${boundary}${CRLF}` +
-      `Content-Disposition: form-data; name="files[]"; filename="${filename}"${CRLF}` +
-      `Content-Type: ${ct}${CRLF}${CRLF}`
-    ),
-    ...chunks,
-    Buffer.from(`${CRLF}--${boundary}--${CRLF}`),
-  ]);
+  // Encoded the way browsers do for form uploads (WHATWG): a '"' ended the
+  // quoted filename early and a line break split the header, so a file named
+  // like that broke the upload.
+  const safeName = filename.replace(/"/g, '%22').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+  const head = Buffer.from(
+    `--${boundary}${CRLF}` +
+    `Content-Disposition: form-data; name="files[]"; filename="${safeName}"${CRLF}` +
+    `Content-Type: ${ct}${CRLF}${CRLF}`
+  );
+  const tail = Buffer.from(`${CRLF}--${boundary}--${CRLF}`);
+  const body = Buffer.allocUnsafe(head.length + chunks.reduce((n, c) => n + c.length, 0) + tail.length);
+  let off = head.copy(body, 0);
+  for (let i = 0; i < chunks.length; i++) {
+    off += chunks[i].copy(body, off);
+    chunks[i] = null;
+  }
+  tail.copy(body, off);
+  return { body, contentType: `multipart/form-data; boundary=${boundary}` };
+}
+
+async function uploadToAlbum(album, upload) {
   // 30s plus ~1s per 100KB (a 100KB/s floor) so large videos on slow links still get through
-  const timeoutMs = 30_000 + Math.ceil(bodyBuf.length / 100_000) * 1000;
+  const timeoutMs = 30_000 + Math.ceil(upload.body.length / 100_000) * 1000;
   return picpubFetch(`https://picpub.art/v/api/albums/${album.token}/upload`, {
     method: 'POST',
     headers: {
       'X-Owner-Token': album.ownerToken,
-      'Content-Type': `multipart/form-data; boundary=${boundary}`,
+      'Content-Type': upload.contentType,
     },
-    body: bodyBuf,
+    body: upload.body,
   }, timeoutMs);
 }
 
@@ -4755,12 +5183,19 @@ async function uploadToAlbum(album, chunks, filename, mimeType) {
 // is the *previous* drag, which then dedupes server-side to an older album image.
 const pendingUploads = new Map();   // uploadId → { chunks: Buffer[], bytes, startedAt }
 const UPLOAD_STALE_MS = 15 * 60 * 1000;
+// Everything received is held in memory until the upload is sent, so cap it:
+// a multi-GB drop swapped machines with 4 GB of RAM, and page script could keep
+// sending chunks. The page checks this too, before sending anything.
+const MAX_UPLOAD_BYTES = 300 * 1024 * 1024;
 function sweepStaleUploads() {
   const cutoff = Date.now() - UPLOAD_STALE_MS;
   for (const [id, u] of pendingUploads) if (u.startedAt < cutoff) pendingUploads.delete(id);
 }
+// Also on a timer: without it, leftovers were only dropped when the next upload started.
+setInterval(sweepStaleUploads, 5 * 60 * 1000);
 
-ipcMain.handle('picpub:uploadChunk', (_e, uploadId, chunk) => {
+ipcMain.handle('picpub:uploadChunk', (e, uploadId, chunk) => {
+  if (!fromChatPage(e)) return false;
   if (typeof uploadId !== 'string' || !uploadId || !chunk) return false;
   let u = pendingUploads.get(uploadId);
   if (!u) {
@@ -4772,6 +5207,7 @@ ipcMain.handle('picpub:uploadChunk', (_e, uploadId, chunk) => {
   const buf = ArrayBuffer.isView(chunk)
     ? Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength)
     : Buffer.from(chunk);
+  if (u.bytes + buf.length > MAX_UPLOAD_BYTES) { pendingUploads.delete(uploadId); return false; }
   u.chunks.push(buf);
   u.bytes += buf.length;
   return true;
@@ -4779,19 +5215,22 @@ ipcMain.handle('picpub:uploadChunk', (_e, uploadId, chunk) => {
 
 ipcMain.handle('picpub:uploadAbort', (_e, uploadId) => { pendingUploads.delete(uploadId); });
 
-ipcMain.handle('picpub:upload', async (_e, partnerUsername, fileName, mimeType, uploadId) => {
+ipcMain.handle('picpub:upload', async (e, partnerUsername, fileName, mimeType, uploadId) => {
+  if (!fromChatPage(e)) return { ok: false, error: 'not allowed from this page' };
   const pending = pendingUploads.get(uploadId);
   pendingUploads.delete(uploadId);
   try {
     if (!pending || !pending.bytes) throw new Error('Dropped file is empty');
     const filename = path.basename(String(fileName || 'image'));
+    const upload = buildUploadBody(pending.chunks, filename, mimeType);
     let album = await getOrCreateDMAlbum(partnerUsername);
-    let res = await uploadToAlbum(album, pending.chunks, filename, mimeType);
+    let res = await uploadToAlbum(album, upload);
     // Album was deleted server-side while our cache still considered it valid — retry once
     if (res.status === 404 || res.status === 410) {
-      invalidateDMAlbum(partnerUsername);
+      // Only forget this album: a concurrent upload may already have replaced it.
+      invalidateDMAlbum(partnerUsername, album.token);
       album = await getOrCreateDMAlbum(partnerUsername);
-      res = await uploadToAlbum(album, pending.chunks, filename, mimeType);
+      res = await uploadToAlbum(album, upload);
     }
     if (!res.ok) throw new Error(`Upload failed: ${res.status} ${await res.text()}`);
     const data2 = await res.json();
@@ -4816,14 +5255,16 @@ async function linkToAlbum(album, picpubUrl) {
   });
 }
 
-ipcMain.handle('picpub:link', async (_e, partnerUsername, picpubUrl) => {
+ipcMain.handle('picpub:link', async (e, partnerUsername, picpubUrl) => {
+  if (!fromChatPage(e)) return { ok: false, error: 'not allowed from this page' };
   try {
     if (!/^https?:\/\/picpub\.art\//.test(picpubUrl))
       throw new Error('Not a picpub.art URL');
     let album = await getOrCreateDMAlbum(partnerUsername);
     let res = await linkToAlbum(album, picpubUrl);
     if (res.status === 404 || res.status === 410) {
-      invalidateDMAlbum(partnerUsername);
+      // Only forget this album: a concurrent upload may already have replaced it.
+      invalidateDMAlbum(partnerUsername, album.token);
       album = await getOrCreateDMAlbum(partnerUsername);
       res = await linkToAlbum(album, picpubUrl);
     }
@@ -4860,26 +5301,44 @@ async function makeViewerLink(token, ownerToken, username) {
   }
 }
 
-ipcMain.handle('picpub:viewerLink', async (_e, token) => {
+ipcMain.handle('picpub:viewerLink', async (e, token) => {
+  if (!fromChatPage(e)) return null;
   const album = settings.picpubAlbums?.[token];
   const username = myLitUsername || album?.literoticaUser;
   if (!album?.ownerToken || !username) return null;
   return makeViewerLink(token, album.ownerToken, username);
 });
 
-const HASH_RE  = /^[\w.]+$/;        // picpub image hash (regex-derived in the renderer, but never trust it for a path)
+// PicPub image hash ("a1b2c3.jpg"): word runs joined by single dots. It becomes a URL
+// path segment, and ".." or "." there would turn "Remove image" into a DELETE with our
+// owner token on the album itself. The renderer derives it by regex; never trust it.
+const HASH_RE  = /^\w+(?:\.\w+)*$/;
 const TOKEN_RE = /^[a-f0-9]+$/;      // picpub album token
 
-ipcMain.handle('thumbs:save', (_e, hash, dataUrl) => {
+// The page captures a thumbnail every time a photo renders (history, reconnect
+// replays), so most calls find it saved already: then only the modification
+// time is bumped, which is what the one-year thumbnail pruning goes by.
+ipcMain.handle('thumbs:save', async (_e, hash, dataUrl) => {
   try {
     if (typeof hash !== 'string' || !HASH_RE.test(hash) || typeof dataUrl !== 'string') return;
-    fs.mkdirSync(THUMBS_DIR, { recursive: true });
+    const file = path.join(THUMBS_DIR, hash + '.jpg');
+    const now = new Date();
+    if (await fs.promises.utimes(file, now, now).then(() => true, () => false)) return;
+    await fs.promises.mkdir(THUMBS_DIR, { recursive: true });
     const b64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
-    fs.writeFileSync(path.join(THUMBS_DIR, hash + '.jpg'), Buffer.from(b64, 'base64'));
+    await fs.promises.writeFile(file, Buffer.from(b64, 'base64'));
   } catch (e) { console.warn('[thumbs:save]', e.message); }
 });
 
-ipcMain.handle('picpub:contextMenu', (_e, token, hash) => {
+// A saved thumbnail as a data: URL, or null. Asynchronous: the gallery and DM
+// history ask for dozens at once, and synchronous reads stalled the main process.
+async function thumbDataUrl(hash) {
+  try { return 'data:image/jpeg;base64,' + (await fs.promises.readFile(path.join(THUMBS_DIR, hash + '.jpg'))).toString('base64'); }
+  catch { return null; }
+}
+
+ipcMain.handle('picpub:contextMenu', (e, token, hash) => {
+  if (!fromChatPage(e)) return null;
   // token/hash are interpolated into an executeJavaScript() string below
   if (typeof token !== 'string' || !TOKEN_RE.test(token) || typeof hash !== 'string' || !HASH_RE.test(hash)) return null;
   const album = settings.picpubAlbums?.[token];
@@ -4920,36 +5379,58 @@ const LINK_CACHE_MAX = 200;
 
 const PREVIEW_MAX_BYTES = 256 * 1024;   // og:/title tags live in <head>; never slurp a whole page
 
-// Only preview public http(s) URLs. A chat partner controls these links, so the
-// main process must not be talked into fetching loopback/LAN addresses.
-function isPreviewableUrl(u) {
-  let x;
-  try { x = new URL(u); } catch { return false; }
-  if (x.protocol !== 'http:' && x.protocol !== 'https:') return false;
-  const h = x.hostname.toLowerCase();
-  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal')) return false;
-  if (/^(127\.|10\.|0\.|169\.254\.|192\.168\.)/.test(h) || /^172\.(1[6-9]|2\d|3[01])\./.test(h)) return false;
-  if (h === '[::1]' || h === '[::]' || /^\[f[cd]/i.test(h) || /^\[fe[89ab]/i.test(h)) return false;
-  return true;
+const PREVIEW_MAX_HOPS = 5;
+
+// One request for a preview, through Chromium's stack like picpubFetch (so the
+// system proxy applies), without following redirects: the caller re-checks each
+// hop, because a public page can redirect to a LAN address. Resolves
+// { redirect: url }, { html: string } (at most maxBytes read), or { html: null }
+// for non-2xx and non-HTML responses, whose bodies are never downloaded.
+// No cookies are sent (useSessionCookies is off by default).
+function previewRequest(url, deadline, maxBytes) {
+  return new Promise((resolve, reject) => {
+    const req = net.request({ url, redirect: 'manual' });
+    req.setHeader('User-Agent', 'Mozilla/5.0 (compatible; LitChat/1.0)');
+    req.setHeader('Accept', 'text/html,application/xhtml+xml');
+    let settled = false;
+    const timer = setTimeout(() => { req.abort(); finish(reject, new Error('timeout')); }, Math.max(0, deadline - Date.now()));
+    const finish = (fn, v) => { if (!settled) { settled = true; clearTimeout(timer); fn(v); } };
+    // Not calling followRedirect() cancels the redirect.
+    req.on('redirect', (_status, _method, redirectUrl) => { req.abort(); finish(resolve, { redirect: redirectUrl }); });
+    req.on('response', res => {
+      const ctype = String([].concat(res.headers['content-type'] || '')[0]).toLowerCase();
+      if (res.statusCode < 200 || res.statusCode >= 300 || !/^(text\/html|application\/xhtml\+xml)\b/.test(ctype)) {
+        req.abort();
+        return finish(resolve, { html: null });
+      }
+      const chunks = [];
+      let total = 0;
+      const done = () => finish(resolve, { html: Buffer.concat(chunks).subarray(0, maxBytes).toString('utf8') });
+      res.on('data', c => {
+        chunks.push(c);
+        total += c.length;
+        if (total >= maxBytes) { req.abort(); done(); }
+      });
+      res.on('end', done);
+      res.on('error', e => finish(reject, e));
+    });
+    req.on('error', e => finish(reject, e));
+    req.end();
+  });
 }
 
-// Read at most `maxBytes` of a response body, then cancel the rest.
-async function readCapped(res, maxBytes) {
-  if (!res.body) return '';
-  const reader = res.body.getReader();
-  const chunks = [];
-  let total = 0;
-  try {
-    while (total < maxBytes) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      total += value.length;
-    }
-  } finally {
-    reader.cancel().catch(() => {});
+// The page HTML for a preview, or null. Every hop must pass isPreviewableUrl and
+// resolve only to public addresses (see preview-guard.js).
+async function fetchPreviewHtml(url) {
+  const deadline = Date.now() + 5000;
+  let target = url;
+  for (let hop = 0; hop <= PREVIEW_MAX_HOPS; hop++) {
+    if (!isPreviewableUrl(target) || !(await resolvesToPublic(target))) return null;
+    const r = await previewRequest(target, deadline, PREVIEW_MAX_BYTES);
+    if (!r.redirect) return r.html;
+    target = new URL(r.redirect, target).href;
   }
-  return Buffer.concat(chunks).toString('utf8');
+  return null;
 }
 
 ipcMain.handle('links:preview', async (_e, url) => {
@@ -4958,38 +5439,9 @@ ipcMain.handle('links:preview', async (_e, url) => {
   if (cached && Date.now() - cached.ts < 3_600_000) return cached.result;
   if (linkPreviewCache.size >= LINK_CACHE_MAX) linkPreviewCache.delete(linkPreviewCache.keys().next().value);
   try {
-    const res = await fetch(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LitChat/1.0)', 'Accept': 'text/html,application/xhtml+xml' },
-      signal: AbortSignal.timeout(5000),
-      redirect: 'follow',
-    });
-    if (!res.ok) { linkPreviewCache.set(url, { result: null, ts: Date.now() }); return null; }
-    // Only HTML can carry og: tags. Without this check a link to a large binary
-    // (anything not in the renderer's extension skip-list) was downloaded into a
-    // main-process string for up to 5s.
-    const ctype = (res.headers.get('content-type') || '').toLowerCase();
-    if (!/^(text\/html|application\/xhtml\+xml)\b/.test(ctype)) {
-      res.body?.cancel().catch(() => {});
-      linkPreviewCache.set(url, { result: null, ts: Date.now() });
-      return null;
-    }
-    const html = await readCapped(res, PREVIEW_MAX_BYTES);
-    function getMeta(prop) {
-      const esc = prop.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const r1 = new RegExp('<meta[^>]+property=["\']' + esc + '["\'][^>]+content=["\']([^"\']+)["\']', 'i');
-      const r2 = new RegExp('<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']' + esc + '["\']', 'i');
-      return (html.match(r1)?.[1] || html.match(r2)?.[1])?.trim() || null;
-    }
-    function getNameMeta(name) {
-      const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const r1 = new RegExp('<meta[^>]+name=["\']' + esc + '["\'][^>]+content=["\']([^"\']+)["\']', 'i');
-      const r2 = new RegExp('<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']' + esc + '["\']', 'i');
-      return (html.match(r1)?.[1] || html.match(r2)?.[1])?.trim() || null;
-    }
-    const title       = getMeta('og:title')       || html.match(/<title[^>]*>([^<]{1,200})<\/title>/i)?.[1]?.trim() || null;
-    const description = getMeta('og:description') || getNameMeta('description') || null;
-    const image       = getMeta('og:image')       || null;
-    const siteName    = getMeta('og:site_name')   || null;
+    const html = await fetchPreviewHtml(url);
+    if (!html) { linkPreviewCache.set(url, { result: null, ts: Date.now() }); return null; }
+    const { title, description, image, siteName } = parseLinkMeta(html);
     if (!title && !description) { linkPreviewCache.set(url, { result: null, ts: Date.now() }); return null; }
     const result = { title, description: description ? description.slice(0, 200) : null, image, siteName };
     linkPreviewCache.set(url, { result, ts: Date.now() });
@@ -5002,40 +5454,38 @@ ipcMain.handle('links:preview', async (_e, url) => {
 
 // ── Photo gallery ─────────────────────────────────────────────────────────────
 
-ipcMain.handle('logs:dmPhotos', (_e, username) => {
-  const fmtA = /^\u{1F4F7} (https:\/\/picpub\.art\/([a-z0-9]+\.[a-z]+))/u;
-  const fmtB = /\u{1F4F7} View photo: https:\/\/picpub\.art\/v\/([a-f0-9]+)(?:\?[^#\s"'<>]*)?#([\w.]+)/u;
+ipcMain.handle('logs:dmPhotos', async (e, username) => {
+  if (!fromChatPage(e)) return [];
   const seen = new Set();
   const photos = [];
   for (const m of messagesWithPeer(username)) {
     try {
-      let hash, token, viewUrl;
-      const mA = fmtA.exec(m.body || '');
-      const mB = !mA && fmtB.exec(m.body || '');
-      if (mA) {
-        hash = mA[2]; viewUrl = mA[1]; token = null;
-      } else if (mB) {
-        token = mB[1]; hash = mB[2];
-        const album = settings.picpubAlbums?.[token];
+      let hash, viewUrl;
+      const p = parsePhotoBody(m.body);
+      if (p?.kind === 'native') {
+        viewUrl = p.url; hash = p.url.slice(p.url.lastIndexOf('/') + 1);
+      } else if (p?.kind === 'album') {
+        hash = p.hash;
+        const album = settings.picpubAlbums?.[p.token];
         const expired = album ? album.expiresAt < Date.now() / 1000 : false;
-        viewUrl = expired ? null : `https://picpub.art/v/${token}#${hash}`;
+        // fullUrl keeps a partner album's ?vt= viewer code, without which PicPub's
+        // viewer gate turned the gallery click away.
+        viewUrl = expired ? null : p.fullUrl;
       } else continue;
       if (!hash || seen.has(hash)) continue;
       seen.add(hash);
       const meta = photoMeta[hash];
       const isVideo = /\.(mp4|webm|mov|mkv|avi)$/i.test(hash);
       let thumbSrc = null;
-      if (!isVideo && meta?.nativeUrl) {
-        thumbSrc = `https://picpub.art/96x96/${hash}`;
-      } else if (!isVideo) {
-        const tf = path.join(THUMBS_DIR, hash + '.jpg');
-        if (fs.existsSync(tf))
-          thumbSrc = 'data:image/jpeg;base64,' + fs.readFileSync(tf).toString('base64');
-      }
+      if (!isVideo && meta?.nativeUrl) thumbSrc = `https://picpub.art/96x96/${hash}`;
       if (!viewUrl && meta?.nativeUrl) viewUrl = meta.nativeUrl;
       photos.push({ hash, thumbSrc, viewUrl, ts: m.ts, direction: m.direction, isVideo });
     } catch {}
   }
+  // Saved thumbnails for the rest, read in parallel.
+  await Promise.all(photos.map(async p => {
+    if (!p.thumbSrc && !p.isVideo) p.thumbSrc = await thumbDataUrl(p.hash);
+  }));
   return photos.reverse();
 });
 
@@ -5207,7 +5657,7 @@ function injectImageSharing() {
           li.querySelectorAll('a[href*="picpub.art/v/"]').forEach(function(a) {
             if (m) return;
             var href = a.getAttribute('href') || '';
-            var hm = /picpub\\.art\\/v\\/([a-f0-9]+)(\\?[^#\\s"'<>]*)?#([\\w.]+)/.exec(href);
+            var hm = /picpub\\.art\\/v\\/([a-f0-9]+)(\\?[^#\\s"'<>]*)?#(\\w+(?:\\.\\w+)*)/.exec(href);
             if (hm) m = [hm[0], 'https://picpub.art/v/' + hm[1] + (hm[2] || ''), hm[1], hm[3]];
           });
         }
@@ -5528,6 +5978,8 @@ function injectImageSharing() {
           if (typeof window.litChat.uploadPhoto !== 'function' || typeof window.litChat.uploadChunk !== 'function')
             throw new Error('upload bridge missing (bridge keys: ' + Object.keys(window.litChat).join(', ') + ')');
           if (!file.size) throw new Error('dropped file is empty');
+          if (file.size > ${MAX_UPLOAD_BYTES})
+            throw new Error('the file is too large (the limit is ${Math.round(MAX_UPLOAD_BYTES / 1048576)} MB)');
           var slash = jid.indexOf('/');
           var partner = slash !== -1 ? jid.slice(slash + 1) : jid.split('@')[0];
           // Read the dropped file's bytes directly — never via file.path. Drags from
@@ -5817,24 +6269,35 @@ function attachBOSHLogger() {
   // but `return logReceivedBody(...)` runs that finally as soon as the retry
   // *starts*, so every retried batch lost its arrival time and fell back to
   // "now" — exactly the large/slow bodies the arrival stamp exists for.
+  //
+  // Only the body fetch is retried. Everything after it runs once, each step on
+  // its own: a throw in (say) a notification used to restart the whole function,
+  // logging and notifying the same batch up to four times.
   async function logReceivedBody(requestId, arrivalTs, attempt = 0) {
+    let body;
     try {
       const result = await dbg.sendCommand('Network.getResponseBody', { requestId });
-      const body = result.base64Encoded
+      body = result.base64Encoded
         ? Buffer.from(result.body, 'base64').toString('utf8')
         : result.body;
-      const received = extractMessages(body, 'received', arrivalTs);
-      writeMessages(received);
-      await notifyDMs(received);
-      notifyRoomMessages(received);
-      handlePresence(extractPresence(body));
     } catch (e) {
       if (attempt < 3) {
         await new Promise(r => setTimeout(r, 100));
         return logReceivedBody(requestId, arrivalTs, attempt + 1);
       }
       console.error('[logger] dropped response body after retries:', e.message);
+      return;
     }
+    const step = (name, fn) => {
+      try { return fn(); } catch (e) { console.error(`[logger] ${name} failed:`, e.message); }
+    };
+    const received = step('extractMessages', () => extractMessages(body, 'received', arrivalTs)) || [];
+    step('writeMessages', () => writeMessages(withoutLoggedReplays(received)));
+    // Presence first: a room's own-join presence must be seen before the history
+    // replay that follows it in the same batch (see handlePresence).
+    step('handlePresence', () => handlePresence(extractPresence(body)));
+    step('notifyRoomMessages', () => notifyRoomMessages(received));
+    await notifyDMs(received).catch(e => console.error('[logger] notifyDMs failed:', e.message));
   }
 
   dbg.on('message', async (_e, method, params) => {
@@ -5986,6 +6449,16 @@ Promise.all([app.whenReady(), instanceClaim]).then(([, isPrimary]) => {
   setupAutoUpdater();
   pruneStaleState();
 
+  // A damaged settings.json or profiles.json was replaced by defaults at startup.
+  if (damagedFiles.length) {
+    require('electron').dialog.showMessageBox({
+      type: 'warning',
+      message: 'Some Lit Chat settings could not be read',
+      detail: 'These files were damaged, so Lit Chat started with defaults. A copy of each was kept:\n\n' +
+        damagedFiles.map(d => `${d.file}\n→ ${d.backup}`).join('\n\n'),
+    });
+  }
+
   if (settings.prefs?.lowMemoryModeAutoDetected) {
     delete settings.prefs.lowMemoryModeAutoDetected;
     saveSettings();
@@ -6001,8 +6474,18 @@ Promise.all([app.whenReady(), instanceClaim]).then(([, isPrimary]) => {
 
   // Block the site's notification permission — it fires a popup for every room message.
   // Our own DM/presence notifications go through sendNotification() directly and are unaffected.
-  sess.setPermissionRequestHandler((webContents, permission, callback) => {
-    callback(permission !== 'notifications');
+  // Link windows and the story <webview> share this session but show any site someone
+  // links in chat, so outside literotica.com (including frames embedded in the chat
+  // page) only harmless permissions are granted: no camera, microphone, location,
+  // clipboard reading or launching external apps.
+  const isLitOrigin = u => {
+    try { const h = new URL(u).hostname; return h === 'literotica.com' || h.endsWith('.literotica.com'); }
+    catch { return false; }
+  };
+  const ANY_SITE_PERMISSIONS = new Set(['fullscreen', 'clipboard-sanitized-write', 'pointerLock']);
+  sess.setPermissionRequestHandler((webContents, permission, callback, details) => {
+    if (permission === 'notifications') return callback(false);
+    callback(ANY_SITE_PERMISSIONS.has(permission) || isLitOrigin(details.requestingUrl));
   });
 
   // Silence the site's broken favicon requests
@@ -6013,6 +6496,14 @@ Promise.all([app.whenReady(), instanceClaim]).then(([, isPrimary]) => {
       else callback({});
     }
   );
+}).catch(e => {
+  // Startup threw. Without this the process stayed alive with no window, still
+  // holding this profile's instance socket, so every later launch just handed
+  // over to it and quit without a word.
+  console.error('[startup] failed:', e);
+  try { require('electron').dialog.showErrorBox('Lit Chat could not start', String((e && e.stack) || e)); } catch {}
+  releaseInstance();
+  app.exit(1);
 });
 
 app.on('window-all-closed', () => app.quit());

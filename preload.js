@@ -1,5 +1,8 @@
 const { contextBridge, ipcRenderer } = require('electron');
-contextBridge.exposeInMainWorld('litChat', {
+// Only the chat itself gets the bridge. The main window also shows the site's
+// login pages (auth. and www.literotica.com), and whatever scripts those load
+// have no business reading DM history or uploading to our albums.
+if (location.hostname === 'chat.literotica.com') contextBridge.exposeInMainWorld('litChat', {
   openRooms:        () => ipcRenderer.send('ui:openRooms'),
   openLogs:         () => ipcRenderer.send('ui:openLogs'),
   getStatusHidden:  (jid) => ipcRenderer.invoke('status:getHidden', jid),

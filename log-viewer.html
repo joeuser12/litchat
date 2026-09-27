@@ -309,8 +309,11 @@
       });
     });
 
+    // Also used inside attribute values (data-sig holds raw message text), so
+    // quotes must be escaped too.
     function esc(s) {
-      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+              .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
     }
     // Logs written before 2026-05-27 (commit 251b985) stored bodies with XML
     // entities intact; logger.js has unescaped at write time since. Kept for
@@ -339,7 +342,7 @@
         // Strip trailing punctuation that is likely not part of the URL
         let url = m[0].replace(/[.,;:!?)]+$/, '');
         parts.push(`<a href="${esc(url)}" target="_blank" class="msg-link">${highlight(url, query)}</a>`);
-        last = m.index + m[0].length;
+        last = m.index + url.length;   // the stripped punctuation stays, as plain text
       }
       if (last < text.length) parts.push(highlight(text.slice(last), query));
       return parts.join('');
@@ -391,7 +394,7 @@
         </div>`;
     }
 
-    function render(messages) {
+    function render(messages, username) {
       if (!messages.length) {
         msgsEl.innerHTML = '<p class="placeholder">No messages found for this user.</p>';
         return;
@@ -407,9 +410,9 @@
       const frags = [];
       for (const [key, msgs] of buckets) {
         if (key === '__dm__') {
-          frags.push(renderGroup({ label: 'Direct Messages', badgeClass: 'dm', messages: msgs, collapsed: false, username: currentUser, room: null }));
+          frags.push(renderGroup({ label: 'Direct Messages', badgeClass: 'dm', messages: msgs, collapsed: false, username, room: null }));
         } else {
-          frags.push(renderGroup({ label: key, badgeClass: 'room', messages: msgs, collapsed: false, username: currentUser, room: key }));
+          frags.push(renderGroup({ label: key, badgeClass: 'room', messages: msgs, collapsed: false, username, room: key }));
         }
       }
 
@@ -448,7 +451,7 @@
     function load() {
       const user = input.value.trim();
       if (!user) return;
-      render(window.logAPI.queryUser(user));
+      render(window.logAPI.queryUser(user), user);
       loadNote(user);
     }
 
@@ -478,11 +481,11 @@
       watchBtn.classList.toggle('watching', watching);
     }
 
-    watchBtn.addEventListener('click', () => {
+    watchBtn.addEventListener('click', async () => {
       if (!currentUser) return;
-      const nowWatching = !window.logAPI.isWatched(currentUser);
-      window.logAPI.setWatched(currentUser, nowWatching);
-      updateWatchBtn(currentUser);
+      const user = currentUser;
+      await window.logAPI.setWatched(user, !window.logAPI.isWatched(user));
+      if (currentUser === user) updateWatchBtn(user);
     });
 
     function loadNote(username) {
@@ -516,11 +519,11 @@
     }
 
     // Event delegation for delete buttons
-    msgsEl.addEventListener('click', e => {
+    msgsEl.addEventListener('click', async e => {
       const msgDel = e.target.closest('.msg-del');
       if (msgDel) {
         e.stopPropagation();
-        window.logAPI.deleteMessages([msgDel.dataset.sig]);
+        await window.logAPI.deleteMessages([msgDel.dataset.sig]);
         reload();
         return;
       }
@@ -531,7 +534,7 @@
         const room = grpDel.dataset.room || null;
         const label = room ? `messages in "${room}" with ${username}` : `DMs with ${username}`;
         if (!confirm(`Delete all ${label}?`)) return;
-        window.logAPI.deleteGroup(username, room);
+        await window.logAPI.deleteGroup(username, room);
         reload();
       }
     });
@@ -540,8 +543,11 @@
     function loadRecent() {
       const recent = window.logAPI.recentDMs();
       if (!recent.length) { msgsEl.innerHTML = '<p class="placeholder">No recent messages.</p>'; return; }
-      msgsEl.innerHTML = recent.map(({ peer, messages }, i) =>
-        renderGroup({ label: peer, badgeClass: 'dm', messages, collapsed: i > 0, username: peer, room: null })
+      msgsEl.innerHTML = recent.map(({ peer, messages, total }, i) =>
+        renderGroup({
+          label: total > messages.length ? `${peer} (last ${messages.length} of ${total})` : peer,
+          badgeClass: 'dm', messages, collapsed: i > 0, username: peer, room: null,
+        })
       ).join('');
     }
 

@@ -198,7 +198,11 @@
     else if (!current.hasMore) setStatus(current.opts.random ? '' : 'No more results.');
     else setStatus('');
     // A short page may not fill the window, so the sentinel never scrolls into view.
-    if (current.hasMore && resultsEl.scrollHeight <= resultsEl.clientHeight) loadPage();
+    // Not while a story is open: #results is display:none then, both heights are 0,
+    // and this kept fetching page after page in the background. Returning to the
+    // results brings the sentinel into view, and its observer carries on from there.
+    const reading = document.body.classList.contains('reading');
+    if (current.hasMore && !reading && resultsEl.scrollHeight <= resultsEl.clientHeight) loadPage();
   }
 
   function startSearch(opts, title) {

@@ -54,24 +54,35 @@ function extractDelayStamp(inner) {
 // whenever the async work happened to finish instead of when it truly arrived.
 function extractMessages(xml, direction, fallbackTs) {
   const out = [];
-  const msgRe = /<message\b([^>]*)>([\s\S]*?)<\/message>/g;
+  // The opening tag must not end in "/>": a childless <message …/> used to match
+  // here and run on into the next stanza, logging that one under its attributes.
+  const msgRe = /<message\b([^>]*[^\/>])?>([\s\S]*?)<\/message>/g;
   let m;
   while ((m = msgRe.exec(xml)) !== null) {
-    const attrs = m[1];
+    const attrs = m[1] || '';
     const inner = m[2];
-    const from  = (attrs.match(/\bfrom=["']([^"']+)["']/) || [])[1];
-    const to    = (attrs.match(/\bto=["']([^"']+)["']/)   || [])[1];
+    // Attribute values arrive XML-escaped (a nick like o'neil is o&apos;neil).
+    const attr  = name => {
+      const v = (attrs.match(new RegExp(`\\b${name}=["']([^"']+)["']`)) || [])[1];
+      return v && unescapeXml(v);
+    };
+    const from  = attr('from');
+    const to    = attr('to');
     const type  = (attrs.match(/\btype=["']([^"']+)["']/) || [])[1] || 'normal';
     const bodyM = inner.match(/<body[^>]*>([\s\S]*?)<\/body>/);
     if (bodyM) {
-      out.push({
-        ts: extractDelayStamp(inner) || fallbackTs || new Date().toISOString(),
+      const stamp = extractDelayStamp(inner);
+      const msg = {
+        ts: stamp || fallbackTs || new Date().toISOString(),
         direction,
         type,   // 'chat' = DM, 'groupchat' = room
         from,
         to,
         body: unescapeXml(bodyM[1]),
-      });
+      };
+      // A replay (room history on join, offline delivery): notifications skip these.
+      if (stamp) msg.delayed = true;
+      out.push(msg);
     }
   }
   return out;
@@ -84,4 +95,4 @@ function writeMessages(messages) {
   fs.appendFileSync(logFile(), lines);
 }
 
-module.exports = { extractMessages, writeMessages };
+module.exports = { extractMessages, writeMessages, unescapeXml };
