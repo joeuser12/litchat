@@ -6,6 +6,19 @@ so keep the heading format `## [x.y.z] - YYYY-MM-DD`.
 
 Versions before 0.9.0 are not listed here; see the [tags](https://github.com/joeuser12/litchat/tags).
 
+## [0.9.30] - 2026-09-28
+
+### Changed
+- **The green dot for other Lit Chat users is gone.** It confused people, and older versions could
+  show it for people not using the app. Lit Chat still recognises other users behind the scenes; the
+  list of who uses it is cleared once and rebuilds itself as you chat.
+
+### Fixed
+- **Favourite rooms that had been deleted are created again.** The site removes empty rooms daily,
+  so an auto-join room could be missing and fail to join. Lit Chat now creates it, the same way the
+  room panel's "Start a New Chat Room" box does.
+- Joining a room right after opening the Rooms window could fail.
+
 ## [0.9.29] - 2026-09-27
 
 ### Security

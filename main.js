@@ -271,6 +271,17 @@ let cssKeys = []; // keys returned by insertCSS; needed to remove on theme chang
 let watchList = loadWatchList();           // Set of lowercased nicks to watch
 let ignoreList = loadIgnoreList();         // Map lowercased nick → display name (see ignore.js)
 let peerCaps   = loadCaps();               // Map lowercased nick → { name, version, lastSeen } (see caps.js)
+// Lists saved before v0.9.29 can name people who don't run LitChat: a bounced
+// hello was recorded as theirs (see onMessage in injectCaps), and a listed peer
+// is never greeted again, so a wrong entry stayed wrong. Nothing tells those
+// entries from real ones, so start the list over once. Real peers are found
+// again by the handshake the next time a private chat with them opens.
+if (!settings.peerCapsReset) {
+  peerCaps.clear();
+  try { saveCaps(peerCaps); } catch (e) { console.warn('[caps] could not reset the peer list:', e.message); }
+  settings.peerCapsReset = true;
+  saveSettings();
+}
 const isIgnored = nick => ignoreList.has(normNick(nick));
 let onlineWatched = new Map();             // watched nick → Set of rooms we can see them in (this page load)
 let presenceNotifyReady = false;           // false during startup roster flood
@@ -1560,85 +1571,12 @@ function injectCaps() {
         } catch (e) { return false; }
       }
 
-      // ── Roster: a green dot on everyone known to run LitChat ────────────────
-      // Each roster row is <div.user><div.label/><ul><li.context/><li.role/><li.ignore/></ul></div>
-      // where every li is a 16px float:right icon with a 3px left margin (19px
-      // each) and the site shows/hides them by class. The dot is one more li, added
-      // last so it sits leftmost, next to the name. The label is a fixed 110px in a
-      // 164px row, so three icons already wrap onto a second line (the ignore
-      // rule in injectIgnore handles that case); size the label for the icons that
-      // can be showing instead: the role icon appears for role-moderator or
-      // affiliation-owner, the ignore icon for status-ignored.
-      var DOT = String.fromCharCode(0x25CF);
-      var rowSel = '#candy .roster-pane .user';
-      var capsStyle = document.createElement('style');
-      capsStyle.textContent =
-        rowSel + ' li.lit-peer-dot { float: right; display: block; width: 16px; height: 16px;' +
-          ' margin-left: 3px; line-height: 16px; font-size: 15px; text-align: center; color: #2ecc71; cursor: default; }' +
-        rowSel + '.lit-peer.role-moderator .label, ' + rowSel + '.lit-peer.affiliation-owner .label' +
-          ' { width: calc(100% - 60px) !important; text-overflow: ellipsis; }' +
-        rowSel + '.lit-peer.status-ignored.role-moderator .label, ' + rowSel + '.lit-peer.status-ignored.affiliation-owner .label' +
-          ' { width: calc(100% - 79px) !important; }' +
-        ' #candy #tooltip.lit-tip-near { bottom: auto !important; right: auto !important;' +
-          ' width: auto !important; white-space: nowrap; }';
-      document.head.appendChild(capsStyle);
-
-      // Tooltips. The site's script positions #tooltip beside the hovered icon, but
-      // its stylesheet then pins every tooltip to the bottom-right corner of the chat
-      // pane with !important (left/top: initial, bottom: 30px, right: 5px), so the
-      // coordinates never apply — the moderator star's tooltip lands in the corner
-      // too. Those coordinates also assume #candy sits at the page origin (there is a
-      // hard-coded "- 90" for the header), so reusing them here would put the box
-      // over the icon. For the dot, place it ourselves: to the left of the icon,
-      // vertically centred, sized to its text. An inline !important beats the
-      // stylesheet's !important, and the class drops the bottom/right pin and the
-      // fixed width. Every other icon is left as the site has it, so the class is
-      // cleared as soon as a different icon's tooltip shows. The site's own
-      // mouseenter handler is bound first, so it has already set the text and started
-      // the fade-in (which makes the box measurable) by the time this runs.
-      try {
-        window.jQuery('body').delegate('li[data-tooltip]', 'mouseenter.litcaps', function() {
-          var tip = document.getElementById('tooltip');
-          if (!tip) return;
-          if (!this.classList.contains('lit-peer-dot')) {
-            tip.classList.remove('lit-tip-near');
-            return;
-          }
-          tip.classList.add('lit-tip-near');
-          var icon = this.getBoundingClientRect();
-          var host = (tip.offsetParent || document.body).getBoundingClientRect();
-          var left = icon.left - host.left - tip.offsetWidth - 8;
-          var top = icon.top - host.top + (icon.height - tip.offsetHeight) / 2;
-          tip.style.setProperty('left', Math.round(left) + 'px', 'important');
-          tip.style.setProperty('top', Math.round(top) + 'px', 'important');
-        });
-      } catch (e) { /* the dot's tooltip placement is cosmetic */ }
-
-      function markRosterUser(el) {
-        var isPeer = !!peers[String(el.getAttribute('data-nick') || '').trim().toLowerCase()];
-        var ul = el.querySelector(':scope > ul');
-        var dot = ul && ul.querySelector(':scope > li.lit-peer-dot');
-        el.classList.toggle('lit-peer', isPeer);
-        if (isPeer && ul && !dot) {
-          dot = document.createElement('li');
-          dot.className = 'lit-peer-dot';
-          dot.setAttribute('data-tooltip', 'Uses LitChat');
-          dot.textContent = DOT;
-          ul.appendChild(dot);
-        } else if (!isPeer && dot) {
-          dot.remove();
-        }
-      }
-
-      function syncRoster() {
-        var rows = document.querySelectorAll('.roster-pane .user[data-nick]');
-        for (var i = 0; i < rows.length; i++) markRosterUser(rows[i]);
-      }
-
+      // Who runs LitChat is known (peers, saved via capsSeen) but no longer shown
+      // in the UI: the roster's green dot confused people. The handshake still
+      // runs, and the peer list still stops us re-greeting people we know.
       function record(nick, version) {
         if (!nick) return;
         peers[nick] = String(version == null ? '?' : version);
-        syncRoster();
         try {
           if (window.litChat && window.litChat.capsSeen) window.litChat.capsSeen(nick, peers[nick]);
         } catch (e) { /* reporting is best-effort */ }
@@ -1779,15 +1717,7 @@ function injectCaps() {
       setInterval(arm, 10000);
       sweepPanes();
 
-      // Candy re-renders roster rows as people join and change status.
-      try {
-        window.jQuery(Candy).on('candy:view.roster.after-update.litcaps', function(e, a) {
-          var el = a && a.element && a.element[0];
-          if (el && el.getAttribute) markRosterUser(el);
-        });
-      } catch (e) { /* the dot is cosmetic */ }
-
-      // Peers learned in earlier sessions, so their dot shows straight away.
+      // Peers learned in earlier sessions, so they aren't greeted again.
       try {
         if (window.litChat && window.litChat.capsList) {
           window.litChat.capsList().then(function(list) {
@@ -1795,7 +1725,6 @@ function injectCaps() {
               var n = String(list[i].name || '').trim().toLowerCase();
               if (n && !peers[n]) peers[n] = String(list[i].version || '?');
             }
-            syncRoster();
           }).catch(function() {});
         }
       } catch (e) { /* ignore */ }
@@ -3616,9 +3545,26 @@ function joinRoomNow(jid) {
            document.querySelector('#roomPanel-tab a.label')?.click();
          }
 
+         // The site deletes empty rooms daily, so a favourite may not exist when we
+         // come to join it. Once the room list has been up for a moment without it,
+         // create it the way the panel's own "Start a New Chat Room" box does (the
+         // site's handler asks its room bot, which creates the room and invites us).
+         function createRoom() {
+           var name = jid.split('@')[0];
+           var input = document.getElementById('let_me_input');
+           var button = document.getElementById('let_me_button');
+           if (!input || !button || !name || name.indexOf('"') !== -1) return false;
+           console.warn('[join] not in the room list; creating it:', jid);
+           input.value = name;
+           button.click();
+           return true;
+         }
+
          var tries = 0;
          var clickedLink = false;
          var clickAttempts = 0;
+         var waitTicks = 80;        // how long to wait for the tab once the join is sent
+         var listSeenAt = -1;       // tick at which the room list first had entries
          var poll = setInterval(function() {
            // After clicking the link, wait for the tab — retry the click every 3 s if needed
            if (clickedLink) {
@@ -3627,8 +3573,8 @@ function joinRoomNow(jid) {
              }
              // Candy answered the join with a dialog: show it now rather than after
              // the timeout, and keep watching in case the join still goes through.
-             if (foreignModalUp()) { reveal(); if (tries++ > 80) { clearInterval(poll); resolve(false); } return; }
-             if (++tries > 80) {
+             if (foreignModalUp()) { reveal(); if (tries++ > waitTicks) { clearInterval(poll); resolve(false); } return; }
+             if (++tries > waitTicks) {
                console.warn('[join] tab never appeared after click for:', jid);
                clearInterval(poll); dismiss(); resolve(false); return;
              }
@@ -3644,6 +3590,27 @@ function joinRoomNow(jid) {
            }
            tries++;
            if (tries % 20 === 0) advancePage();
+           // The previous room-panel action (a join, or the Rooms window reading the
+           // list) can still be closing the panel when this one starts: the list we
+           // saw then vanishes and never comes back. If the panel is closed and has
+           // no list, open it again.
+           if (tries % 20 === 10 && !document.querySelector('ul.simplePaginationChatRoomList li a')) {
+             var modal = document.getElementById('chat-modal');
+             if (modal && getComputedStyle(modal).display === 'none') {
+               window.__litQuietRoomPanel(true);
+               var tab = document.querySelector('#roomPanel-tab a.label');
+               if (tab) tab.click();
+             }
+           }
+           // Only a list that has stayed up counts as proof the room is missing.
+           if (!document.querySelector('ul.simplePaginationChatRoomList li a')) listSeenAt = -1;
+           else if (listSeenAt < 0) listSeenAt = tries;
+           if (listSeenAt >= 0 && tries - listSeenAt >= 15 && createRoom()) {
+             // Treat it like a clicked link, with more time for the bot's invite
+             // and no re-clicks of a list the room isn't in.
+             clickedLink = true; clickAttempts = 3; tries = 0; waitTicks = 150;
+             return;
+           }
            if (tries > 100) {
              clearInterval(poll);
              console.warn('[join] gave up on:', jid,
