@@ -48,3 +48,29 @@ test('a selected link separates the link item from the edit items, with no doubl
   expect(t.map(i => i.type === 'separator' ? '-' : (i.role || i.label))).toEqual(['Copy Link Address', '-', 'copy', 'selectAll']);
   expect(t[0].type).not.toBe('separator');
 });
+
+const { urlFromSelection } = require('./context-menu');
+
+test('a selected address that is not a link is recognised', () => {
+  expect(urlFromSelection('https://twitter.com/someone')).toBe('https://twitter.com/someone');
+  expect(urlFromSelection('  see https://example.com/page). ')).toBe('https://example.com/page');
+  expect(urlFromSelection('www.example.com')).toBe('https://www.example.com/');
+  expect(urlFromSelection('example.com/page')).toBe('https://example.com/page');
+  expect(urlFromSelection('myblog.blogspot.com')).toBe('https://myblog.blogspot.com/');
+});
+
+test('ordinary text, file names and other schemes get no Open item', () => {
+  for (const t of ['', 'hello world', 'Michael', 'readme.md', 'photo.jpg', 'javascript:alert(1)', 'ftp://x.com', 'file:///etc/passwd'])
+    expect(urlFromSelection(t)).toBeNull();
+});
+
+test('the chat window offers to open a selected address, and only outside the message box', () => {
+  const opened = [];
+  const d = { copyText() {}, openUrl: u => opened.push(u) };
+  const t = buildChatContextMenu({ selectionText: 'www.example.com/x' }, d);
+  expect(t[0].label).toBe('Open "www.example.com/x" in Browser');
+  t[0].click();
+  expect(opened).toEqual(['https://www.example.com/x']);
+  const inBox = buildChatContextMenu({ isEditable: true, selectionText: 'www.example.com', editFlags: {} }, d);
+  expect(inBox.some(i => /^Open/.test(i.label || ''))).toBe(false);
+});

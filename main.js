@@ -193,7 +193,7 @@ const { parsePhotoBody } = require('./media-parse');
 const { loadWatchList, saveWatchList } = require('./watch');
 const { loadIgnoreList, saveIgnoreList, addTo: addIgnore, removeFrom: removeIgnore, normNick } = require('./ignore');
 const { loadCaps, saveCaps, recordCap, hasCap } = require('./caps');
-const { buildChatContextMenu } = require('./context-menu');
+const { buildChatContextMenu, urlFromSelection, menuLabelUrl } = require('./context-menu');
 const { friendlyFetchError } = require('./friendly-error');
 const stories = require('./stories-api');
 const { parseLinkMeta } = require('./link-meta');
@@ -1194,7 +1194,7 @@ function createWindow() {
   // paste and for copying a link address. If the page handles the right-click itself
   // (photo thumbnails do) Electron never emits this event.
   win.webContents.on('context-menu', (_e, params) => {
-    const template = buildChatContextMenu(params, { copyText: t => clipboard.writeText(t) });
+    const template = buildChatContextMenu(params, { copyText: t => clipboard.writeText(t), openUrl: openExternalSafe });
     if (template.length) Menu.buildFromTemplate(template).popup({ window: win });
   });
 }
@@ -3284,8 +3284,17 @@ function injectNavButtons() {
   const awayOn = settings.prefs?.away ?? false;
   win.webContents.executeJavaScript(`
     (function() {
+      if (document.getElementById('lit-nav-btns')) return;
       var fw = document.querySelector('.C_fw');
-      if (!fw || document.getElementById('lit-nav-btns')) return;
+      if (!fw) {
+        // The buttons go into the site's header; without it there is nowhere to put
+        // them. Record that, so a report of "the buttons are gone" can be diagnosed.
+        try {
+          window.litChat.pageError({ what: 'nav buttons not added: site header (.C_fw) not found',
+            error: location.href, header: !!document.getElementById('HeaderComponent') });
+        } catch (e) {}
+        return;
+      }
       var wrap = document.createElement('div');
       wrap.id = 'lit-nav-btns';
       wrap.style.cssText = 'display:inline-flex;align-items:center;gap:8px;margin-left:16px;';
@@ -3700,6 +3709,13 @@ function wireLinkContents(wc, hostWin) {
         { label: 'Open Link in New Window', click: () => openLinkWindow(params.linkURL) },
         { label: 'Open Link in Browser', click: () => openExternalSafe(params.linkURL) },
         { label: 'Copy Link Address', click: () => clipboard.writeText(params.linkURL) },
+      );
+    } else if (!params.isEditable) {
+      // A selected address that isn't a link (profile bios show URLs as plain text).
+      const url = urlFromSelection(params.selectionText);
+      if (url) template.push(
+        { label: `Open "${menuLabelUrl(url)}" in Browser`, click: () => openExternalSafe(url) },
+        { label: `Open "${menuLabelUrl(url)}" in New Window`, click: () => openLinkWindow(url) },
       );
     }
 

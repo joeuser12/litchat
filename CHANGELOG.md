@@ -6,6 +6,17 @@ so keep the heading format `## [x.y.z] - YYYY-MM-DD`.
 
 Versions before 0.9.0 are not listed here; see the [tags](https://github.com/joeuser12/litchat/tags).
 
+## [0.9.31] - 2026-10-05
+
+### Fixed
+- **Opening a highlighted web address.** Profiles often show addresses as plain text rather than
+  links. Selecting one and right-clicking now offers to open that address in your browser or in a new
+  window, where before the only choice was opening the profile page itself.
+
+### Added
+- If the toolbar buttons (Rooms, Logs, My Profile…) can't be added, the reason is written to
+  `page-errors.log` in the profile folder, so it can be sent along with a bug report.
+
 ## [0.9.30] - 2026-09-28
 
 ### Changed
