@@ -33,6 +33,21 @@ function urlFromSelection(text) {
   return BARE_DOMAIN.test(bare) ? httpUrl('https://' + bare) : null;
 }
 
+// False for Literotica pages that only work while logged in: the /my/ control
+// panel (the toolbar's Profile button opens its profile editor) and the login
+// server. The user's web browser isn't logged in, so "Open This Page in Browser"
+// there only showed "control-panel-couldnt-load … You are not authorized" and
+// then the site's login page.
+function canOpenPageInBrowser(url) {
+  let u;
+  try { u = new URL(url); } catch { return false; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+  const lit = u.hostname === 'literotica.com' || u.hostname.endsWith('.literotica.com');
+  if (lit && (u.pathname === '/my' || u.pathname.startsWith('/my/'))) return false;
+  if (u.hostname === 'auth.literotica.com') return false;
+  return true;
+}
+
 // A URL short enough for a menu label.
 function menuLabelUrl(u) {
   const s = u.replace(/^https?:\/\//, '').replace(/\/$/, '');
@@ -50,7 +65,8 @@ function buildChatContextMenu(params, { copyText, openUrl }) {
 
   if (params.linkURL) {
     template.push({ label: 'Copy Link Address', click: () => copyText(params.linkURL) });
-  } else if (openUrl && !params.isEditable) {
+  } else if (openUrl) {
+    // Also inside editable text: the profile editor shows the bio's links there.
     const url = urlFromSelection(params.selectionText);
     if (url) template.push({ label: `Open "${menuLabelUrl(url)}" in Browser`, click: () => openUrl(url) });
   }
@@ -72,4 +88,4 @@ function buildChatContextMenu(params, { copyText, openUrl }) {
   return template;
 }
 
-module.exports = { buildChatContextMenu, urlFromSelection, menuLabelUrl };
+module.exports = { buildChatContextMenu, urlFromSelection, menuLabelUrl, canOpenPageInBrowser };

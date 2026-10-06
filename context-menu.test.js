@@ -64,7 +64,7 @@ test('ordinary text, file names and other schemes get no Open item', () => {
     expect(urlFromSelection(t)).toBeNull();
 });
 
-test('the chat window offers to open a selected address, and only outside the message box', () => {
+test('the chat window offers to open a selected address, in text and in editable fields', () => {
   const opened = [];
   const d = { copyText() {}, openUrl: u => opened.push(u) };
   const t = buildChatContextMenu({ selectionText: 'www.example.com/x' }, d);
@@ -72,5 +72,16 @@ test('the chat window offers to open a selected address, and only outside the me
   t[0].click();
   expect(opened).toEqual(['https://www.example.com/x']);
   const inBox = buildChatContextMenu({ isEditable: true, selectionText: 'www.example.com', editFlags: {} }, d);
-  expect(inBox.some(i => /^Open/.test(i.label || ''))).toBe(false);
+  expect(inBox[0].label).toBe('Open "www.example.com" in Browser');
+});
+
+test('pages that need the app\'s login are not offered for opening in the browser', () => {
+  const { canOpenPageInBrowser } = require('./context-menu');
+  expect(canOpenPageInBrowser('https://www.literotica.com/my/#/user/profile')).toBe(false);
+  expect(canOpenPageInBrowser('https://www.literotica.com/my')).toBe(false);
+  expect(canOpenPageInBrowser('https://auth.literotica.com/login')).toBe(false);
+  expect(canOpenPageInBrowser('https://www.literotica.com/authors/someone')).toBe(true);
+  expect(canOpenPageInBrowser('https://www.literotica.com/mystery-stories')).toBe(true);
+  expect(canOpenPageInBrowser('https://example.com/my/page')).toBe(true);
+  expect(canOpenPageInBrowser('about:blank')).toBe(false);
 });

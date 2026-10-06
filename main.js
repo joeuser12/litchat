@@ -193,7 +193,7 @@ const { parsePhotoBody } = require('./media-parse');
 const { loadWatchList, saveWatchList } = require('./watch');
 const { loadIgnoreList, saveIgnoreList, addTo: addIgnore, removeFrom: removeIgnore, normNick } = require('./ignore');
 const { loadCaps, saveCaps, recordCap, hasCap } = require('./caps');
-const { buildChatContextMenu, urlFromSelection, menuLabelUrl } = require('./context-menu');
+const { buildChatContextMenu, urlFromSelection, menuLabelUrl, canOpenPageInBrowser } = require('./context-menu');
 const { friendlyFetchError } = require('./friendly-error');
 const stories = require('./stories-api');
 const { parseLinkMeta } = require('./link-meta');
@@ -3710,8 +3710,10 @@ function wireLinkContents(wc, hostWin) {
         { label: 'Open Link in Browser', click: () => openExternalSafe(params.linkURL) },
         { label: 'Copy Link Address', click: () => clipboard.writeText(params.linkURL) },
       );
-    } else if (!params.isEditable) {
-      // A selected address that isn't a link (profile bios show URLs as plain text).
+    } else {
+      // A selected address that isn't a link: profile bios show URLs as plain text,
+      // and in the profile editor (the toolbar's Profile button) inside an editable
+      // field, which is why this isn't limited to non-editable text.
       const url = urlFromSelection(params.selectionText);
       if (url) template.push(
         { label: `Open "${menuLabelUrl(url)}" in Browser`, click: () => openExternalSafe(url) },
@@ -3771,8 +3773,10 @@ function wireLinkContents(wc, hostWin) {
       { label: 'Back', enabled: wc.canGoBack(), click: () => wc.goBack() },
       { label: 'Forward', enabled: wc.canGoForward(), click: () => wc.goForward() },
       { label: 'Reload', click: () => wc.reload() },
-      { label: 'Open This Page in Browser', click: () => openExternalSafe(wc.getURL()) },
     );
+    // Not for pages that need the login only this app has (see canOpenPageInBrowser).
+    if (canOpenPageInBrowser(wc.getURL()))
+      template.push({ label: 'Open This Page in Browser', click: () => openExternalSafe(wc.getURL()) });
     sep();
     template.push({ label: 'Inspect Element', click: () => wc.inspectElement(params.x, params.y) });
 

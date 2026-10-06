@@ -6,6 +6,15 @@ so keep the heading format `## [x.y.z] - YYYY-MM-DD`.
 
 Versions before 0.9.0 are not listed here; see the [tags](https://github.com/joeuser12/litchat/tags).
 
+## [0.9.32] - 2026-10-06
+
+### Fixed
+- **Opening a highlighted web address in your own profile editor** (the toolbar's Profile button).
+  The open options from 0.9.31 only appeared on public profiles, not in the editor's text fields.
+- **"Open This Page in Browser" no longer appears on pages that need Lit Chat's login,** such as the
+  profile editor. Your web browser isn't logged in to Literotica, so those pages only showed an
+  "You are not authorized" error and then the login page.
+
 ## [0.9.31] - 2026-10-05
 
 ### Fixed
