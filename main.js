@@ -315,6 +315,33 @@ const RELEASES_URL = 'https://github.com/joeuser12/litchat/releases';
 // placed somewhere deliberately into an ordinary installed app. Updates are manual there.
 const IS_PORTABLE = !!process.env.PORTABLE_EXECUTABLE_FILE;
 
+// Windows only shows an app's notifications when the app's AppUserModelID
+// matches a Start Menu shortcut carrying the same ID. The installer creates that
+// shortcut with build.appId from package.json; without setting the same ID here,
+// Windows dropped every notification without a word. (The packaged package.json
+// has no build section, so the ID is repeated here rather than read from it.)
+const WINDOWS_APP_ID = 'com.literotica.chat';
+if (process.platform === 'win32') app.setAppUserModelId(WINDOWS_APP_ID);
+
+// The portable build has no installer and so no Start Menu shortcut, which leaves
+// Windows nothing to tie its notifications to. Keep one, "Lit Chat (portable)",
+// pointing at the exe the user runs (updated if the exe moves). Its own name, so
+// it never replaces the installed version's "Lit Chat" shortcut.
+function ensurePortableShortcut() {
+  if (process.platform !== 'win32' || !IS_PORTABLE) return;
+  try {
+    const lnk = path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Lit Chat (portable).lnk');
+    const target = process.env.PORTABLE_EXECUTABLE_FILE;
+    let current = null;
+    try { current = shell.readShortcutLink(lnk); } catch { /* none yet */ }
+    if (current && current.target === target && current.appUserModelId === WINDOWS_APP_ID) return;
+    shell.writeShortcutLink(lnk, current ? 'replace' : 'create',
+      { target, appUserModelId: WINDOWS_APP_ID, description: 'Lit Chat' });
+  } catch (e) {
+    console.warn('[notifications] could not create the Start Menu shortcut:', e.message);
+  }
+}
+
 let tray = null;
 let trayMinimizeHintShown = false;
 
@@ -3339,18 +3366,22 @@ function injectNavButtons() {
         'border:1px solid;border-radius:4px;display:inline-block;user-select:none;white-space:nowrap;';
       var BASE_BTN_CSS = 'cursor:pointer;font-size:13px;padding:4px 10px;border:1px solid;' +
         'border-radius:4px;display:inline-block;user-select:none;white-space:nowrap;transition:none;';
-      function applyAwayStyle(on) {
+      // On, the button is filled (reverse highlight) in a solid colour that stands
+      // out in every theme. Every theme styles these buttons with !important
+      // (colour, border, background: transparent), which overrode the old "on"
+      // colours entirely and left only the bold text; inline !important wins over
+      // a stylesheet's. Off, the theme styles it like the other buttons. Hovering
+      // keeps the fill.
+      function applyAwayStyle(on, hover) {
         awayActive = on;
+        awayBtn.title = on ? 'Away mode is on: click to turn it off' : 'Turn away mode on';
         awayBtn.style.cssText = BASE_BTN_CSS + (on
-          ? (isDark
-              ? 'color:#fce7f3;border-color:#db2777;background:rgba(219,39,119,0.45);font-weight:bold;'
-              : 'color:#9d174d;border-color:#db2777;background:#fce7f3;font-weight:bold;')
-          : 'color:' + baseColor + ';border-color:' + baseBorder + ';background:none;');
+          ? 'color:#fff !important;font-weight:bold;border-color:#9d174d !important;' +
+            'background:' + (hover ? '#be185d' : '#db2777') + ' !important;'
+          : 'color:' + (hover ? hoverColor : baseColor) + ';border-color:' + (hover ? hoverBorder : baseBorder) + ';background:none;');
       }
-      awayBtn.addEventListener('mouseover', function() {
-        awayBtn.style.color = hoverColor; awayBtn.style.borderColor = hoverBorder;
-      });
-      awayBtn.addEventListener('mouseout',  function() { applyAwayStyle(awayActive); });
+      awayBtn.addEventListener('mouseover', function() { applyAwayStyle(awayActive, true); });
+      awayBtn.addEventListener('mouseout',  function() { applyAwayStyle(awayActive, false); });
       applyAwayStyle(awayActive);
 
       window._litSetAway = function(on) { applyAwayStyle(on); };
@@ -3980,17 +4011,23 @@ ipcMain.on('page:error', (_e, info) => {
     pageErrorsSeen.delete(key);
     pageErrorsSeen.set(key, { last: now, repeats: 0 });
     if (pageErrorsSeen.size > 200) pageErrorsSeen.delete(pageErrorsSeen.keys().next().value);
-    const line = JSON.stringify({ at: new Date(now).toISOString(), version: app.getVersion(), ...info,
-      ...(repeats ? { repeatsInLastMinute: repeats } : {}) });
-    pageErrorWrites = pageErrorWrites.then(async () => {
-      try {
-        if ((await fs.promises.stat(PAGE_ERRORS_FILE)).size > 512 * 1024)
-          await fs.promises.rename(PAGE_ERRORS_FILE, PAGE_ERRORS_FILE + '.old');
-      } catch { /* no file yet */ }
-      await fs.promises.appendFile(PAGE_ERRORS_FILE, line + '\n');
-    }).catch(() => { /* logging must never break the app */ });
+    appendErrorLog({ ...info, ...(repeats ? { repeatsInLastMinute: repeats } : {}) });
   } catch { /* logging must never break the app */ }
 });
+
+// Appends one entry to page-errors.log (rotated at 512 KB), asynchronously and
+// in order. Also used for problems outside the page, such as a notification the
+// system refused, so one file holds what a bug report needs.
+function appendErrorLog(info) {
+  const line = JSON.stringify({ at: new Date().toISOString(), version: app.getVersion(), ...info });
+  pageErrorWrites = pageErrorWrites.then(async () => {
+    try {
+      if ((await fs.promises.stat(PAGE_ERRORS_FILE)).size > 512 * 1024)
+        await fs.promises.rename(PAGE_ERRORS_FILE, PAGE_ERRORS_FILE + '.old');
+    } catch { /* no file yet */ }
+    await fs.promises.appendFile(PAGE_ERRORS_FILE, line + '\n');
+  }).catch(() => { /* logging must never break the app */ });
+}
 ipcMain.on('ui:openLogs',  () => openLogViewer());
 ipcMain.on('ui:openLitProfile', () => openLinkWindow('https://www.literotica.com/my/#/user/profile'));
 
@@ -4317,8 +4354,16 @@ function playNotificationSound() {
   `).catch(() => {});
 }
 
+// Windows reports a notification it won't show through 'failed'; record why.
+function notificationFailed(_e, error) {
+  console.warn('[notifications] the system did not show a notification:', error);
+  appendErrorLog({ what: 'notification not shown', error: String(error) });
+}
+
+// Returns the Electron Notification when one is shown that way (not on Linux,
+// where notify-send is used), so a caller can watch it.
 function sendNotification({ title, body }) {
-  if (settings.prefs?.notifications === false) return;
+  if (settings.prefs?.notifications === false) return null;
   playNotificationSound();
   const { execFile } = require('child_process');
 
@@ -4340,29 +4385,38 @@ function sendNotification({ title, body }) {
         }
       }
     });
-    return;
+    return null;
   }
 
   if (Notification.isSupported()) {
     const n = new Notification({ title, body, silent: true });   // see above
     n.on('click', restoreMainWindow);   // also un-minimizes (show() alone left it minimized)
+    n.on('failed', notificationFailed);
     n.show();
+    return n;
   }
+  return null;
 }
 
+// Menu: Send Test Notification. Says why nothing appears when the reason is one
+// the app can see: notifications turned off here, not supported, or refused by
+// Windows (which then usually means its notification settings).
 function sendTestNotification() {
   const { dialog } = require('electron');
-
-  const supported = Notification.isSupported();
-  dialog.showMessageBox(win, {
-    type: 'info',
-    title: 'Notification test',
-    message: `Notification.isSupported() = ${supported}\nAttempting to send a notification now…`,
-  });
-
-  sendNotification({
-    title: 'DM from testuser',
-    body: 'This is a test notification from Lit Chat.',
+  if (settings.prefs?.notifications === false) {
+    dialog.showMessageBox(win, { type: 'info', message: 'Notifications are turned off.',
+      detail: 'Tick "Notifications" in this menu to turn them on, then try again.' });
+    return;
+  }
+  if (process.platform !== 'linux' && !Notification.isSupported()) {
+    dialog.showMessageBox(win, { type: 'warning', message: 'This system does not support notifications.' });
+    return;
+  }
+  const n = sendNotification({ title: 'Lit Chat test notification', body: 'If you can see this, notifications work.' });
+  if (n) n.on('failed', (_e, error) => {
+    dialog.showMessageBox(win, { type: 'warning', message: 'Windows did not show the test notification.',
+      detail: `${error}\n\nCheck Windows Settings → System → Notifications: notifications on, ` +
+        'Do not disturb off, and Lit Chat allowed in the list of apps.' });
   });
 }
 
@@ -4699,6 +4753,7 @@ function createAppMenu() {
             saveSettings();
           },
         },
+        { label: 'Send Test Notification', click: () => sendTestNotification() },
         {
           label: 'Keyword Alerts…',
           click: async () => {
@@ -6384,6 +6439,7 @@ function attachBOSHLogger() {
 
 Promise.all([app.whenReady(), instanceClaim]).then(([, isPrimary]) => {
   if (!isPrimary) { app.exit(0); return; }
+  ensurePortableShortcut();
   // Proxy litpic://TOKEN/HASH → PicPub API with owner-token auth
   // Must be registered on the partition session, not the default session.
   session.fromPartition(PARTITION).protocol.handle('litpic', async (request) => {

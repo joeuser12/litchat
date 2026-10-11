@@ -6,6 +6,19 @@ so keep the heading format `## [x.y.z] - YYYY-MM-DD`.
 
 Versions before 0.9.0 are not listed here; see the [tags](https://github.com/joeuser12/litchat/tags).
 
+## [0.9.33] - 2026-10-11
+
+### Fixed
+- **Notifications on Windows.** Windows could silently drop Lit Chat's notifications because the app
+  didn't identify itself the way Windows requires. The portable version now also adds a
+  "Lit Chat (portable)" entry to the Start menu, which Windows needs before it shows its notifications.
+- **The Away button now clearly shows when Away is on:** it turns solid pink. Before, the themes hid
+  the highlight and only the text turned bold.
+
+### Added
+- **Send Test Notification** in the menu, to check that notifications work. If Windows refuses one,
+  it says so, and the reason is written to `page-errors.log`.
+
 ## [0.9.32] - 2026-10-06
 
 ### Fixed
