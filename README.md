@@ -1,6 +1,6 @@
 # Lit Chat
 
-A desktop wrapper for [chat.literotica.com](https://chat.literotica.com) — a candy wrapper, if you will.
+A desktop wrapper for [chat.literotica.com](https://chat.literotica.com) (a candy wrapper?)
 
 Built with [Electron](https://www.electronjs.org/) around the site's existing CandyChat/BOSH-XMPP interface.
 
@@ -11,18 +11,18 @@ Built with [Electron](https://www.electronjs.org/) around the site's existing Ca
 - Desktop notifications for incoming DMs
 - Presence notifications for watched users
 - Multiple built-in themes: Dark, Dark Warm, Dark Teal, Nord, Dracula, Gruvbox, Catppuccin Mocha, Tokyo Night, Rosé Pine, Solarized Dark, Solarized Light, and Light
-- Chat log viewer — opens to recent DMs; search conversation history by username
-- **DM history that carries over between sessions** — the standard CandyChat interface opens every private chat blank, so yesterday's conversation is gone once you close the window. Lit Chat fills each DM with your last 100 messages with that person from your local chat log, in a collapsible, timestamped section above the live chat (shared photos included), so you can pick up where you left off. History is read from the chat logs stored locally for each profile
-- **Ignore that actually works everywhere** — the site's own Ignore only applies in the one room where you clicked it (and not to private messages sent via another room), so it seems to work only some of the time. In Lit Chat the same **Ignore** / **Unignore** entries in the user popup menu ignore that person in every room and in private messages, with no notifications or away replies triggered by them, and it sticks across sessions. Anyone you had already ignored is carried over automatically; manage the list under ☰ → Notifications → Ignored Users
+- Chat log viewer opens to recent DMs; search conversation history by username
+- **DM history that carries over between sessions**: the standard CandyChat interface opens every private chat blank, so yesterday's conversation is gone once you close the window. Lit Chat fills each DM with your last 100 messages with that person from your local chat log, in a collapsible, timestamped section above the live chat (shared photos included), so you can pick up where you left off. History is read from the chat logs stored locally for each profile
+- **Ignore that actually works everywhere**:  the site's own Ignore only applies in the one room where you clicked it (and not to private messages sent via another room), so it seems to work only some of the time. In Lit Chat the same **Ignore** / **Unignore** entries in the user popup menu ignore that person in every room and in private messages, with no notifications or away replies triggered by them, and it sticks across sessions. Anyone you had already ignored is carried over automatically; manage the list under ☰ → Notifications → Ignored Users
 - Per-user notes
-- Room manager — browse, favourite, and auto-join rooms on startup
+- Room manager: browse, favourite, and auto-join rooms on startup
 - User profile pages open in an in-app window
-- Per-room status message toggle — hide join/leave noise in busy rooms without affecting quieter ones
-- Multiple profiles — separate cookie sessions and per-profile theme selection
-- Adjustable name column — widen the sender-name column beside chat messages (☰ → Name Column) so long usernames aren't clipped
+- Per-room status message toggle: hide join/leave noise in busy rooms without affecting quieter ones
+- Multiple profiles: separate cookie sessions and per-profile theme selection
+- Adjustable name column: widen the sender-name column beside chat messages (☰ → Name Column) so long usernames aren't clipped
 - Minimize to tray (optional; on by default on Windows and macOS, off by default on Linux, where many desktops have no tray) — the app keeps running in the tray when minimized; relaunching it or clicking the tray icon brings the window back. If no tray icon can be created, the option is disabled and minimizing works normally
-- **Inline photo sharing in DMs** — upload or link images directly from the chat input; photos are shared via [picpub.art](https://picpub.art) ephemeral albums and appear as inline thumbnails for both users. Recipients without the app see a working browser link. Drag-and-drop or use the 📷 button
-- Photo album manager — track active albums, set expiry (1h–7d), enable IP watermarking, or delete albums from the **Photo Albums** menu
+- **Inline photo sharing in DMs**: upload or link images directly from the chat input; photos are shared via [picpub.art](https://picpub.art) ephemeral albums and appear as inline thumbnails for both users. Recipients without the app see a working browser link. Drag-and-drop or use the 📷 button
+- Photo album manager: track active albums, set expiry (1h–7d), enable IP watermarking, or delete albums from the **Photo Albums** menu
 - Right-click any sent photo thumbnail to remove that image from the album
 
 ## Why a regular browser session feels unstable
@@ -32,9 +32,9 @@ Literotica chat is built on **BOSH** (XMPP tunnelled over HTTP long-polling). Th
 Modern browsers actively work against that heartbeat:
 
 - **Desktop background-tab throttling.** When the chat tab isn't the one you're looking at, the browser throttles its timers and network activity to save power. Leave chat in a background tab (or another window) for a while and the BOSH heartbeat slows enough that the server times you out — so you come back to a dead, disconnected chat.
-- **Mobile is much worse.** Phone browsers — **Safari/WebKit on iOS especially** — aggressively suspend tabs to save battery the moment you switch apps or lock the screen. A suspended tab can't poll at all, so the BOSH connection drops almost immediately in the background. Even in the foreground, mobile power management causes frequent reconnects, which is why chat on a phone browser feels flaky and keeps logging you out.
+- **Mobile is much worse.** Phone browsers, **Safari/WebKit on iOS especially**, aggressively suspend tabs to save battery the moment you switch apps or lock the screen. A suspended tab can't poll at all, so the BOSH connection drops almost immediately in the background. Even in the foreground, mobile power management causes frequent reconnects, which is why chat on a phone browser feels flaky and keeps logging you out.
 
-These are deliberate browser power-saving features, not bugs in Literotica — but they make a long-lived chat connection hard to maintain from an ordinary tab.
+These are deliberate browser power-saving features, not bugs in Literotica but they make a long-lived chat connection hard to maintain from an ordinary tab.
 
 ## How this app helps
 
